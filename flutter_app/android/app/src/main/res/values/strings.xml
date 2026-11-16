@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Preston Guest Scout</string>
+    <string name="widget_title">Preston Scout • Last 10 Guests</string>
+    <string name="widget_empty_label">No guests input yet. Tap to add a guest.</string>
+    <string name="widget_description">Displays the names of the last 10 guests input and opens their prestonmotor.com vehicle matches.</string>
+</resources>

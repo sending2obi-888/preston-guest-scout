@@ -1,0 +1,13 @@
+{
+  "name": "preston-guest-scout-backend",
+  "version": "1.0.0",
+  "description": "Twice-daily (7:30 AM & 2:00 PM) Gemini Agent inventory search backend for prestonmotor.com",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

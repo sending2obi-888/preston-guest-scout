@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Preston Guest Scout • Googlebook Launcher Widget",
+  "version": "1.0.0",
+  "description": "Boots Preston Guest Scout at Googlebook startup and provides a Material 3 Launcher Widget showing the last 10 guests input.",
+  "permissions": ["tabs", "storage", "alarms"],
+  "host_permissions": ["http://localhost:8080/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Preston Scout • Last 10 Guests",
+    "default_popup": "popup.html"
+  }
+}

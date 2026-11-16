@@ -1,0 +1,15 @@
+# Build artifacts & dependencies
+node_modules/
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+*.apk
+
+# Flutter / Gradle build caches
+flutter_app/build/
+flutter_app/.dart_tool/
+flutter_app/.flutter-plugins
+flutter_app/.flutter-plugins-dependencies
+flutter_app/android/.gradle/
+flutter_app/android/local.properties
+.DS_Store
