@@ -1,0 +1,40 @@
+name: Attach Release APK
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach preston-guest-scout.apk to (defaults to latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  attach-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Attach APK to GitHub Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f releases/preston-guest-scout.apk ]; then
+            echo "No releases/preston-guest-scout.apk found; skipping."
+            exit 0
+          fi
+          TARGET_TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG=$(gh release view --json tagName --jq .tagName 2>/dev/null || true)
+          fi
+          if [ -n "$TARGET_TAG" ]; then
+            echo "Uploading releases/preston-guest-scout.apk to release $TARGET_TAG..."
+            gh release upload "$TARGET_TAG" releases/preston-guest-scout.apk --clobber
+          fi
