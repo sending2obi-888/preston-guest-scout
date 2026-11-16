@@ -4,6 +4,7 @@ backend/data/*.db
 backend/data/*.db-shm
 backend/data/*.db-wal
 *.apk
+!releases/*.apk
 
 # Flutter / Gradle build caches
 flutter_app/build/
