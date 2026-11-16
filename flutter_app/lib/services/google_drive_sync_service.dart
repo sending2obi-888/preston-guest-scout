@@ -18,11 +18,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
       MethodChannel('com.prestonmotor.scout/google_auth');
 
   static const String driveSyncFileName = 'preston_guest_scout_cloud_sync.json';
-  static const String defaultDriveScope = 'https://www.googleapis.com/auth/drive';
+  static const String defaultDriveScope =
+      'https://www.googleapis.com/auth/drive.file';
 
   bool _initialized = false;
   bool _isSigningIn = false;
   bool _isSyncing = false;
+  bool _deviceFlowCanceled = false;
 
   bool _isSignedIn = false;
   String _userEmail = '';
@@ -31,12 +33,19 @@ class GoogleDriveSyncService extends ChangeNotifier {
   String _accessToken = '';
   String _refreshToken = '';
   int _expiresAtMs = 0;
-  String _authMethod = ''; // native_google_sso | oauth_pkce | web_gis_sso | connected_drive
+  String _authMethod =
+      ''; // native_google_sso | oauth_pkce | web_gis_sso | connected_drive | server_drive_relay
 
   bool _connectedDriveAvailable = false;
   String _driveFileId = '';
   String _customOAuthClientId = '';
   String _customOAuthClientSecret = '';
+  String _syncServerUrl = '';
+  String _pendingSelectedEmail = '';
+  bool _needsOAuthSetup = false;
+  String _deviceUserCode = '';
+  String _deviceVerificationUrl = '';
+
   String _signingPackageName = 'com.prestonmotor.preston_guest_scout';
   String _signingSha1 =
       'D3:F4:84:4D:1F:42:5F:3A:89:F7:DE:13:A3:31:89:05:00:93:BC:8C';
@@ -61,6 +70,11 @@ class GoogleDriveSyncService extends ChangeNotifier {
   String get driveFileId => _driveFileId;
   String get customOAuthClientId => _customOAuthClientId;
   String get customOAuthClientSecret => _customOAuthClientSecret;
+  String get syncServerUrl => _syncServerUrl;
+  String get pendingSelectedEmail => _pendingSelectedEmail;
+  bool get needsOAuthSetup => _needsOAuthSetup;
+  String get deviceUserCode => _deviceUserCode;
+  String get deviceVerificationUrl => _deviceVerificationUrl;
   String get signingPackageName => _signingPackageName;
   String get signingSha1 => _signingSha1;
   DateTime? get lastQueriedAt => _lastQueriedAt;
@@ -79,6 +93,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
         cb();
       } catch (_) {}
     }
+  }
+
+  void cancelActiveSignIn() {
+    _deviceFlowCanceled = true;
+    _deviceUserCode = '';
+    _deviceVerificationUrl = '';
+    notifyListeners();
   }
 
   Future<void> initialize() async {
@@ -106,8 +127,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
       if (info != null) {
         final pkg = info['packageName']?.toString() ?? '';
         final sha = info['sha1']?.toString() ?? '';
+        final savedEmail = info['savedEmail']?.toString() ?? '';
         if (pkg.isNotEmpty) _signingPackageName = pkg;
         if (sha.isNotEmpty) _signingSha1 = sha;
+        if (savedEmail.isNotEmpty) _pendingSelectedEmail = savedEmail;
       }
     } catch (_) {}
 
@@ -115,6 +138,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     _customOAuthClientId = localCfg['googleOAuthClientId']?.toString() ?? '';
     _customOAuthClientSecret =
         localCfg['googleOAuthClientSecret']?.toString() ?? '';
+    _syncServerUrl = localCfg['syncServerUrl']?.toString() ?? '';
     _driveFileId = localCfg['driveSyncFileId']?.toString() ?? '';
 
     final savedSession = localCfg['session'];
@@ -172,6 +196,10 @@ class GoogleDriveSyncService extends ChangeNotifier {
     }
     _expiresAtMs = (map['expiresAtMs'] as num?)?.toInt() ?? 0;
     _authMethod = map['authMethod']?.toString() ?? 'native_google_sso';
+    if (_isSignedIn) {
+      _needsOAuthSetup = false;
+      _lastError = null;
+    }
     ApiService.setAuthBearerToken(_accessToken);
     notifyListeners();
   }
@@ -179,9 +207,13 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Future<void> saveOAuthClientConfig({
     required String clientId,
     String clientSecret = '',
+    String? syncServerUrl,
   }) async {
     _customOAuthClientId = clientId.trim();
     _customOAuthClientSecret = clientSecret.trim();
+    if (syncServerUrl != null) {
+      _syncServerUrl = _normalizeServerUrl(syncServerUrl);
+    }
     if (kIsWeb) {
       await ApiService.updateSettings(
         googleOAuthClientId: _customOAuthClientId,
@@ -190,24 +222,79 @@ class GoogleDriveSyncService extends ChangeNotifier {
       await LocalScoutEngine.saveLocalAuthConfig(
         googleOAuthClientId: _customOAuthClientId,
         googleOAuthClientSecret: _customOAuthClientSecret,
+        syncServerUrl: _syncServerUrl,
       );
     }
     notifyListeners();
   }
 
-  /// Launches interactive Google Single Sign-On (Native OS Google Sign-In on Android/Googlebook,
-  /// OAuth 2.0 PKCE Browser Loopback fallback, or Google Identity Services on Web).
-  Future<bool> signInWithGoogle({bool preferBrowserPkce = false}) async {
+  String _normalizeServerUrl(String raw) {
+    var trimmed = raw.trim();
+    while (trimmed.endsWith('/')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    return trimmed;
+  }
+
+  Future<bool> _trySignInViaSyncServer(String serverBaseUrl, String emailHint) async {
+    final cleanBase = _normalizeServerUrl(serverBaseUrl);
+    if (cleanBase.isEmpty) return false;
+    try {
+      final res = await http
+          .get(Uri.parse('$cleanBase/api/drive-sync/status'))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        if (data['connectedDriveAvailable'] == true) {
+          final email = emailHint.isNotEmpty
+              ? emailHint
+              : (data['connectedAccountEmail']?.toString() ?? 'Google Account');
+          final name = data['connectedAccountName']?.toString() ?? email;
+          final fid = data['fileId']?.toString() ?? '';
+          if (fid.isNotEmpty) _driveFileId = fid;
+          _syncServerUrl = cleanBase;
+          _applySessionMap({
+            'signedIn': true,
+            'email': email,
+            'displayName': name,
+            'photoUrl': data['connectedAccountPhotoUrl']?.toString() ?? '',
+            'accessToken': '',
+            'authMethod': 'server_drive_relay',
+          });
+          await LocalScoutEngine.saveLocalAuthConfig(syncServerUrl: _syncServerUrl);
+          await _persistNativeSession();
+          await queryAndSyncDrive(pushAfterMerge: true);
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /// Launches interactive Google Single Sign-On:
+  /// - Android / Googlebook: Opens native OS Google Account Picker (`AccountManager`),
+  ///   mints Google Drive token via `GoogleAuthUtil`, and if `(packageName, SHA-1)` is
+  ///   not yet registered in Google Cloud Console, automatically chains into Googlebook-safe
+  ///   OAuth 2.0 Device Flow / Loopback PKCE (or Sync Server relay) without falsely reporting cancellation.
+  /// - Web: Uses Google Identity Services popup or connected workspace Google Drive.
+  Future<bool> signInWithGoogle({
+    bool preferBrowserPkce = false,
+    bool preferDeviceFlow = false,
+    bool useConnectedWebDrive = false,
+  }) async {
     await initialize();
     if (_isSigningIn) return false;
 
     _isSigningIn = true;
+    _deviceFlowCanceled = false;
+    _deviceUserCode = '';
+    _deviceVerificationUrl = '';
     _lastError = null;
     notifyListeners();
 
     try {
       if (kIsWeb) {
-        if (_customOAuthClientId.trim().isNotEmpty) {
+        if (!useConnectedWebDrive && _customOAuthClientId.trim().isNotEmpty) {
           final webRes = await signInWithGoogleWebGis(
             clientId: _customOAuthClientId.trim(),
             driveScope: defaultDriveScope,
@@ -217,8 +304,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
             await queryAndSyncDrive(pushAfterMerge: true);
             return true;
           }
-          _lastError =
-              webRes['error']?.toString() ?? 'Google Sign-In was canceled.';
+          _lastError = webRes['error']?.toString() ??
+              'Google Sign-In popup closed before completing.';
           return false;
         }
 
@@ -226,54 +313,134 @@ class GoogleDriveSyncService extends ChangeNotifier {
         if (_connectedDriveAvailable) {
           _isSignedIn = true;
           _authMethod = 'connected_drive';
+          _needsOAuthSetup = false;
           await queryAndSyncDrive(pushAfterMerge: true);
           return true;
         }
 
+        _needsOAuthSetup = true;
         _lastError =
-            'Enter a Web Google OAuth Client ID below to sign in with Google in this browser.';
+            'Enter a Web Google OAuth Client ID below to launch Google SSO in this browser.';
         return false;
       }
 
-      // Native Android / Googlebook SSO
-      if (!preferBrowserPkce) {
+      // 1. Native Android / Googlebook OS Account Picker + GoogleAuthUtil
+      if (!preferBrowserPkce && !preferDeviceFlow) {
         try {
           final nativeRes = await _authChannel
               .invokeMapMethod<String, dynamic>('signInWithGoogle', {
             'driveScope': defaultDriveScope,
-            'webClientId': _customOAuthClientId.trim().isNotEmpty &&
-                    _customOAuthClientId.contains('.apps.googleusercontent.com')
-                ? _customOAuthClientId.trim()
-                : null,
           });
-          if (nativeRes != null && nativeRes['signedIn'] == true) {
-            _applySessionMap(nativeRes);
-            await _persistNativeSession();
-            await queryAndSyncDrive(pushAfterMerge: true);
-            return true;
+
+          if (nativeRes != null) {
+            if (nativeRes['signedIn'] == true) {
+              _applySessionMap(nativeRes);
+              await _persistNativeSession();
+              await queryAndSyncDrive(pushAfterMerge: true);
+              return true;
+            }
+
+            final pkg = nativeRes['packageName']?.toString() ?? '';
+            final sha = nativeRes['sha1']?.toString() ?? '';
+            final selEmail = nativeRes['selectedEmail']?.toString() ?? '';
+            if (pkg.isNotEmpty) _signingPackageName = pkg;
+            if (sha.isNotEmpty) _signingSha1 = sha;
+            if (selEmail.isNotEmpty) _pendingSelectedEmail = selEmail;
+
+            if (nativeRes['needsOAuthClientSetup'] == true) {
+              // Automatically try Sync Server Relay if configured
+              if (_syncServerUrl.trim().isNotEmpty) {
+                final relayed = await _trySignInViaSyncServer(
+                  _syncServerUrl,
+                  _pendingSelectedEmail,
+                );
+                if (relayed) return true;
+              }
+
+              // If user has NOT entered a custom OAuth Client ID yet, expand the 1-time setup guide
+              // instead of showing a misleading "Google Sign-In was canceled" error!
+              if (_customOAuthClientId.trim().isEmpty) {
+                _needsOAuthSetup = true;
+                final acctText = _pendingSelectedEmail.isNotEmpty
+                    ? 'Google account $_pendingSelectedEmail selected! '
+                    : '';
+                _lastError =
+                    '${acctText}One-time Google Cloud OAuth setup needed to unlock Google Drive storage for this APK: '
+                    'follow Step 1 & Step 2 below (copy Package Name & SHA-1 into an Android OAuth Client, or paste a TV/Desktop OAuth Client ID).';
+                return false;
+              }
+              // Otherwise fall straight through to OAuth Device Flow / PKCE below!
+            }
           }
         } on PlatformException catch (pe) {
-          if (pe.code == 'SIGN_IN_SHA1_NOT_REGISTERED' &&
-              _customOAuthClientId.trim().isNotEmpty) {
-            // Automatically fall through to OAuth 2.0 Loopback PKCE if a Client ID is configured!
-          } else {
+          if (pe.code == 'SIGN_IN_CANCELED') {
+            _lastError =
+                pe.message ?? 'Account selection was closed before choosing an account.';
+            return false;
+          }
+          if (_customOAuthClientId.trim().isEmpty) {
+            _needsOAuthSetup = true;
             _lastError = pe.message ?? 'Google Sign-In failed (${pe.code}).';
             return false;
           }
         }
       }
 
-      // Browser Loopback PKCE Sign-In (works with any Desktop / Installed Google OAuth Client ID)
+      // 2. If Sync Server URL is set and no OAuth Client ID is entered, connect via Sync Server
+      if (_customOAuthClientId.trim().isEmpty &&
+          _syncServerUrl.trim().isNotEmpty) {
+        final relayed = await _trySignInViaSyncServer(
+          _syncServerUrl,
+          _pendingSelectedEmail,
+        );
+        if (relayed) return true;
+      }
+
+      // 3. OAuth 2.0 Client ID Flow (Googlebook-safe Device Code Flow -> Loopback PKCE fallback)
       if (_customOAuthClientId.trim().isEmpty) {
+        _needsOAuthSetup = true;
         _lastError =
-            'To use Browser PKCE Sign-In, paste a Desktop OAuth Client ID below, or register the Android package & SHA-1 shown below for 1-tap OS Sign-In.';
+            'Paste a TV/Device or Desktop Google OAuth Client ID (.apps.googleusercontent.com) below, or register the Android Package Name & SHA-1 shown below for 1-tap OS Sign-In.';
         return false;
+      }
+
+      if (!preferBrowserPkce) {
+        final deviceRes = await signInWithGoogleDeviceFlow(
+          clientId: _customOAuthClientId.trim(),
+          clientSecret: _customOAuthClientSecret.trim(),
+          driveScope: defaultDriveScope,
+          onCodeIssued: (code, url) {
+            _deviceUserCode = code;
+            _deviceVerificationUrl = url;
+            notifyListeners();
+          },
+          isCanceled: () => _deviceFlowCanceled,
+        );
+
+        _deviceUserCode = '';
+        _deviceVerificationUrl = '';
+        notifyListeners();
+
+        if (deviceRes['signedIn'] == true) {
+          _applySessionMap(deviceRes);
+          await _persistNativeSession();
+          await queryAndSyncDrive(pushAfterMerge: true);
+          return true;
+        }
+
+        // If clientId is a Desktop client (unsupportedClient == true), fall through automatically to Loopback PKCE!
+        if (deviceRes['unsupportedClient'] != true || preferDeviceFlow) {
+          _lastError =
+              deviceRes['error']?.toString() ?? 'Google Device Sign-In failed.';
+          return false;
+        }
       }
 
       final pkceRes = await signInWithBrowserLoopbackPkce(
         clientId: _customOAuthClientId.trim(),
         clientSecret: _customOAuthClientSecret.trim(),
         driveScope: defaultDriveScope,
+        loginHint: _pendingSelectedEmail,
       );
       if (pkceRes['signedIn'] == true) {
         _applySessionMap(pkceRes);
@@ -286,12 +453,15 @@ class GoogleDriveSyncService extends ChangeNotifier {
       return false;
     } finally {
       _isSigningIn = false;
+      _deviceUserCode = '';
+      _deviceVerificationUrl = '';
       notifyListeners();
     }
   }
 
   Future<void> signOut() async {
     _autoSaveDebounce?.cancel();
+    _deviceFlowCanceled = true;
     if (kIsWeb) {
       clearSavedGoogleWebSession();
     } else {
@@ -309,6 +479,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
     _refreshToken = '';
     _expiresAtMs = 0;
     _authMethod = '';
+    _deviceUserCode = '';
+    _deviceVerificationUrl = '';
     _lastError = null;
     ApiService.setAuthBearerToken('');
     notifyListeners();
@@ -318,6 +490,7 @@ class GoogleDriveSyncService extends ChangeNotifier {
     if (kIsWeb) return;
     await LocalScoutEngine.saveLocalAuthConfig(
       driveSyncFileId: _driveFileId,
+      syncServerUrl: _syncServerUrl,
       session: <String, dynamic>{
         'signedIn': _isSignedIn,
         'email': _userEmail,
@@ -334,7 +507,11 @@ class GoogleDriveSyncService extends ChangeNotifier {
   Future<bool> _restoreOrRefreshNativeSession({String? invalidateToken}) async {
     if (kIsWeb) return _isSignedIn;
 
-    // 1. If signed in via OAuth PKCE with a refresh token, refresh silently if needed
+    if (_authMethod == 'server_drive_relay' && _syncServerUrl.isNotEmpty) {
+      return _isSignedIn;
+    }
+
+    // 1. If signed in via OAuth PKCE / Device Flow with a refresh token, refresh silently if needed
     if (_authMethod == 'oauth_pkce' && _refreshToken.isNotEmpty) {
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (invalidateToken == null &&
@@ -426,6 +603,16 @@ class GoogleDriveSyncService extends ChangeNotifier {
         return ok;
       }
 
+      if (_isSignedIn &&
+          _authMethod == 'server_drive_relay' &&
+          _syncServerUrl.trim().isNotEmpty) {
+        final ok = await _syncNativeViaRelayServer(
+          pushAfterMerge: pushAfterMerge,
+        );
+        completer.complete(ok);
+        return ok;
+      }
+
       if (!_isSignedIn || _accessToken.isEmpty) {
         final restored = await _restoreOrRefreshNativeSession();
         if (!restored || _accessToken.isEmpty) {
@@ -447,6 +634,58 @@ class GoogleDriveSyncService extends ChangeNotifier {
       return false;
     } finally {
       _syncInFlight = null;
+    }
+  }
+
+  Future<bool> _syncNativeViaRelayServer({required bool pushAfterMerge}) async {
+    _isSyncing = true;
+    _lastError = null;
+    notifyListeners();
+
+    try {
+      final localSnap = await LocalScoutEngine.exportCloudSnapshot(
+        deviceLabel: 'Preston Guest Scout Android/Googlebook',
+      );
+      final res = await http
+          .post(
+            Uri.parse('${_normalizeServerUrl(_syncServerUrl)}/api/drive-sync/sync'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'clientSnapshot': localSnap,
+              'includeSnapshot': true,
+              'pushAfterMerge': pushAfterMerge,
+              'deviceLabel': 'Preston Guest Scout Android/Googlebook',
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        if (data['ok'] == true) {
+          if (data['snapshot'] is Map) {
+            await LocalScoutEngine.mergeCloudSnapshot(
+              Map<String, dynamic>.from(data['snapshot'] as Map),
+            );
+          }
+          _lastQueriedAt = DateTime.now();
+          if (pushAfterMerge) _lastSavedAt = _lastQueriedAt;
+          final fid = data['fileId']?.toString() ?? '';
+          if (fid.isNotEmpty) _driveFileId = fid;
+          _notifyCloudMerged();
+          return true;
+        } else if (data['error'] != null) {
+          _lastError = data['error'].toString();
+        }
+      } else {
+        _lastError = 'Sync server returned HTTP ${res.statusCode}.';
+      }
+      return false;
+    } catch (e) {
+      _lastError = 'Could not reach Sync Server ($_syncServerUrl): $e';
+      return false;
+    } finally {
+      _isSyncing = false;
+      notifyListeners();
     }
   }
 
@@ -561,7 +800,8 @@ class GoogleDriveSyncService extends ChangeNotifier {
           );
         }
       }
-      _lastError = 'Google Drive session expired. Tap Sign in with Google to reconnect.';
+      _lastError =
+          'Google Drive session expired. Tap Sign in with Google to reconnect.';
       return false;
     } catch (e) {
       _lastError = e.toString();

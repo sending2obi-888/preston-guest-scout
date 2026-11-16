@@ -1,7 +1,9 @@
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:preston_guest_scout/models/models.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
+import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
 
 void main() {
@@ -350,6 +352,56 @@ void main() {
       Map<String, dynamic>.from((merged['guests'] as List).first as Map),
     );
     expect(syncedGuest.effectiveTargets.length, 2);
+  });
+
+  testWidgets(
+      'GoogleDriveSyncService handles unregistered Android OAuth without falsely reporting Google Sign-In was canceled',
+      (WidgetTester tester) async {
+    const authChannel = MethodChannel('com.prestonmotor.scout/google_auth');
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return '{}';
+        return true;
+      },
+    );
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      authChannel,
+      (call) async {
+        if (call.method == 'getSigningInfo') {
+          return <String, dynamic>{
+            'packageName': 'com.prestonmotor.preston_guest_scout',
+            'sha1': 'D3:F4:84:4D:1F:42:5F:3A:89:F7:DE:13:A3:31:89:05:00:93:BC:8C',
+            'savedEmail': '',
+          };
+        }
+        if (call.method == 'silentSignIn') {
+          return <String, dynamic>{'signedIn': false};
+        }
+        if (call.method == 'signInWithGoogle') {
+          return <String, dynamic>{
+            'signedIn': false,
+            'needsOAuthClientSetup': true,
+            'selectedEmail': 'sales@prestonmotor.com',
+            'packageName': 'com.prestonmotor.preston_guest_scout',
+            'sha1': 'D3:F4:84:4D:1F:42:5F:3A:89:F7:DE:13:A3:31:89:05:00:93:BC:8C',
+          };
+        }
+        return null;
+      },
+    );
+
+    final svc = GoogleDriveSyncService.instance;
+    final ok = await svc.signInWithGoogle();
+    expect(ok, isFalse);
+    expect(svc.pendingSelectedEmail, 'sales@prestonmotor.com');
+    expect(svc.needsOAuthSetup, isTrue);
+    expect(svc.lastError ?? '', isNot(contains('Google Sign-In was canceled')));
+    expect(svc.lastError ?? '', contains('sales@prestonmotor.com'));
+    LocalScoutEngine.cancelSchedulerForTest();
   });
 }
 

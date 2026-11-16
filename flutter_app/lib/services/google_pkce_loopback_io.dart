@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -100,10 +101,170 @@ String _randomUrlSafe(int length) {
   return List.generate(length, (_) => chars[rng.nextInt(chars.length)]).join();
 }
 
+Future<Map<String, String>> _fetchUserProfile(String accessToken) async {
+  String email = '';
+  String displayName = 'Google Account';
+  String photoUrl = '';
+  try {
+    final uRes = await http
+        .get(
+          Uri.parse('https://www.googleapis.com/oauth2/v3/userinfo'),
+          headers: {'Authorization': 'Bearer $accessToken'},
+        )
+        .timeout(const Duration(seconds: 12));
+    if (uRes.statusCode == 200) {
+      final info = jsonDecode(uRes.body) as Map<String, dynamic>;
+      email = info['email']?.toString() ?? '';
+      displayName =
+          info['name']?.toString() ?? (email.isNotEmpty ? email : 'Google Account');
+      photoUrl = info['picture']?.toString() ?? '';
+    }
+  } catch (_) {}
+  return {
+    'email': email,
+    'displayName': displayName,
+    'photoUrl': photoUrl,
+  };
+}
+
+/// Googlebook-safe OAuth 2.0 Device Authorization Flow (RFC 8628).
+/// Works seamlessly inside ChromeOS ARCVM containers as well as Android phones & tablets
+/// without needing localhost loopback port forwarding or SHA-1 registration.
+Future<Map<String, dynamic>> signInWithGoogleDeviceFlow({
+  required String clientId,
+  String clientSecret = '',
+  required String driveScope,
+  required void Function(String userCode, String verificationUrl) onCodeIssued,
+  required bool Function() isCanceled,
+}) async {
+  try {
+    final codeRes = await http
+        .post(
+          Uri.parse('https://oauth2.googleapis.com/device/code'),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: {
+            'client_id': clientId.trim(),
+            'scope': '$driveScope email profile',
+          },
+        )
+        .timeout(const Duration(seconds: 15));
+
+    final codeJson = jsonDecode(codeRes.body) as Map<String, dynamic>;
+    if (codeRes.statusCode != 200 ||
+        (codeJson['device_code']?.toString() ?? '').isEmpty) {
+      return <String, dynamic>{
+        'signedIn': false,
+        'unsupportedClient': true,
+        'error': codeJson['error_description']?.toString() ??
+            codeJson['error']?.toString() ??
+            'Client ID is not a TV/Device OAuth client (${codeRes.statusCode}).',
+      };
+    }
+
+    final deviceCode = codeJson['device_code'].toString();
+    final userCode = codeJson['user_code']?.toString() ?? '';
+    final verificationUrl = codeJson['verification_url']?.toString() ??
+        codeJson['verification_uri']?.toString() ??
+        'https://www.google.com/device';
+    final expiresInSec = (codeJson['expires_in'] as num?)?.toInt() ?? 900;
+    var intervalSec = (codeJson['interval'] as num?)?.toInt() ?? 5;
+    if (intervalSec < 3) intervalSec = 5;
+
+    try {
+      await Clipboard.setData(ClipboardData(text: userCode));
+    } catch (_) {}
+    onCodeIssued(userCode, verificationUrl);
+
+    try {
+      await launchUrl(
+        Uri.parse(verificationUrl),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {}
+
+    final deadline = DateTime.now().add(Duration(seconds: expiresInSec));
+    while (DateTime.now().isBefore(deadline)) {
+      if (isCanceled()) {
+        return <String, dynamic>{
+          'signedIn': false,
+          'error': 'Google verification code sign-in was canceled.',
+        };
+      }
+      await Future<void>.delayed(Duration(seconds: intervalSec));
+      if (isCanceled()) {
+        return <String, dynamic>{
+          'signedIn': false,
+          'error': 'Google verification code sign-in was canceled.',
+        };
+      }
+
+      final pollBody = <String, String>{
+        'client_id': clientId.trim(),
+        'device_code': deviceCode,
+        'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+      };
+      if (clientSecret.trim().isNotEmpty) {
+        pollBody['client_secret'] = clientSecret.trim();
+      }
+
+      final tokenRes = await http
+          .post(
+            Uri.parse('https://oauth2.googleapis.com/token'),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: pollBody,
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final tokenJson = jsonDecode(tokenRes.body) as Map<String, dynamic>;
+      final accessToken = tokenJson['access_token']?.toString() ?? '';
+      if (tokenRes.statusCode == 200 && accessToken.isNotEmpty) {
+        final profile = await _fetchUserProfile(accessToken);
+        final exp = (tokenJson['expires_in'] as num?)?.toInt() ?? 3500;
+        return <String, dynamic>{
+          'signedIn': true,
+          'email': profile['email'] ?? '',
+          'displayName': profile['displayName'] ?? 'Google Account',
+          'photoUrl': profile['photoUrl'] ?? '',
+          'accessToken': accessToken,
+          'refreshToken': tokenJson['refresh_token']?.toString() ?? '',
+          'expiresAtMs': DateTime.now().millisecondsSinceEpoch + exp * 1000,
+          'authMethod': 'oauth_pkce',
+        };
+      }
+
+      final errCode = tokenJson['error']?.toString() ?? '';
+      if (errCode == 'authorization_pending') {
+        continue;
+      } else if (errCode == 'slow_down') {
+        intervalSec += 5;
+        continue;
+      } else {
+        return <String, dynamic>{
+          'signedIn': false,
+          'error': tokenJson['error_description']?.toString() ??
+              'Google OAuth error: $errCode',
+        };
+      }
+    }
+
+    return <String, dynamic>{
+      'signedIn': false,
+      'error': 'Verification code expired before completion. Please try again.',
+    };
+  } catch (e) {
+    return <String, dynamic>{
+      'signedIn': false,
+      'unsupportedClient': true,
+      'error': e.toString(),
+    };
+  }
+}
+
 Future<Map<String, dynamic>> signInWithBrowserLoopbackPkce({
   required String clientId,
   String clientSecret = '',
   required String driveScope,
+  String? loginHint,
 }) async {
   HttpServer? server;
   try {
@@ -114,7 +275,7 @@ Future<Map<String, dynamic>> signInWithBrowserLoopbackPkce({
         .replaceAll('=', '');
     final state = _randomUrlSafe(24);
 
-    final authUri = Uri.https('accounts.google.com', '/o/oauth2/v2/auth', {
+    final queryParams = <String, String>{
       'client_id': clientId.trim(),
       'redirect_uri': redirectUri,
       'response_type': 'code',
@@ -124,9 +285,16 @@ Future<Map<String, dynamic>> signInWithBrowserLoopbackPkce({
       'access_type': 'offline',
       'prompt': 'consent select_account',
       'state': state,
-    });
+    };
+    if (loginHint != null && loginHint.trim().isNotEmpty) {
+      queryParams['login_hint'] = loginHint.trim();
+    }
 
-    final launched = await launchUrl(authUri, mode: LaunchMode.externalApplication);
+    final authUri =
+        Uri.https('accounts.google.com', '/o/oauth2/v2/auth', queryParams);
+
+    final launched =
+        await launchUrl(authUri, mode: LaunchMode.externalApplication);
     if (!launched) {
       return <String, dynamic>{
         'signedIn': false,
@@ -150,7 +318,7 @@ Future<Map<String, dynamic>> signInWithBrowserLoopbackPkce({
 h2{color:#0b57d0;margin-top:0}a.btn{display:inline-block;margin-top:16px;padding:12px 24px;background:#0b57d0;color:#fff;text-decoration:none;border-radius:999px;font-weight:600}</style>
 <script>setTimeout(function(){window.location.href="prestonscout://oauth2redirect?done=1";},400);</script>
 </head><body><div class="card">
-<h2>${code.isNotEmpty ? 'Google Sign-In Complete' : 'Google Sign-In Canceled'}</h2>
+<h2>${code.isNotEmpty ? 'Google Sign-In Complete' : 'Google Sign-In Closed'}</h2>
 <p>${code.isNotEmpty ? 'Your Google Drive multi-device sync is now active. Returning to Preston Motor Guest Scout...' : 'You may return to Preston Motor Guest Scout.'}</p>
 <a class="btn" href="prestonscout://oauth2redirect?done=1">Return to App</a>
 </div></body></html>''');
@@ -159,7 +327,9 @@ h2{color:#0b57d0;margin-top:0}a.btn{display:inline-block;margin-top:16px;padding
     if (err.isNotEmpty || code.isEmpty) {
       return <String, dynamic>{
         'signedIn': false,
-        'error': err.isNotEmpty ? 'Google OAuth error: $err' : 'Authorization canceled.',
+        'error': err.isNotEmpty
+            ? 'Google OAuth error: $err'
+            : 'Browser authorization closed before completing.',
       };
     }
     if (returnedState != state) {
@@ -199,31 +369,13 @@ h2{color:#0b57d0;margin-top:0}a.btn{display:inline-block;margin-top:16px;padding
       };
     }
 
-    String email = '';
-    String displayName = 'Google Account';
-    String photoUrl = '';
-    try {
-      final uRes = await http
-          .get(
-            Uri.parse('https://www.googleapis.com/oauth2/v3/userinfo'),
-            headers: {'Authorization': 'Bearer $accessToken'},
-          )
-          .timeout(const Duration(seconds: 12));
-      if (uRes.statusCode == 200) {
-        final info = jsonDecode(uRes.body) as Map<String, dynamic>;
-        email = info['email']?.toString() ?? '';
-        displayName =
-            info['name']?.toString() ?? (email.isNotEmpty ? email : 'Google Account');
-        photoUrl = info['picture']?.toString() ?? '';
-      }
-    } catch (_) {}
-
+    final profile = await _fetchUserProfile(accessToken);
     final expiresIn = (tokenJson['expires_in'] as num?)?.toInt() ?? 3500;
     return <String, dynamic>{
       'signedIn': true,
-      'email': email,
-      'displayName': displayName,
-      'photoUrl': photoUrl,
+      'email': profile['email'] ?? '',
+      'displayName': profile['displayName'] ?? 'Google Account',
+      'photoUrl': profile['photoUrl'] ?? '',
       'accessToken': accessToken,
       'refreshToken': tokenJson['refresh_token']?.toString() ?? '',
       'expiresAtMs': DateTime.now().millisecondsSinceEpoch + expiresIn * 1000,
@@ -232,7 +384,8 @@ h2{color:#0b57d0;margin-top:0}a.btn{display:inline-block;margin-top:16px;padding
   } catch (e) {
     return <String, dynamic>{
       'signedIn': false,
-      'error': 'Google SSO timed out or failed: $e',
+      'error':
+          'Browser loopback sign-in timed out or could not reach local port (on Googlebook, use an Android SHA-1 client or TV/Device OAuth Client ID): $e',
     };
   } finally {
     try {

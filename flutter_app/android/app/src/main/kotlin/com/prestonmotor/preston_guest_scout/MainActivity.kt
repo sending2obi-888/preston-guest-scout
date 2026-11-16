@@ -3,8 +3,10 @@
 package com.prestonmotor.preston_guest_scout
 
 import android.accounts.Account
+import android.accounts.AccountManager
 import android.app.Activity
 import android.appwidget.AppWidgetManager
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -14,7 +16,6 @@ import android.os.Bundle
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInAccount
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
@@ -31,13 +32,15 @@ class MainActivity : FlutterActivity() {
         const val AUTH_CHANNEL = "com.prestonmotor.scout/google_auth"
         const val PREFS_NAME = "preston_scout_widget_prefs"
         const val KEY_RECENT_TEN_JSON = "recent_ten_guests_json"
+        const val KEY_SIGNED_IN_EMAIL = "google_sso_selected_email"
         const val EXTRA_GUEST_ID = "extra_guest_id"
         const val EXTRA_SCHEDULED_SLOT = "extra_scheduled_slot"
         const val STORE_FILENAME = "preston_scout_store.json"
 
         private const val REQ_GOOGLE_SIGN_IN = 9001
         private const val REQ_GOOGLE_CONSENT = 9002
-        private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+        private const val REQ_CHOOSE_GOOGLE_ACCOUNT = 9003
+        private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
     }
 
     private var methodChannel: MethodChannel? = null
@@ -48,7 +51,9 @@ class MainActivity : FlutterActivity() {
 
     private var pendingSignInResult: MethodChannel.Result? = null
     private var pendingDriveScope: String = DEFAULT_DRIVE_SCOPE
-    private var pendingConsentAccount: GoogleSignInAccount? = null
+    private var pendingConsentEmail: String? = null
+    private var pendingConsentDisplayName: String? = null
+    private var pendingConsentPhotoUrl: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,15 +112,27 @@ class MainActivity : FlutterActivity() {
         return null
     }
 
-    private fun buildGoogleSignInClient(driveScope: String, webClientId: String?): GoogleSignInClient {
+    private fun buildGoogleSignInClient(driveScope: String): GoogleSignInClient {
         val builder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
             .requestEmail()
             .requestProfile()
             .requestScopes(Scope(driveScope))
-        if (!webClientId.isNullOrBlank()) {
-            builder.requestIdToken(webClientId.trim())
-        }
         return GoogleSignIn.getClient(this, builder.build())
+    }
+
+    private fun saveSelectedEmail(email: String?) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (email.isNullOrBlank()) {
+            prefs.edit().remove(KEY_SIGNED_IN_EMAIL).apply()
+        } else {
+            prefs.edit().putString(KEY_SIGNED_IN_EMAIL, email.trim()).apply()
+        }
+    }
+
+    private fun readSavedSelectedEmail(): String? {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_SIGNED_IN_EMAIL, null)
+        return if (raw.isNullOrBlank()) null else raw.trim()
     }
 
     private fun computeSigningSha1(): String {
@@ -142,21 +159,51 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun fetchAccessTokenAsync(
-        account: GoogleSignInAccount,
+    private fun launchNativeAccountPicker(driveScope: String, callbackResult: MethodChannel.Result) {
+        pendingDriveScope = driveScope
+        pendingSignInResult = callbackResult
+        try {
+            val pickerIntent = AccountManager.newChooseAccountIntent(
+                null,
+                null,
+                arrayOf("com.google"),
+                null,
+                null,
+                null,
+                null
+            )
+            startActivityForResult(pickerIntent, REQ_CHOOSE_GOOGLE_ACCOUNT)
+        } catch (_: ActivityNotFoundException) {
+            val client = buildGoogleSignInClient(driveScope)
+            startActivityForResult(client.signInIntent, REQ_GOOGLE_SIGN_IN)
+        } catch (e: Exception) {
+            pendingSignInResult = null
+            callbackResult.error(
+                "ACCOUNT_PICKER_ERROR",
+                e.localizedMessage ?: "Unable to open Google account chooser.",
+                mapOf("packageName" to packageName, "sha1" to computeSigningSha1())
+            )
+        }
+    }
+
+    private fun fetchAccessTokenForEmailAsync(
+        email: String,
+        displayName: String?,
+        photoUrl: String?,
         driveScope: String,
         invalidateToken: String?,
         allowInteractiveConsent: Boolean,
         callbackResult: MethodChannel.Result
     ) {
-        val androidAccount: Account? = account.account ?: account.email?.let { Account(it, "com.google") }
-        if (androidAccount == null) {
+        val cleanEmail = email.trim()
+        if (cleanEmail.isEmpty()) {
             runOnUiThread {
                 callbackResult.error("NO_ACCOUNT", "Google account email unavailable.", null)
             }
             return
         }
 
+        val androidAccount = Account(cleanEmail, "com.google")
         Thread {
             try {
                 if (!invalidateToken.isNullOrBlank()) {
@@ -168,11 +215,13 @@ class MainActivity : FlutterActivity() {
                 val oauthScope =
                     "oauth2:$driveScope https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
                 val token = GoogleAuthUtil.getToken(applicationContext, androidAccount, oauthScope)
+                saveSelectedEmail(cleanEmail)
+                val resolvedName = if (!displayName.isNullOrBlank()) displayName else cleanEmail
                 val payload = hashMapOf<String, Any?>(
                     "signedIn" to true,
-                    "email" to (account.email ?: ""),
-                    "displayName" to (account.displayName ?: account.email ?: "Google Account"),
-                    "photoUrl" to (account.photoUrl?.toString() ?: ""),
+                    "email" to cleanEmail,
+                    "displayName" to resolvedName,
+                    "photoUrl" to (photoUrl ?: ""),
                     "accessToken" to token,
                     "authMethod" to "native_google_sso"
                 )
@@ -183,7 +232,9 @@ class MainActivity : FlutterActivity() {
                 val consentIntent = recoverable.intent
                 if (allowInteractiveConsent && consentIntent != null) {
                     runOnUiThread {
-                        pendingConsentAccount = account
+                        pendingConsentEmail = cleanEmail
+                        pendingConsentDisplayName = displayName
+                        pendingConsentPhotoUrl = photoUrl
                         pendingSignInResult = callbackResult
                         pendingDriveScope = driveScope
                         startActivityForResult(consentIntent, REQ_GOOGLE_CONSENT)
@@ -194,12 +245,19 @@ class MainActivity : FlutterActivity() {
                     }
                 }
             } catch (e: Exception) {
+                // Occurs when (packageName, SHA-1) has not been registered as an Android OAuth 2.0 Client yet.
+                // Return structured payload with selectedEmail so Flutter can chain straight into
+                // Device Code / PKCE / Server Sync or display the 1-time OAuth setup guide.
+                val payload = hashMapOf<String, Any?>(
+                    "signedIn" to false,
+                    "needsOAuthClientSetup" to true,
+                    "selectedEmail" to cleanEmail,
+                    "packageName" to packageName,
+                    "sha1" to computeSigningSha1(),
+                    "nativeAuthError" to (e.localizedMessage ?: e.javaClass.simpleName)
+                )
                 runOnUiThread {
-                    callbackResult.error(
-                        "TOKEN_ERROR",
-                        e.localizedMessage ?: "Failed to obtain Google Drive token",
-                        mapOf("packageName" to packageName, "sha1" to computeSigningSha1())
-                    )
+                    callbackResult.success(payload)
                 }
             }
         }.start()
@@ -208,6 +266,35 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
+        if (requestCode == REQ_CHOOSE_GOOGLE_ACCOUNT) {
+            val res = pendingSignInResult ?: return
+            pendingSignInResult = null
+
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val email = data.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)?.trim() ?: ""
+                if (email.isNotEmpty()) {
+                    saveSelectedEmail(email)
+                    fetchAccessTokenForEmailAsync(
+                        email = email,
+                        displayName = null,
+                        photoUrl = null,
+                        driveScope = pendingDriveScope,
+                        invalidateToken = null,
+                        allowInteractiveConsent = true,
+                        callbackResult = res
+                    )
+                    return
+                }
+            }
+
+            res.error(
+                "SIGN_IN_CANCELED",
+                "Account selection was closed before choosing a Google account.",
+                null
+            )
+            return
+        }
+
         if (requestCode == REQ_GOOGLE_SIGN_IN) {
             val res = pendingSignInResult ?: return
             pendingSignInResult = null
@@ -215,9 +302,13 @@ class MainActivity : FlutterActivity() {
             val task = GoogleSignIn.getSignedInAccountFromIntent(data)
             try {
                 val account = task.getResult(ApiException::class.java)
-                if (account != null) {
-                    fetchAccessTokenAsync(
-                        account = account,
+                val email = account?.email?.trim() ?: ""
+                if (email.isNotEmpty()) {
+                    saveSelectedEmail(email)
+                    fetchAccessTokenForEmailAsync(
+                        email = email,
+                        displayName = account?.displayName,
+                        photoUrl = account?.photoUrl?.toString(),
                         driveScope = pendingDriveScope,
                         invalidateToken = null,
                         allowInteractiveConsent = true,
@@ -228,13 +319,24 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (apiEx: ApiException) {
                 val code = apiEx.statusCode
-                if (code == 12501 || resultCode == Activity.RESULT_CANCELED) {
-                    res.error("SIGN_IN_CANCELED", "Google Sign-In was canceled.", null)
-                } else if (code == 10) {
+                // Always check developer/configuration status codes BEFORE RESULT_CANCELED,
+                // because Play Services sets resultCode=RESULT_CANCELED on statusCode=10!
+                if (code == 10 || code == 12500) {
+                    res.success(
+                        hashMapOf<String, Any?>(
+                            "signedIn" to false,
+                            "needsOAuthClientSetup" to true,
+                            "selectedEmail" to (readSavedSelectedEmail() ?: ""),
+                            "packageName" to packageName,
+                            "sha1" to computeSigningSha1(),
+                            "nativeAuthError" to "GoogleSignIn status $code"
+                        )
+                    )
+                } else if (code == 12501) {
                     res.error(
-                        "SIGN_IN_SHA1_NOT_REGISTERED",
-                        "Register Android OAuth Client in Google Cloud Console (Package: $packageName, SHA-1: ${computeSigningSha1()}) or enter an OAuth Client ID.",
-                        mapOf("packageName" to packageName, "sha1" to computeSigningSha1())
+                        "SIGN_IN_CANCELED",
+                        "Account selection was closed before choosing a Google account.",
+                        null
                     )
                 } else {
                     res.error(
@@ -249,13 +351,19 @@ class MainActivity : FlutterActivity() {
 
         if (requestCode == REQ_GOOGLE_CONSENT) {
             val res = pendingSignInResult ?: return
-            val account = pendingConsentAccount
+            val email = pendingConsentEmail
+            val displayName = pendingConsentDisplayName
+            val photoUrl = pendingConsentPhotoUrl
             pendingSignInResult = null
-            pendingConsentAccount = null
+            pendingConsentEmail = null
+            pendingConsentDisplayName = null
+            pendingConsentPhotoUrl = null
 
-            if (resultCode == Activity.RESULT_OK && account != null) {
-                fetchAccessTokenAsync(
-                    account = account,
+            if (resultCode == Activity.RESULT_OK && !email.isNullOrBlank()) {
+                fetchAccessTokenForEmailAsync(
+                    email = email,
+                    displayName = displayName,
+                    photoUrl = photoUrl,
                     driveScope = pendingDriveScope,
                     invalidateToken = null,
                     allowInteractiveConsent = false,
@@ -327,38 +435,42 @@ class MainActivity : FlutterActivity() {
                         hashMapOf(
                             "packageName" to packageName,
                             "sha1" to computeSigningSha1(),
-                            "pendingOAuthRedirect" to redirect
+                            "pendingOAuthRedirect" to redirect,
+                            "savedEmail" to readSavedSelectedEmail()
                         )
                     )
                 }
                 "signInWithGoogle" -> {
                     val driveScope = call.argument<String>("driveScope") ?: DEFAULT_DRIVE_SCOPE
-                    val webClientId = call.argument<String>("webClientId")
-                    pendingDriveScope = driveScope
-                    pendingSignInResult = result
-                    val client = buildGoogleSignInClient(driveScope, webClientId)
-                    startActivityForResult(client.signInIntent, REQ_GOOGLE_SIGN_IN)
+                    launchNativeAccountPicker(driveScope, result)
                 }
                 "silentSignIn" -> {
                     val driveScope = call.argument<String>("driveScope") ?: DEFAULT_DRIVE_SCOPE
-                    val webClientId = call.argument<String>("webClientId")
                     val invalidateToken = call.argument<String>("invalidateToken")
 
+                    val savedEmail = readSavedSelectedEmail()
                     val lastAccount = GoogleSignIn.getLastSignedInAccount(this)
-                    if (lastAccount != null) {
-                        fetchAccessTokenAsync(
-                            account = lastAccount,
+                    val targetEmail = savedEmail ?: lastAccount?.email?.trim()
+
+                    if (!targetEmail.isNullOrBlank()) {
+                        fetchAccessTokenForEmailAsync(
+                            email = targetEmail,
+                            displayName = lastAccount?.displayName,
+                            photoUrl = lastAccount?.photoUrl?.toString(),
                             driveScope = driveScope,
                             invalidateToken = invalidateToken,
                             allowInteractiveConsent = false,
                             callbackResult = result
                         )
                     } else {
-                        val client = buildGoogleSignInClient(driveScope, webClientId)
+                        val client = buildGoogleSignInClient(driveScope)
                         client.silentSignIn().addOnCompleteListener { task ->
-                            if (task.isSuccessful && task.result != null) {
-                                fetchAccessTokenAsync(
-                                    account = task.result!!,
+                            if (task.isSuccessful && task.result?.email != null) {
+                                val acct = task.result!!
+                                fetchAccessTokenForEmailAsync(
+                                    email = acct.email!!,
+                                    displayName = acct.displayName,
+                                    photoUrl = acct.photoUrl?.toString(),
                                     driveScope = driveScope,
                                     invalidateToken = invalidateToken,
                                     allowInteractiveConsent = false,
@@ -371,7 +483,8 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "signOut" -> {
-                    val client = buildGoogleSignInClient(DEFAULT_DRIVE_SCOPE, null)
+                    saveSelectedEmail(null)
+                    val client = buildGoogleSignInClient(DEFAULT_DRIVE_SCOPE)
                     client.signOut().addOnCompleteListener {
                         result.success(true)
                     }

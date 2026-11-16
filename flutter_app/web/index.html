@@ -50,7 +50,7 @@
             return;
           }
 
-          const scope = (driveScope || 'https://www.googleapis.com/auth/drive') +
+          const scope = (driveScope || 'https://www.googleapis.com/auth/drive.file') +
             ' openid email profile';
 
           try {
@@ -61,7 +61,7 @@
                 if (!resp || resp.error || !resp.access_token) {
                   resolve(JSON.stringify({
                     signedIn: false,
-                    error: (resp && (resp.error_description || resp.error)) || 'Google Sign-In canceled.'
+                    error: (resp && (resp.error_description || resp.error)) || 'Google authorization was closed before completing.'
                   }));
                   return;
                 }
@@ -96,9 +96,16 @@
                 resolve(JSON.stringify(sessionPayload));
               },
               error_callback: function (err) {
+                const errType = (err && err.type) ? String(err.type) : '';
+                let friendly = (err && err.message) ? String(err.message) : '';
+                if (errType === 'popup_failed_to_open') {
+                  friendly = 'Browser blocked the Google Sign-In popup. Allow popups for this site and try again.';
+                } else if (errType === 'popup_closed') {
+                  friendly = 'Google Sign-In popup was closed (or this page origin is not listed under Authorized JavaScript origins for your Web OAuth Client ID).';
+                }
                 resolve(JSON.stringify({
                   signedIn: false,
-                  error: (err && err.message) || 'Google Sign-In popup closed.'
+                  error: friendly || 'Google Sign-In popup closed.'
                 }));
               }
             });

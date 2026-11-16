@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/google_drive_sync_service.dart';
 
 class GoogleAccountSyncDialog extends StatefulWidget {
@@ -21,6 +22,7 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
   final GoogleDriveSyncService _sync = GoogleDriveSyncService.instance;
   late final TextEditingController _clientIdCtrl;
   late final TextEditingController _clientSecretCtrl;
+  late final TextEditingController _syncServerCtrl;
   bool _savingConfig = false;
 
   @override
@@ -29,12 +31,14 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
     _clientIdCtrl = TextEditingController(text: _sync.customOAuthClientId);
     _clientSecretCtrl =
         TextEditingController(text: _sync.customOAuthClientSecret);
+    _syncServerCtrl = TextEditingController(text: _sync.syncServerUrl);
   }
 
   @override
   void dispose() {
     _clientIdCtrl.dispose();
     _clientSecretCtrl.dispose();
+    _syncServerCtrl.dispose();
     super.dispose();
   }
 
@@ -48,25 +52,41 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
       case 'native_google_sso':
         return 'Android / Googlebook OS SSO';
       case 'oauth_pkce':
-        return 'Google OAuth 2.0 PKCE SSO';
+        return 'Google OAuth 2.0 SSO';
       case 'web_gis_sso':
         return 'Google Identity Services SSO';
       case 'connected_drive':
         return 'Connected Google Drive Account';
+      case 'server_drive_relay':
+        return 'Connected Sync Server Drive';
       default:
         return 'Google Single Sign-On';
     }
   }
 
-  Future<void> _handleSignIn({bool preferPkce = false}) async {
+  Future<void> _syncInputsBeforeAuth() async {
     if (_clientIdCtrl.text.trim() != _sync.customOAuthClientId ||
-        _clientSecretCtrl.text.trim() != _sync.customOAuthClientSecret) {
+        _clientSecretCtrl.text.trim() != _sync.customOAuthClientSecret ||
+        _syncServerCtrl.text.trim() != _sync.syncServerUrl) {
       await _sync.saveOAuthClientConfig(
         clientId: _clientIdCtrl.text.trim(),
         clientSecret: _clientSecretCtrl.text.trim(),
+        syncServerUrl: _syncServerCtrl.text.trim(),
       );
     }
-    final ok = await _sync.signInWithGoogle(preferBrowserPkce: preferPkce);
+  }
+
+  Future<void> _handleSignIn({
+    bool preferPkce = false,
+    bool preferDeviceFlow = false,
+    bool useConnectedWebDrive = false,
+  }) async {
+    await _syncInputsBeforeAuth();
+    final ok = await _sync.signInWithGoogle(
+      preferBrowserPkce: preferPkce,
+      preferDeviceFlow: preferDeviceFlow,
+      useConnectedWebDrive: useConnectedWebDrive,
+    );
     if (!mounted) return;
     if (ok) {
       widget.onSynced();
@@ -101,10 +121,11 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
       await _sync.saveOAuthClientConfig(
         clientId: _clientIdCtrl.text.trim(),
         clientSecret: _clientSecretCtrl.text.trim(),
+        syncServerUrl: _syncServerCtrl.text.trim(),
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Google OAuth Client settings saved.')),
+        const SnackBar(content: Text('Google SSO & Sync settings saved.')),
       );
     } finally {
       if (mounted) setState(() => _savingConfig = false);
@@ -128,12 +149,13 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
       builder: (context, _) {
         final signedIn = _sync.isSignedIn;
         final busy = _sync.isSigningIn || _sync.isSyncing;
+        final hasDeviceCode = _sync.deviceUserCode.trim().isNotEmpty;
 
         return Dialog(
           insetPadding:
               const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 600),
+            constraints: const BoxConstraints(maxWidth: 620),
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: SingleChildScrollView(
@@ -306,11 +328,47 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
-                                  'Connect your Google account so your guest vehicle searches, daily matches, and requirements sync automatically across your Googlebook, Android phone, and Web browser.',
+                                  'Connect your Google account so your guest vehicle searches, multi-vehicle criteria, and daily matches sync automatically across your Googlebook, Android phone, and Web browser.',
                                   style: textTheme.bodySmall?.copyWith(
                                     color: scheme.onSurfaceVariant,
                                   ),
                                 ),
+                                if (!kIsWeb &&
+                                    _sync.pendingSelectedEmail.isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: scheme.primaryContainer
+                                          .withValues(alpha: 0.65),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.account_circle_rounded,
+                                          size: 16,
+                                          color: scheme.onPrimaryContainer,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            'OS Account Selected: ${_sync.pendingSelectedEmail}',
+                                            style:
+                                                textTheme.labelMedium?.copyWith(
+                                              color: scheme.onPrimaryContainer,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                                 const SizedBox(height: 14),
                                 Wrap(
                                   spacing: 10,
@@ -319,9 +377,7 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                     FilledButton.icon(
                                       onPressed: busy
                                           ? null
-                                          : () => _handleSignIn(
-                                                preferPkce: false,
-                                              ),
+                                          : () => _handleSignIn(),
                                       icon: _sync.isSigningIn
                                           ? const SizedBox(
                                               width: 16,
@@ -339,19 +395,124 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                         onPressed: busy
                                             ? null
                                             : () => _handleSignIn(
+                                                  preferDeviceFlow: true,
+                                                ),
+                                        icon: const Icon(
+                                            Icons.phonelink_lock_rounded,
+                                            size: 18),
+                                        label: const Text(
+                                            'Googlebook Verification Code SSO'),
+                                      ),
+                                    if (!kIsWeb)
+                                      OutlinedButton.icon(
+                                        onPressed: busy
+                                            ? null
+                                            : () => _handleSignIn(
                                                   preferPkce: true,
                                                 ),
                                         icon: const Icon(
                                             Icons.open_in_browser_rounded,
                                             size: 18),
                                         label: const Text(
-                                            'Browser OAuth PKCE Sign-In'),
+                                            'Desktop PKCE Sign-In'),
+                                      ),
+                                    if (kIsWeb && _sync.connectedDriveAvailable)
+                                      FilledButton.tonalIcon(
+                                        onPressed: busy
+                                            ? null
+                                            : () => _handleSignIn(
+                                                  useConnectedWebDrive: true,
+                                                ),
+                                        icon: const Icon(
+                                            Icons.cloud_done_rounded,
+                                            size: 18),
+                                        label: const Text(
+                                            'Use Connected Google Drive'),
                                       ),
                                   ],
                                 ),
                               ],
                             ),
                     ),
+
+                    // Active Googlebook / Device Verification Code Card
+                    if (hasDeviceCode) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: scheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: scheme.primary),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.verified_user_rounded,
+                                    color: scheme.onPrimaryContainer),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Enter Code at google.com/device (Copied!)',
+                                    style: textTheme.titleSmall?.copyWith(
+                                      color: scheme.onPrimaryContainer,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            SelectableText(
+                              _sync.deviceUserCode,
+                              style: textTheme.headlineSmall?.copyWith(
+                                fontFamily: 'monospace',
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 2,
+                                color: scheme.onPrimaryContainer,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                FilledButton.icon(
+                                  onPressed: () {
+                                    final url =
+                                        _sync.deviceVerificationUrl.isNotEmpty
+                                            ? _sync.deviceVerificationUrl
+                                            : 'https://www.google.com/device';
+                                    launchUrl(
+                                      Uri.parse(url),
+                                      mode: LaunchMode.externalApplication,
+                                    );
+                                  },
+                                  icon: const Icon(Icons.open_in_new_rounded,
+                                      size: 16),
+                                  label: const Text('Open google.com/device'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () => _copyValue(
+                                      'Verification Code',
+                                      _sync.deviceUserCode),
+                                  icon:
+                                      const Icon(Icons.copy_rounded, size: 16),
+                                  label: const Text('Copy Code'),
+                                ),
+                                TextButton(
+                                  onPressed: _sync.cancelActiveSignIn,
+                                  child: const Text('Cancel'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
 
                     if (_sync.lastError != null &&
                         _sync.lastError!.trim().isNotEmpty) ...[
@@ -360,23 +521,32 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                         width: double.infinity,
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: scheme.errorContainer,
+                          color: _sync.needsOAuthSetup
+                              ? scheme.tertiaryContainer
+                              : scheme.errorContainer,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Icon(
-                              Icons.info_outline_rounded,
+                              _sync.needsOAuthSetup
+                                  ? Icons.vpn_key_rounded
+                                  : Icons.info_outline_rounded,
                               size: 18,
-                              color: scheme.onErrorContainer,
+                              color: _sync.needsOAuthSetup
+                                  ? scheme.onTertiaryContainer
+                                  : scheme.onErrorContainer,
                             ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
                                 _sync.lastError!,
                                 style: textTheme.bodySmall?.copyWith(
-                                  color: scheme.onErrorContainer,
+                                  color: _sync.needsOAuthSetup
+                                      ? scheme.onTertiaryContainer
+                                      : scheme.onErrorContainer,
+                                  fontWeight: FontWeight.w500,
                                 ),
                               ),
                             ),
@@ -429,7 +599,7 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                           _SyncMetaRow(
                             label: 'Auto-Save Mode',
                             value:
-                                'Enabled (saves every new guest, delete & search)',
+                                'Enabled (saves every new guest, vehicle & search)',
                           ),
                           _SyncMetaRow(
                             label: 'Auto-Query Mode',
@@ -465,19 +635,21 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
 
                     const SizedBox(height: 12),
 
-                    // 3. Multi-Device OAuth Configuration Helper
+                    // 3. One-Time Google Cloud OAuth / Sync Setup Helper
                     ExpansionTile(
+                      key: ValueKey<bool>(_sync.needsOAuthSetup),
+                      initiallyExpanded: _sync.needsOAuthSetup,
                       tilePadding: const EdgeInsets.symmetric(horizontal: 4),
                       title: Text(
-                        'Google Cloud OAuth Client Setup (Optional / Multi-Device)',
+                        '1-Time Google Cloud OAuth Setup (Multi-Device APK)',
                         style: textTheme.labelLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                       subtitle: Text(
                         kIsWeb
                             ? 'Configure a Web OAuth Client ID for browser Google SSO popup'
-                            : '1-tap copy Package Name & SHA-1, or paste a Desktop OAuth Client ID',
+                            : 'Register Android Package & SHA-1 for 1-tap OS SSO, or paste a TV/Desktop Client ID',
                         style: textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -489,6 +661,25 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               if (!kIsWeb) ...[
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: scheme.surfaceContainerHighest
+                                        .withValues(alpha: 0.45),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    'Option A (Recommended — 1-Tap Native OS SSO on Googlebook & Phone):\n'
+                                    '1. In console.cloud.google.com, enable the "Google Drive API".\n'
+                                    '2. Go to Credentials → Create Credentials → OAuth client ID → Android.\n'
+                                    '3. Copy the Package Name & SHA-1 below, click Create, then tap "Sign in with Google" above!',
+                                    style: textTheme.bodySmall?.copyWith(
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
                                 _CopyableFieldTile(
                                   label: 'Android Package Name',
                                   value: _sync.signingPackageName,
@@ -506,14 +697,21 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                     _sync.signingSha1,
                                   ),
                                 ),
-                                const SizedBox(height: 12),
+                                const SizedBox(height: 14),
+                                Text(
+                                  'Option B — Paste a "TVs and Limited Input devices" (best for Googlebook!) or "Desktop app" OAuth Client ID:',
+                                  style: textTheme.labelMedium?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
                               ],
                               TextField(
                                 controller: _clientIdCtrl,
                                 decoration: InputDecoration(
                                   labelText: kIsWeb
                                       ? 'Web Google OAuth Client ID (.apps.googleusercontent.com)'
-                                      : 'Google OAuth Client ID (Desktop or Web .apps.googleusercontent.com)',
+                                      : 'Google OAuth Client ID (TV/Device or Desktop .apps.googleusercontent.com)',
                                   hintText:
                                       '1234567890-abcdef.apps.googleusercontent.com',
                                   border: const OutlineInputBorder(),
@@ -527,7 +725,18 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                   obscureText: true,
                                   decoration: const InputDecoration(
                                     labelText:
-                                        'Desktop OAuth Client Secret (only if required by client)',
+                                        'OAuth Client Secret (for TV/Device or Desktop client)',
+                                    border: OutlineInputBorder(),
+                                    isDense: true,
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                TextField(
+                                  controller: _syncServerCtrl,
+                                  decoration: const InputDecoration(
+                                    labelText:
+                                        'Optional Preston Sync Server URL (Zero-OAuth Relay)',
+                                    hintText: 'https://your-preston-server.example.com',
                                     border: OutlineInputBorder(),
                                     isDense: true,
                                   ),
@@ -542,7 +751,7 @@ class _GoogleAccountSyncDialogState extends State<GoogleAccountSyncDialog> {
                                       : _handleSaveOAuthConfig,
                                   icon: const Icon(Icons.save_outlined,
                                       size: 18),
-                                  label: const Text('Save OAuth Client Config'),
+                                  label: const Text('Save SSO Settings'),
                                 ),
                               ),
                             ],

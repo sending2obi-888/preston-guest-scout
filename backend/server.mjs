@@ -16,6 +16,8 @@ import {
   queryAndSyncWithGoogleDrive,
   scheduleAutoSaveToGoogleDrive,
   getDriveSyncStatus,
+  mergeRemoteSnapshotIntoLocal,
+  exportLocalSnapshot,
 } from './drive_sync.mjs';
 import {
   getScheduleStatus,
@@ -253,6 +255,9 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/drive-sync/sync' && req.method === 'POST') {
       const body = await readJsonBody(req);
+      if (body.clientSnapshot && typeof body.clientSnapshot === 'object') {
+        mergeRemoteSnapshotIntoLocal(body.clientSnapshot);
+      }
       const token = bearerToken || (body.accessToken || '').trim();
       const syncRes = await queryAndSyncWithGoogleDrive({
         bearerToken: token,
@@ -263,6 +268,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ...syncRes,
         guests: rows.map(mapGuestRow),
+        snapshot: body.includeSnapshot ? exportLocalSnapshot('Preston Guest Scout Server') : undefined,
       });
     }
 

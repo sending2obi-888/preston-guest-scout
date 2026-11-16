@@ -24,7 +24,7 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
    - **Android Subsystem**: `BootCompletedReceiver` (`RECEIVE_BOOT_COMPLETED` / `LOCKED_BOOT_COMPLETED`) launches `MainActivity` automatically on device startup.
    - **ChromeOS Browser & Linux**: `chromeos_extension/background.js` (`chrome.runtime.onStartup`) auto-opens the app window at Chromebook sign-in, paired with `scripts/install-chromebook-autostart.sh` (`systemd --user` service) for the backend.
 6. **Google Single Sign-On (SSO) & Multi-Device Google Drive Sync**
-   - **Google SSO Across Devices**: Sign in using native Android / Googlebook OS Google Sign-In (`play-services-auth`), OAuth 2.0 PKCE Browser Loopback SSO, or Google Identity Services on Web.
+   - **Google SSO Across Devices**: Sign in using native Android / Googlebook OS Google Account Picker (`AccountManager` + `GoogleAuthUtil` with non-sensitive `drive.file` scope), Googlebook-safe OAuth 2.0 Verification Code Flow (`google.com/device`), OAuth 2.0 PKCE Loopback SSO, optional Preston Sync Server Relay, or Google Identity Services on Web.
    - **Automatic Save to Google Drive**: Every new guest, added/removed vehicle target, requirement edit, guest deletion tombstone, and vehicle search result is automatically saved to `preston_guest_scout_cloud_sync.json` in Google Drive.
    - **Automatic Query on Every App Open**: Every cold start, app foreground resume (`AppLifecycleState.resumed` / browser tab focus), and Launcher Widget launch automatically queries Google Drive and merges remote updates conflict-free across all devices.
 

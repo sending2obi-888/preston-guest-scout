@@ -1726,6 +1726,7 @@ class LocalScoutEngine {
           _settings['googleOAuthClientId']?.toString() ?? '',
       'googleOAuthClientSecret':
           _settings['googleOAuthClientSecret']?.toString() ?? '',
+      'syncServerUrl': _settings['syncServerUrl']?.toString() ?? '',
       'driveSyncFileId': _settings['driveSyncFileId']?.toString() ?? '',
       'session': session is Map
           ? Map<String, dynamic>.from(session)
@@ -1736,6 +1737,7 @@ class LocalScoutEngine {
   static Future<void> saveLocalAuthConfig({
     String? googleOAuthClientId,
     String? googleOAuthClientSecret,
+    String? syncServerUrl,
     String? driveSyncFileId,
     Map<String, dynamic>? session,
   }) async {
@@ -1745,6 +1747,9 @@ class LocalScoutEngine {
     }
     if (googleOAuthClientSecret != null) {
       _settings['googleOAuthClientSecret'] = googleOAuthClientSecret.trim();
+    }
+    if (syncServerUrl != null) {
+      _settings['syncServerUrl'] = syncServerUrl.trim();
     }
     if (driveSyncFileId != null) {
       _settings['driveSyncFileId'] = driveSyncFileId.trim();
@@ -1987,6 +1992,12 @@ class LocalScoutEngine {
       totalMatches: _matches.length,
       localChanged: localChanged,
     );
+  }
+
+  @visibleForTesting
+  static void cancelSchedulerForTest() {
+    _scheduleTimer?.cancel();
+    _scheduleTimer = null;
   }
 
   @visibleForTesting
