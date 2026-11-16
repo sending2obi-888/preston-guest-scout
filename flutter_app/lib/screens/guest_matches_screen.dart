@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../widgets/add_vehicle_criteria_dialog.dart';
 
 class GuestMatchesScreen extends StatefulWidget {
   final String guestId;
@@ -22,6 +23,7 @@ class GuestMatchesScreen extends StatefulWidget {
 class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   static const String _allLocationsFilter = '__ALL__';
   static const String _allMillsboroFilter = '__MILLSBORO__';
+  static const String _allVehiclesFilter = '__ALL_VEHICLES__';
 
   GuestProfile? _guest;
   List<VehicleMatch> _matches = [];
@@ -29,6 +31,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   bool _searchingNow = false;
   String? _error;
 
+  String _selectedTargetId = _allVehiclesFilter;
   String _selectedLocation = _allLocationsFilter;
   String _sortBy = 'score';
   String _searchQuery = '';
@@ -91,6 +94,96 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     }
   }
 
+  Future<void> _openAddVehicleDialog() async {
+    final g = _guest;
+    if (g == null) return;
+
+    final res = await showDialog<
+        ({GuestProfile guest, List<VehicleMatch> matches, String summary})>(
+      context: context,
+      builder: (_) => AddVehicleCriteriaDialog(guest: g),
+    );
+
+    if (res == null || !mounted) return;
+    widget.onDataChanged();
+    setState(() {
+      _guest = res.guest;
+      _matches = res.matches;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(res.summary)),
+    );
+  }
+
+  Future<void> _confirmRemoveVehicleTarget(VehicleSearchTarget target) async {
+    final g = _guest;
+    if (g == null || g.effectiveTargets.length <= 1) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove Vehicle Criteria?'),
+        content: Text(
+          'Stop searching prestonmotor.com for "${target.label}" on ${g.name} and remove matches specific to that vehicle?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove Vehicle'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final res = await ApiService.removeVehicleFromGuest(g.id, target.id);
+      widget.onDataChanged();
+      if (!mounted) return;
+      setState(() {
+        _guest = res.guest;
+        _matches = res.matches;
+        if (_selectedTargetId == target.id) {
+          _selectedTargetId = _allVehiclesFilter;
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Removed "${target.label}" from ${g.name}.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove vehicle: $e')),
+      );
+    }
+  }
+
+  bool _doesMatchBelongToTarget(
+    VehicleMatch m,
+    VehicleSearchTarget target,
+    List<VehicleSearchTarget> allTargets,
+  ) {
+    if (m.targetId.isNotEmpty) {
+      return m.targetId == target.id;
+    }
+    return allTargets.isNotEmpty && target.id == allTargets.first.id;
+  }
+
+  int _countMatchesForTarget(
+    VehicleSearchTarget target,
+    List<VehicleSearchTarget> allTargets,
+  ) {
+    int c = 0;
+    for (final m in _matches) {
+      if (_doesMatchBelongToTarget(m, target, allTargets)) c++;
+    }
+    return c;
+  }
+
   String _formatFoundDate(String iso) {
     final dt = DateTime.tryParse(iso)?.toLocal();
     if (dt == null) return iso;
@@ -123,7 +216,23 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
   List<VehicleMatch> _computeFilteredMatches() {
     final q = _searchQuery.trim().toLowerCase();
+    final allTargets = _guest?.effectiveTargets ?? const <VehicleSearchTarget>[];
+    VehicleSearchTarget? activeTarget;
+    if (_selectedTargetId != _allVehiclesFilter) {
+      for (final t in allTargets) {
+        if (t.id == _selectedTargetId) {
+          activeTarget = t;
+          break;
+        }
+      }
+    }
+
     final filtered = _matches.where((m) {
+      if (activeTarget != null &&
+          !_doesMatchBelongToTarget(m, activeTarget, allTargets)) {
+        return false;
+      }
+
       if (_selectedLocation == _allMillsboroFilter) {
         final lowerLoc = m.location.toLowerCase();
         if (!lowerLoc.contains('millsboro') &&
@@ -136,7 +245,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
       if (q.isNotEmpty) {
         final hay =
-            '${m.title} ${m.make} ${m.model} ${m.trim} ${m.location} ${m.exteriorColor} ${m.vin} ${m.stockNumber} ${m.drivetrain}'
+            '${m.title} ${m.make} ${m.model} ${m.trim} ${m.location} ${m.exteriorColor} ${m.vin} ${m.stockNumber} ${m.drivetrain} ${m.targetLabel}'
                 .toLowerCase();
         final tokens = q.split(RegExp(r'\s+')).where((t) => t.isNotEmpty);
         if (!tokens.every((t) => hay.contains(t))) return false;
@@ -183,6 +292,15 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
             ? '${_guest!.name} • Vehicle Matches'
             : 'Guest Vehicle Matches'),
         actions: [
+          if (_guest != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: OutlinedButton.icon(
+                onPressed: _searchingNow ? null : _openAddVehicleDialog,
+                icon: const Icon(Icons.add_road_rounded, size: 18),
+                label: const Text('Add Vehicle'),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: FilledButton.tonalIcon(
@@ -196,7 +314,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                   : const Icon(Icons.auto_awesome, size: 18),
               label: Text(_searchingNow
                   ? 'Searching All Pages...'
-                  : 'Search prestonmotor.com Now'),
+                  : 'Search Now'),
             ),
           ),
         ],
@@ -264,7 +382,9 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                       ),
                                     ],
                                   ),
-                                  if (_matches.isNotEmpty) ...[
+                                  if (_matches.isNotEmpty ||
+                                      (_guest?.effectiveTargets.length ?? 0) >
+                                          1) ...[
                                     const SizedBox(height: 12),
                                     _buildFilterAndSortBar(
                                       scheme,
@@ -302,7 +422,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                             color: scheme.onSurfaceVariant),
                                         const SizedBox(height: 8),
                                         Text(
-                                          'No vehicles match the active location/keyword filter.',
+                                          'No vehicles match the active vehicle/location/keyword filter.',
                                           style: textTheme.titleSmall,
                                         ),
                                         const SizedBox(height: 10),
@@ -310,6 +430,8 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                           onPressed: () {
                                             _searchCtrl.clear();
                                             setState(() {
+                                              _selectedTargetId =
+                                                  _allVehiclesFilter;
                                               _selectedLocation =
                                                   _allLocationsFilter;
                                               _searchQuery = '';
@@ -355,72 +477,117 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     List<MapEntry<String, int>> locationCounts,
     int millsboroCount,
   ) {
+    final targets = _guest?.effectiveTargets ?? const <VehicleSearchTarget>[];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _searchCtrl,
-                onChanged: (v) => setState(() => _searchQuery = v),
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText:
-                      'Filter by model, trim, city, dealership (e.g. Millsboro, F-150, Bronco)...',
-                  prefixIcon: const Icon(Icons.search, size: 20),
-                  suffixIcon: _searchQuery.isNotEmpty
-                      ? IconButton(
-                          icon: const Icon(Icons.clear, size: 18),
-                          onPressed: () {
-                            _searchCtrl.clear();
-                            setState(() => _searchQuery = '');
-                          },
-                        )
-                      : null,
+        if (targets.length > 1) ...[
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: FilterChip(
+                    avatar: const Icon(Icons.layers_outlined, size: 16),
+                    label: Text(
+                      'All Monitored Vehicles (${numberFmt.format(_matches.length)})',
+                    ),
+                    selected: _selectedTargetId == _allVehiclesFilter,
+                    onSelected: (_) =>
+                        setState(() => _selectedTargetId = _allVehiclesFilter),
+                  ),
                 ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            PopupMenuButton<String>(
-              tooltip: 'Sort Matches',
-              initialValue: _sortBy,
-              onSelected: (v) => setState(() => _sortBy = v),
-              itemBuilder: (_) => const [
-                PopupMenuItem(
-                    value: 'score', child: Text('Best Match & Lowest Price')),
-                PopupMenuItem(
-                    value: 'price_asc', child: Text('Price: Low to High')),
-                PopupMenuItem(
-                    value: 'price_desc', child: Text('Price: High to Low')),
-                PopupMenuItem(
-                    value: 'year_desc', child: Text('Model Year: Newest')),
-              ],
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: scheme.outlineVariant),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.sort, size: 18, color: scheme.primary),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Sort',
-                      style: textTheme.labelLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
+                ...targets.asMap().entries.map((entry) {
+                  final idx = entry.key;
+                  final t = entry.value;
+                  final count = _countMatchesForTarget(t, targets);
+                  final selected = _selectedTargetId == t.id;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: FilterChip(
+                      avatar: const Icon(Icons.directions_car_outlined, size: 16),
+                      label: Text(
+                        'Vehicle ${idx + 1}: ${t.label} (${numberFmt.format(count)})',
+                      ),
+                      selected: selected,
+                      onSelected: (sel) => setState(
+                        () => _selectedTargetId =
+                            sel ? t.id : _allVehiclesFilter,
                       ),
                     ),
-                  ],
+                  );
+                }),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        if (_matches.isNotEmpty)
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchCtrl,
+                  onChanged: (v) => setState(() => _searchQuery = v),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText:
+                        'Filter by model, trim, city, dealership (e.g. Millsboro, Expedition, Navigator)...',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear, size: 18),
+                            onPressed: () {
+                              _searchCtrl.clear();
+                              setState(() => _searchQuery = '');
+                            },
+                          )
+                        : null,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
+              const SizedBox(width: 10),
+              PopupMenuButton<String>(
+                tooltip: 'Sort Matches',
+                initialValue: _sortBy,
+                onSelected: (v) => setState(() => _sortBy = v),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(
+                      value: 'score', child: Text('Best Match & Lowest Price')),
+                  PopupMenuItem(
+                      value: 'price_asc', child: Text('Price: Low to High')),
+                  PopupMenuItem(
+                      value: 'price_desc', child: Text('Price: High to Low')),
+                  PopupMenuItem(
+                      value: 'year_desc', child: Text('Model Year: Newest')),
+                ],
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.sort, size: 18, color: scheme.primary),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Sort',
+                        style: textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         if (locationCounts.length > 1) ...[
           const SizedBox(height: 10),
           SingleChildScrollView(
@@ -473,6 +640,8 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   Widget _buildRequirementsCard(
       ColorScheme scheme, TextTheme textTheme, NumberFormat currencyFmt) {
     final g = _guest!;
+    final targets = g.effectiveTargets;
+
     return Card(
       color: scheme.surfaceContainerLow,
       child: Padding(
@@ -481,8 +650,8 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Wrap(
-              spacing: 10,
-              runSpacing: 8,
+              spacing: 12,
+              runSpacing: 10,
               alignment: WrapAlignment.spaceBetween,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
@@ -495,72 +664,187 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                       child: Text(g.initials),
                     ),
                     const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Target Requirements for ${g.name}',
-                          style: textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Target Vehicles for ${g.name} (${targets.length})',
+                            style: textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        Text(
-                          'Monitored daily at 7:30 AM & 2:00 PM on prestonmotor.com',
-                          style: textTheme.labelMedium?.copyWith(
-                            color: scheme.primary,
+                          Text(
+                            'Monitored daily at 7:30 AM & 2:00 PM on prestonmotor.com',
+                            style: textTheme.labelMedium?.copyWith(
+                              color: scheme.primary,
+                            ),
                           ),
-                        ),
-                      ],
+                          if (g.phone.isNotEmpty || g.email.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(
+                                [
+                                  if (g.phone.isNotEmpty) g.phone,
+                                  if (g.email.isNotEmpty) g.email,
+                                ].join(' • '),
+                                style: textTheme.bodySmall?.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
-                if (g.phone.isNotEmpty || g.email.isNotEmpty)
-                  Text(
-                    [
-                      if (g.phone.isNotEmpty) g.phone,
-                      if (g.email.isNotEmpty) g.email
-                    ].join(' • '),
-                    style: textTheme.bodySmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+                FilledButton.icon(
+                  onPressed: _searchingNow ? null : _openAddVehicleDialog,
+                  icon: const Icon(Icons.add_circle_outline, size: 18),
+                  label: const Text('Add Another Vehicle'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            // Render each monitored vehicle target independently
+            ...targets.asMap().entries.map((entry) {
+              final idx = entry.key;
+              final t = entry.value;
+              final count = _countMatchesForTarget(t, targets);
+
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: idx == targets.length - 1 ? 0 : 10,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: scheme.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: _selectedTargetId == t.id
+                          ? scheme.primary
+                          : scheme.outlineVariant,
+                      width: _selectedTargetId == t.id ? 1.5 : 1,
                     ),
                   ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _specChip(
-                    Icons.directions_car_outlined, g.targetVehicleLabel, scheme),
-                if (g.drivetrain != 'Any')
-                  _specChip(Icons.settings_outlined, g.drivetrain, scheme),
-                if (g.maxPrice != null)
-                  _specChip(Icons.attach_money,
-                      'Max ${currencyFmt.format(g.maxPrice)}', scheme),
-                if (g.maxMileage != null)
-                  _specChip(
-                      Icons.speed_outlined,
-                      'Under ${NumberFormat.decimalPattern().format(g.maxMileage)} mi',
-                      scheme),
-                if (g.exteriorColor.isNotEmpty)
-                  _specChip(Icons.palette_outlined, '${g.exteriorColor} Ext.',
-                      scheme),
-                ...g.features
-                    .map((f) => _specChip(Icons.check_circle_outline, f, scheme)),
-              ],
-            ),
-            if (g.notes.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(
-                'Notes: ${g.notes}',
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.primaryContainer,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              'Vehicle ${idx + 1}',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: scheme.onPrimaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              t.label,
+                              style: textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: count > 0
+                                  ? const Color(0xFFC4EED0)
+                                  : scheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text(
+                              '$count ${count == 1 ? 'Match' : 'Matches'}',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: count > 0
+                                    ? const Color(0xFF0F5223)
+                                    : scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (targets.length > 1) ...[
+                            const SizedBox(width: 4),
+                            IconButton(
+                              tooltip: 'Remove this vehicle criteria',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => _confirmRemoveVehicleTarget(t),
+                              icon: Icon(
+                                Icons.delete_outline,
+                                size: 18,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          if (t.drivetrain != 'Any')
+                            _specChip(
+                                Icons.settings_outlined, t.drivetrain, scheme),
+                          if (t.maxPrice != null)
+                            _specChip(
+                              Icons.attach_money,
+                              'Max ${currencyFmt.format(t.maxPrice)}',
+                              scheme,
+                            ),
+                          if (t.maxMileage != null)
+                            _specChip(
+                              Icons.speed_outlined,
+                              'Under ${NumberFormat.decimalPattern().format(t.maxMileage)} mi',
+                              scheme,
+                            ),
+                          if (t.exteriorColor.isNotEmpty)
+                            _specChip(
+                              Icons.palette_outlined,
+                              '${t.exteriorColor} Ext.',
+                              scheme,
+                            ),
+                          ...t.features.map(
+                            (f) => _specChip(
+                                Icons.check_circle_outline, f, scheme),
+                          ),
+                        ],
+                      ),
+                      if (t.notes.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          'Notes: ${t.notes}',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              );
+            }),
+
             if (g.lastSearchSummary.isNotEmpty) ...[
-              const Divider(height: 20),
+              const Divider(height: 22),
               Row(
                 children: [
                   Icon(Icons.auto_awesome, size: 15, color: scheme.primary),
@@ -584,9 +868,9 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
   Widget _specChip(IconData icon, String label, ColorScheme scheme) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: scheme.surface,
+        color: scheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: scheme.outlineVariant),
       ),
@@ -598,7 +882,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
           Text(
             label,
             style: TextStyle(
-              fontSize: 12.5,
+              fontSize: 12,
               fontWeight: FontWeight.w600,
               color: scheme.onSurface,
             ),
@@ -624,7 +908,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Our Gemini Agent will continue checking prestonmotor.com automatically at 7:30 AM and 2:00 PM every day and record new arrivals here.',
+              'Our Gemini Agent will continue checking prestonmotor.com automatically at 7:30 AM and 2:00 PM every day — or tap "Add Another Vehicle" above to monitor an additional make & model for this guest.',
               textAlign: TextAlign.center,
               style: textTheme.bodyMedium?.copyWith(
                 color: scheme.onSurfaceVariant,
@@ -639,6 +923,11 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   Widget _buildMatchCard(VehicleMatch match, ColorScheme scheme,
       TextTheme textTheme, NumberFormat currencyFmt) {
     final photoUrl = ApiService.resolveVehiclePhotoUrl(match.photoUrl);
+    final targets = _guest?.effectiveTargets ?? const <VehicleSearchTarget>[];
+    final showTargetBadge = targets.length > 1;
+    final resolvedTargetLabel = match.targetLabel.isNotEmpty
+        ? match.targetLabel
+        : (targets.isNotEmpty ? targets.first.label : '');
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -680,6 +969,26 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
               final infoWidget = Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (showTargetBadge && resolvedTargetLabel.isNotEmpty) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: scheme.secondaryContainer,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        'Criteria: $resolvedTargetLabel',
+                        style: textTheme.labelSmall?.copyWith(
+                          color: scheme.onSecondaryContainer,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                  ],
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [

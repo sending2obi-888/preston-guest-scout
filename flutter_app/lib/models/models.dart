@@ -1,3 +1,102 @@
+class VehicleSearchTarget {
+  final String id;
+  final String condition;
+  final int? minYear;
+  final int? maxYear;
+  final String make;
+  final String model;
+  final String trim;
+  final double? maxPrice;
+  final int? maxMileage;
+  final String drivetrain;
+  final String exteriorColor;
+  final List<String> features;
+  final String notes;
+  final String createdAt;
+
+  const VehicleSearchTarget({
+    required this.id,
+    this.condition = 'Any',
+    this.minYear,
+    this.maxYear,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.maxPrice,
+    this.maxMileage,
+    this.drivetrain = 'Any',
+    this.exteriorColor = '',
+    this.features = const [],
+    this.notes = '',
+    this.createdAt = '',
+  });
+
+  factory VehicleSearchTarget.fromJson(Map<String, dynamic> json) {
+    return VehicleSearchTarget(
+      id: json['id']?.toString() ?? '',
+      condition: json['condition']?.toString() ?? 'Any',
+      minYear: (json['minYear'] as num?)?.toInt(),
+      maxYear: (json['maxYear'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      maxPrice: (json['maxPrice'] as num?)?.toDouble(),
+      maxMileage: (json['maxMileage'] as num?)?.toInt(),
+      drivetrain: json['drivetrain']?.toString() ?? 'Any',
+      exteriorColor: json['exteriorColor']?.toString() ?? '',
+      features: (json['features'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      notes: json['notes']?.toString() ?? '',
+      createdAt: json['createdAt']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'createdAt': createdAt,
+      };
+
+  String get label {
+    final parts = <String>[];
+    if (condition != 'Any' && condition.isNotEmpty) parts.add(condition);
+    if (minYear != null && maxYear != null) {
+      parts.add(minYear == maxYear ? '$minYear' : '$minYear–$maxYear');
+    } else if (minYear != null) {
+      parts.add('$minYear+');
+    } else if (maxYear != null) {
+      parts.add('Up to $maxYear');
+    }
+    if (make.isNotEmpty) parts.add(make);
+    if (model.isNotEmpty) parts.add(model);
+    if (trim.isNotEmpty) parts.add(trim);
+    if (parts.isEmpty) {
+      if (maxPrice != null) {
+        return 'Vehicles under \$${maxPrice!.toStringAsFixed(0)}';
+      }
+      if (notes.trim().isNotEmpty) {
+        final trimmed = notes.trim();
+        return trimmed.length > 42 ? '${trimmed.substring(0, 42)}…' : trimmed;
+      }
+      return 'Custom Vehicle Requirements';
+    }
+    return parts.join(' ');
+  }
+}
+
 class GuestProfile {
   final String id;
   final String name;
@@ -15,6 +114,7 @@ class GuestProfile {
   final String exteriorColor;
   final List<String> features;
   final String notes;
+  final List<VehicleSearchTarget> vehicleTargets;
   final bool active;
   final String? lastSearchedAt;
   final String lastSearchSummary;
@@ -39,6 +139,7 @@ class GuestProfile {
     this.exteriorColor = '',
     this.features = const [],
     this.notes = '',
+    this.vehicleTargets = const [],
     this.active = true,
     this.lastSearchedAt,
     this.lastSearchSummary = '',
@@ -48,54 +149,141 @@ class GuestProfile {
   });
 
   factory GuestProfile.fromJson(Map<String, dynamic> json) {
+    final guestId = json['id']?.toString() ?? '';
+    final createdAtStr = json['createdAt']?.toString() ?? '';
+    final primaryFeatures = (json['features'] as List<dynamic>?)
+            ?.map((e) => e.toString())
+            .toList() ??
+        const <String>[];
+
+    final rawTargets = json['vehicleTargets'];
+    final parsedTargets = <VehicleSearchTarget>[];
+    if (rawTargets is List) {
+      for (var i = 0; i < rawTargets.length; i++) {
+        final item = rawTargets[i];
+        if (item is Map) {
+          final map = Map<String, dynamic>.from(item);
+          if ((map['id']?.toString() ?? '').isEmpty) {
+            map['id'] = '$guestId-vt-${i + 1}';
+          }
+          if ((map['createdAt']?.toString() ?? '').isEmpty) {
+            map['createdAt'] = createdAtStr;
+          }
+          parsedTargets.add(VehicleSearchTarget.fromJson(map));
+        }
+      }
+    }
+
+    if (parsedTargets.isEmpty) {
+      parsedTargets.add(
+        VehicleSearchTarget(
+          id: guestId.isNotEmpty ? '$guestId-primary' : 'primary',
+          condition: json['condition']?.toString() ?? 'Any',
+          minYear: (json['minYear'] as num?)?.toInt(),
+          maxYear: (json['maxYear'] as num?)?.toInt(),
+          make: json['make']?.toString() ?? '',
+          model: json['model']?.toString() ?? '',
+          trim: json['trim']?.toString() ?? '',
+          maxPrice: (json['maxPrice'] as num?)?.toDouble(),
+          maxMileage: (json['maxMileage'] as num?)?.toInt(),
+          drivetrain: json['drivetrain']?.toString() ?? 'Any',
+          exteriorColor: json['exteriorColor']?.toString() ?? '',
+          features: primaryFeatures,
+          notes: json['notes']?.toString() ?? '',
+          createdAt: createdAtStr,
+        ),
+      );
+    }
+
+    final first = parsedTargets.first;
+
     return GuestProfile(
-      id: json['id']?.toString() ?? '',
+      id: guestId,
       name: json['name']?.toString() ?? '',
       phone: json['phone']?.toString() ?? '',
       email: json['email']?.toString() ?? '',
-      condition: json['condition']?.toString() ?? 'Any',
-      minYear: (json['minYear'] as num?)?.toInt(),
-      maxYear: (json['maxYear'] as num?)?.toInt(),
-      make: json['make']?.toString() ?? '',
-      model: json['model']?.toString() ?? '',
-      trim: json['trim']?.toString() ?? '',
-      maxPrice: (json['maxPrice'] as num?)?.toDouble(),
-      maxMileage: (json['maxMileage'] as num?)?.toInt(),
-      drivetrain: json['drivetrain']?.toString() ?? 'Any',
-      exteriorColor: json['exteriorColor']?.toString() ?? '',
-      features: (json['features'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const [],
-      notes: json['notes']?.toString() ?? '',
+      condition: first.condition,
+      minYear: first.minYear,
+      maxYear: first.maxYear,
+      make: first.make,
+      model: first.model,
+      trim: first.trim,
+      maxPrice: first.maxPrice,
+      maxMileage: first.maxMileage,
+      drivetrain: first.drivetrain,
+      exteriorColor: first.exteriorColor,
+      features: first.features,
+      notes: first.notes,
+      vehicleTargets: parsedTargets,
       active: json['active'] != false,
       lastSearchedAt: json['lastSearchedAt']?.toString(),
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
-      createdAt: json['createdAt']?.toString() ?? '',
+      createdAt: createdAtStr,
       matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
       lowestMatchPrice: (json['lowestMatchPrice'] as num?)?.toDouble(),
     );
   }
 
+  List<VehicleSearchTarget> get effectiveTargets {
+    if (vehicleTargets.isNotEmpty) return vehicleTargets;
+    return [
+      VehicleSearchTarget(
+        id: id.isNotEmpty ? '$id-primary' : 'primary',
+        condition: condition,
+        minYear: minYear,
+        maxYear: maxYear,
+        make: make,
+        model: model,
+        trim: trim,
+        maxPrice: maxPrice,
+        maxMileage: maxMileage,
+        drivetrain: drivetrain,
+        exteriorColor: exteriorColor,
+        features: features,
+        notes: notes,
+        createdAt: createdAt,
+      ),
+    ];
+  }
+
   String get targetVehicleLabel {
-    final parts = <String>[];
-    if (condition != 'Any' && condition.isNotEmpty) parts.add(condition);
-    if (minYear != null && maxYear != null) {
-      parts.add(minYear == maxYear ? '$minYear' : '$minYear–$maxYear');
-    } else if (minYear != null) {
-      parts.add('$minYear+');
-    } else if (maxYear != null) {
-      parts.add('Up to $maxYear');
+    final targets = effectiveTargets;
+    if (targets.length == 1) {
+      return targets.first.label;
     }
-    if (make.isNotEmpty) parts.add(make);
-    if (model.isNotEmpty) parts.add(model);
-    if (trim.isNotEmpty) parts.add(trim);
-    if (parts.isEmpty) return 'Custom Vehicle Requirements';
-    return parts.join(' ');
+    if (targets.length == 2) {
+      return '${targets[0].label}  +  ${targets[1].label}';
+    }
+    return '${targets[0].label}  +  ${targets[1].label}  (+${targets.length - 2} more)';
+  }
+
+  String get allSearchableSpecsText {
+    final buf = StringBuffer(name);
+    for (final t in effectiveTargets) {
+      buf
+        ..write(' ')
+        ..write(t.condition)
+        ..write(' ')
+        ..write(t.make)
+        ..write(' ')
+        ..write(t.model)
+        ..write(' ')
+        ..write(t.trim)
+        ..write(' ')
+        ..write(t.drivetrain)
+        ..write(' ')
+        ..write(t.exteriorColor)
+        ..write(' ')
+        ..write(t.notes)
+        ..write(' ')
+        ..write(t.features.join(' '));
+    }
+    return buf.toString().toLowerCase();
   }
 
   String get initials {
-    final words = name.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final words =
+        name.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
     if (words.isEmpty) return '?';
     if (words.length == 1) return words.first.substring(0, 1).toUpperCase();
     return '${words.first[0]}${words.last[0]}'.toUpperCase();
@@ -131,6 +319,8 @@ class VehicleMatch {
   final String foundAt;
   final String searchSlot;
   final String lastSeenAt;
+  final String targetId;
+  final String targetLabel;
 
   const VehicleMatch({
     required this.id,
@@ -161,6 +351,8 @@ class VehicleMatch {
     required this.foundAt,
     this.searchSlot = 'Scheduled Search',
     required this.lastSeenAt,
+    this.targetId = '',
+    this.targetLabel = '',
   });
 
   factory VehicleMatch.fromJson(Map<String, dynamic> json) {
@@ -199,6 +391,8 @@ class VehicleMatch {
       foundAt: json['foundAt']?.toString() ?? '',
       searchSlot: json['searchSlot']?.toString() ?? 'Scheduled Search',
       lastSeenAt: json['lastSeenAt']?.toString() ?? '',
+      targetId: json['targetId']?.toString() ?? '',
+      targetLabel: json['targetLabel']?.toString() ?? '',
     );
   }
 }

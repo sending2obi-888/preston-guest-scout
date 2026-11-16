@@ -145,11 +145,11 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       INSERT INTO guests (
         id, name, phone, email, condition, min_year, max_year, make, model, trim,
         max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
-        active, last_searched_at, last_search_summary, created_at, updated_at
+        vehicle_targets_json, active, last_searched_at, last_search_summary, created_at, updated_at
       ) VALUES (
         @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
         @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
-        @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
+        @vehicle_targets_json, @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -167,6 +167,10 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         exterior_color = excluded.exterior_color,
         features_json = excluded.features_json,
         notes = excluded.notes,
+        vehicle_targets_json = CASE
+          WHEN excluded.vehicle_targets_json != '[]' THEN excluded.vehicle_targets_json
+          ELSE guests.vehicle_targets_json
+        END,
         active = excluded.active,
         last_searched_at = COALESCE(excluded.last_searched_at, guests.last_searched_at),
         last_search_summary = CASE
@@ -191,6 +195,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         : '';
 
       if (!existing || rgStamp > localStamp) {
+        const rgTargets = Array.isArray(rg.vehicleTargets) ? rg.vehicleTargets : [];
         upsertGuestStmt.run({
           id: String(rg.id),
           name: String(rg.name),
@@ -208,6 +213,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           exterior_color: String(rg.exteriorColor || ''),
           features_json: JSON.stringify(Array.isArray(rg.features) ? rg.features : []),
           notes: String(rg.notes || ''),
+          vehicle_targets_json: JSON.stringify(rgTargets),
           active: rg.active === false ? 0 : 1,
           last_searched_at: rg.lastSearchedAt || null,
           last_search_summary: String(rg.lastSearchSummary || ''),
@@ -239,13 +245,13 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         price, msrp, dealer_fee, location, mileage, drivetrain, engine,
         exterior_color, interior_color, photo_url, listing_url,
         matched_features_json, all_highlights_json, agent_summary, match_score,
-        found_at, search_slot, last_seen_at
+        found_at, search_slot, last_seen_at, target_id, target_label
       ) VALUES (
         @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
         @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
         @exterior_color, @interior_color, @photo_url, @listing_url,
         @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
-        @found_at, @search_slot, @last_seen_at
+        @found_at, @search_slot, @last_seen_at, @target_id, @target_label
       )
       ON CONFLICT(guest_id, vin) DO UPDATE SET
         price = excluded.price,
@@ -263,7 +269,15 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           WHEN excluded.found_at < matches.found_at THEN excluded.found_at
           ELSE matches.found_at
         END,
-        last_seen_at = excluded.last_seen_at
+        last_seen_at = excluded.last_seen_at,
+        target_id = CASE
+          WHEN excluded.target_id != '' THEN excluded.target_id
+          ELSE matches.target_id
+        END,
+        target_label = CASE
+          WHEN excluded.target_label != '' THEN excluded.target_label
+          ELSE matches.target_label
+        END
     `);
 
     const remoteMatches = Array.isArray(remote.matches) ? remote.matches : [];
@@ -306,6 +320,8 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           found_at: String(rm.foundAt || rmSeen || new Date().toISOString()),
           search_slot: String(rm.searchSlot || 'Cloud Sync'),
           last_seen_at: String(rmSeen || new Date().toISOString()),
+          target_id: String(rm.targetId || ''),
+          target_label: String(rm.targetLabel || ''),
         });
         localChanged = true;
       }

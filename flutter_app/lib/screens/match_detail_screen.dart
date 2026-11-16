@@ -130,6 +130,22 @@ class MatchDetailScreen extends StatelessWidget {
                                       ),
                                     ),
                                   ),
+                                if (match.targetLabel.isNotEmpty)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: scheme.tertiaryContainer,
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    child: Text(
+                                      'Criteria: ${match.targetLabel}',
+                                      style: textTheme.labelSmall?.copyWith(
+                                        color: scheme.onTertiaryContainer,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
                               ],
                             ),
                             const SizedBox(height: 12),

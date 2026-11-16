@@ -123,11 +123,7 @@ class _GuestListScreenState extends State<GuestListScreen> {
     final filtered = widget.guests.where((g) {
       if (_query.isEmpty) return true;
       final q = _query.toLowerCase();
-      return g.name.toLowerCase().contains(q) ||
-          g.make.toLowerCase().contains(q) ||
-          g.model.toLowerCase().contains(q) ||
-          g.trim.toLowerCase().contains(q) ||
-          g.notes.toLowerCase().contains(q);
+      return g.allSearchableSpecsText.contains(q);
     }).toList();
 
     return Center(
@@ -156,7 +152,7 @@ class _GuestListScreenState extends State<GuestListScreen> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Searched daily at 7:30 AM & 2:00 PM on prestonmotor.com • Tap any guest to view found matches',
+                        'Searched daily at 7:30 AM & 2:00 PM on prestonmotor.com • Tap any guest to view matches or add another vehicle',
                         style: textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -195,7 +191,7 @@ class _GuestListScreenState extends State<GuestListScreen> {
                 onChanged: (v) => setState(() => _query = v.trim()),
                 decoration: InputDecoration(
                   hintText:
-                      'Filter guests by name, make, model, trim, or notes...',
+                      'Filter guests by name, any monitored make/model, trim, or notes...',
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: _query.isNotEmpty
                       ? IconButton(
@@ -228,6 +224,8 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                 final isSearchingThis =
                                     _searchingGuestIds.contains(guest.id);
                                 final hasMatches = guest.matchCount > 0;
+                                final vehicleCount =
+                                    guest.effectiveTargets.length;
 
                                 return Card(
                                   clipBehavior: Clip.antiAlias,
@@ -259,20 +257,49 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
                                               children: [
-                                                Row(
+                                                Wrap(
+                                                  spacing: 8,
+                                                  runSpacing: 6,
+                                                  crossAxisAlignment:
+                                                      WrapCrossAlignment.center,
                                                   children: [
-                                                    Flexible(
-                                                      child: Text(
-                                                        guest.name,
-                                                        style: textTheme
-                                                            .titleMedium
-                                                            ?.copyWith(
-                                                          fontWeight:
-                                                              FontWeight.w700,
-                                                        ),
+                                                    Text(
+                                                      guest.name,
+                                                      style: textTheme
+                                                          .titleMedium
+                                                          ?.copyWith(
+                                                        fontWeight:
+                                                            FontWeight.w700,
                                                       ),
                                                     ),
-                                                    const SizedBox(width: 10),
+                                                    if (vehicleCount > 1)
+                                                      Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                          horizontal: 8,
+                                                          vertical: 3,
+                                                        ),
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: scheme
+                                                              .secondaryContainer,
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(20),
+                                                        ),
+                                                        child: Text(
+                                                          '$vehicleCount Vehicles',
+                                                          style: textTheme
+                                                              .labelSmall
+                                                              ?.copyWith(
+                                                            color: scheme
+                                                                .onSecondaryContainer,
+                                                            fontWeight:
+                                                                FontWeight.w700,
+                                                          ),
+                                                        ),
+                                                      ),
                                                     Container(
                                                       padding: const EdgeInsets
                                                           .symmetric(
@@ -309,17 +336,23 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                                 ),
                                                 const SizedBox(height: 5),
                                                 Text(
-                                                  [
-                                                    guest.targetVehicleLabel,
-                                                    if (guest.drivetrain !=
-                                                        'Any')
-                                                      guest.drivetrain,
-                                                    if (guest.maxPrice != null)
-                                                      'Max ${currencyFmt.format(guest.maxPrice)}',
-                                                    if (guest.maxMileage !=
-                                                        null)
-                                                      'Under ${NumberFormat.decimalPattern().format(guest.maxMileage)} mi',
-                                                  ].join(' • '),
+                                                  vehicleCount > 1
+                                                      ? guest.targetVehicleLabel
+                                                      : [
+                                                          guest
+                                                              .targetVehicleLabel,
+                                                          if (guest
+                                                                  .drivetrain !=
+                                                              'Any')
+                                                            guest.drivetrain,
+                                                          if (guest.maxPrice !=
+                                                              null)
+                                                            'Max ${currencyFmt.format(guest.maxPrice)}',
+                                                          if (guest
+                                                                  .maxMileage !=
+                                                              null)
+                                                            'Under ${NumberFormat.decimalPattern().format(guest.maxMileage)} mi',
+                                                        ].join(' • '),
                                                   style: textTheme.bodyMedium
                                                       ?.copyWith(
                                                     color: scheme.onSurface

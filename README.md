@@ -12,9 +12,10 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
    - **Page 1 — Home (Guest & Vehicle Intake)**: Input a guest's name and target vehicle requirements using both structured specifications (Condition, Year range, Make, Model, Trim, Max Price, Max Mileage, Drivetrain, Color) and free-form Must-Have Features & Notes. Supports **unlimited guest inputs**.
    - **Page 2 — Monitored Guests**: Displays every guest whose requirements are being searched twice daily (`7:30 AM` & `2:00 PM`).
      - **Clicking a guest** opens their **Found Matches** screen (`GuestMatchesScreen`).
+     - **Add Unlimited Vehicles per Guest**: Inside any guest's page, tap **Add Another Vehicle** to attach additional makes, models, trims, budgets, conditions, drivetrains, or must-have features to that same guest. Each vehicle target is searched independently on `prestonmotor.com` without overriding earlier matches, with per-vehicle filter chips and automatic Google Drive sync across devices.
      - **Selecting a match** opens `MatchDetailScreen` displaying the vehicle's **Price**, **Dealership Location**, **Date Match Was Found**, and the **Specific Features** that satisfy the guest's previously input requirements.
 3. **Twice-Daily (7:30 AM & 2:00 PM) Gemini Agent Search**
-   - Fetches live inventory from `prestonmotor.com` (New & Pre-Owned/CPO) and evaluates candidates with **Google Gemini (`gemini-2.5-flash`)** using structured JSON output (`responseSchema`).
+   - Fetches live inventory from `prestonmotor.com` (New & Pre-Owned/CPO) across all pages and evaluates every guest's vehicle targets independently with **Google Gemini (`gemini-2.5-flash`)** using structured JSON output (`responseSchema`).
    - Includes wake-up catch-up logic if the Googlebook lid was closed at 7:30 AM or 2:00 PM, plus an on-demand **Search Now** button.
 4. **Launcher Widget (Strictly Last 10 Guests Input)**
    - **Android / Googlebook ARCVM**: `PrestonGuestWidgetProvider` + `PrestonGuestWidgetService` (`RemoteViewsService` `ListView`) displays **only the names of the last 10 guests input** and deep-links (`prestonscout://guest/<id>`) straight to that guest's vehicle list.
@@ -24,7 +25,7 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
    - **ChromeOS Browser & Linux**: `chromeos_extension/background.js` (`chrome.runtime.onStartup`) auto-opens the app window at Chromebook sign-in, paired with `scripts/install-chromebook-autostart.sh` (`systemd --user` service) for the backend.
 6. **Google Single Sign-On (SSO) & Multi-Device Google Drive Sync**
    - **Google SSO Across Devices**: Sign in using native Android / Googlebook OS Google Sign-In (`play-services-auth`), OAuth 2.0 PKCE Browser Loopback SSO, or Google Identity Services on Web.
-   - **Automatic Save to Google Drive**: Every new guest, requirement edit, guest deletion tombstone, and vehicle search result is automatically saved to `preston_guest_scout_cloud_sync.json` in Google Drive.
+   - **Automatic Save to Google Drive**: Every new guest, added/removed vehicle target, requirement edit, guest deletion tombstone, and vehicle search result is automatically saved to `preston_guest_scout_cloud_sync.json` in Google Drive.
    - **Automatic Query on Every App Open**: Every cold start, app foreground resume (`AppLifecycleState.resumed` / browser tab focus), and Launcher Widget launch automatically queries Google Drive and merges remote updates conflict-free across all devices.
 
 ---

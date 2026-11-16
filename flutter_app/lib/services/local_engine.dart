@@ -130,11 +130,16 @@ class LocalScoutEngine {
     await _syncWidget();
   }
 
-  /// Normalizes structured guest fields AND extracts fallback specs (Make, Max Price
+  /// Normalizes structured vehicle criteria AND extracts fallback specs (Make, Max Price
   /// such as "$60K" or shorthand "60" -> 60000, Condition, Drivetrain) from free-form notes.
-  static Map<String, dynamic> _normalizeGuestMap(Map<String, dynamic> raw) {
+  static Map<String, dynamic> _normalizeTargetMap(
+    Map<String, dynamic> raw, {
+    required String fallbackId,
+    required String fallbackCreatedAt,
+  }) {
     final featuresList = (raw['features'] as List<dynamic>? ?? [])
-        .map((e) => e.toString())
+        .map((e) => e.toString().trim())
+        .where((s) => s.isNotEmpty)
         .toList();
     final notesStr = (raw['notes']?.toString() ?? '').trim();
     final combinedText = '$notesStr ${featuresList.join(' ')}'.trim();
@@ -211,14 +216,77 @@ class LocalScoutEngine {
       }
     }
 
-    return {
-      ...raw,
+    final rawId = (raw['id']?.toString() ?? '').trim();
+    final rawCreated = (raw['createdAt']?.toString() ?? '').trim();
+
+    return <String, dynamic>{
+      'id': rawId.isNotEmpty ? rawId : fallbackId,
+      'condition': condition,
+      'minYear': (raw['minYear'] as num?)?.toInt(),
+      'maxYear': (raw['maxYear'] as num?)?.toInt(),
       'make': make,
       'model': (raw['model']?.toString() ?? '').trim(),
       'trim': (raw['trim']?.toString() ?? '').trim(),
-      'condition': condition,
-      'drivetrain': drivetrain,
       'maxPrice': maxPrice,
+      'maxMileage': (raw['maxMileage'] as num?)?.toInt(),
+      'drivetrain': drivetrain,
+      'exteriorColor': (raw['exteriorColor']?.toString() ?? '').trim(),
+      'features': featuresList,
+      'notes': notesStr,
+      'createdAt': rawCreated.isNotEmpty ? rawCreated : fallbackCreatedAt,
+    };
+  }
+
+  static Map<String, dynamic> _normalizeGuestMap(Map<String, dynamic> raw) {
+    final gid = (raw['id']?.toString() ?? '').trim();
+    final createdAt = (raw['createdAt']?.toString() ??
+            DateTime.now().toUtc().toIso8601String())
+        .trim();
+
+    final normalizedTargets = <Map<String, dynamic>>[];
+    final rawTargets = raw['vehicleTargets'];
+    if (rawTargets is List && rawTargets.isNotEmpty) {
+      for (var i = 0; i < rawTargets.length; i++) {
+        final item = rawTargets[i];
+        if (item is Map) {
+          normalizedTargets.add(
+            _normalizeTargetMap(
+              Map<String, dynamic>.from(item),
+              fallbackId: '${gid.isNotEmpty ? gid : 'guest'}-vt-${i + 1}',
+              fallbackCreatedAt: createdAt,
+            ),
+          );
+        }
+      }
+    }
+
+    if (normalizedTargets.isEmpty) {
+      normalizedTargets.add(
+        _normalizeTargetMap(
+          raw,
+          fallbackId: '${gid.isNotEmpty ? gid : 'guest'}-primary',
+          fallbackCreatedAt: createdAt,
+        ),
+      );
+    }
+
+    final primary = normalizedTargets.first;
+
+    return <String, dynamic>{
+      ...raw,
+      'condition': primary['condition'],
+      'minYear': primary['minYear'],
+      'maxYear': primary['maxYear'],
+      'make': primary['make'],
+      'model': primary['model'],
+      'trim': primary['trim'],
+      'maxPrice': primary['maxPrice'],
+      'maxMileage': primary['maxMileage'],
+      'drivetrain': primary['drivetrain'],
+      'exteriorColor': primary['exteriorColor'],
+      'features': primary['features'],
+      'notes': primary['notes'],
+      'vehicleTargets': normalizedTargets,
     };
   }
 
@@ -597,6 +665,176 @@ class LocalScoutEngine {
     }
   }
 
+  static GuestProfile _buildSingleTargetGuestSpec(
+    GuestProfile parentGuest,
+    VehicleSearchTarget target,
+  ) {
+    return GuestProfile(
+      id: parentGuest.id,
+      name: parentGuest.name,
+      phone: parentGuest.phone,
+      email: parentGuest.email,
+      condition: target.condition,
+      minYear: target.minYear,
+      maxYear: target.maxYear,
+      make: target.make,
+      model: target.model,
+      trim: target.trim,
+      maxPrice: target.maxPrice,
+      maxMileage: target.maxMileage,
+      drivetrain: target.drivetrain,
+      exteriorColor: target.exteriorColor,
+      features: target.features,
+      notes: target.notes,
+      vehicleTargets: [target],
+      active: parentGuest.active,
+      createdAt: parentGuest.createdAt,
+    );
+  }
+
+  static Future<
+      ({
+        GuestProfile guest,
+        List<VehicleMatch> matches,
+        String summary,
+      })> addVehicleTargetToGuest({
+    required String guestId,
+    String condition = 'Any',
+    int? minYear,
+    int? maxYear,
+    String make = '',
+    String model = '',
+    String trim = '',
+    double? maxPrice,
+    int? maxMileage,
+    String drivetrain = 'Any',
+    String exteriorColor = '',
+    List<String> features = const [],
+    String notes = '',
+  }) async {
+    await ensureInitialized();
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final currentHydrated = _hydrateGuest(_guests[idx]);
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final newTargetId = 'vt-${DateTime.now().microsecondsSinceEpoch}';
+
+    final newTargetMap = _normalizeTargetMap(
+      <String, dynamic>{
+        'id': newTargetId,
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'createdAt': nowIso,
+      },
+      fallbackId: newTargetId,
+      fallbackCreatedAt: nowIso,
+    );
+
+    final newTargetModel = VehicleSearchTarget.fromJson(newTargetMap);
+    final hasAnyCriteria = newTargetModel.make.isNotEmpty ||
+        newTargetModel.model.isNotEmpty ||
+        newTargetModel.trim.isNotEmpty ||
+        newTargetModel.maxPrice != null ||
+        newTargetModel.minYear != null ||
+        newTargetModel.maxYear != null ||
+        newTargetModel.notes.isNotEmpty ||
+        newTargetModel.features.isNotEmpty ||
+        newTargetModel.condition != 'Any' ||
+        newTargetModel.drivetrain != 'Any';
+    if (!hasAnyCriteria) {
+      throw Exception(
+        'Please enter at least a make, model, budget, or requirement for the vehicle.',
+      );
+    }
+
+    // Backfill targetId/targetLabel on legacy single-vehicle matches before adding 2nd vehicle
+    if (currentHydrated.effectiveTargets.length == 1) {
+      final primaryTarget = currentHydrated.effectiveTargets.first;
+      for (var i = 0; i < _matches.length; i++) {
+        if (_matches[i]['guestId']?.toString() == guestId &&
+            (_matches[i]['targetId']?.toString() ?? '').isEmpty) {
+          _matches[i] = <String, dynamic>{
+            ..._matches[i],
+            'targetId': primaryTarget.id,
+            'targetLabel': primaryTarget.label,
+          };
+        }
+      }
+    }
+
+    final existingTargets = List<Map<String, dynamic>>.from(
+      (_guests[idx]['vehicleTargets'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map)),
+    );
+    existingTargets.add(newTargetMap);
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'vehicleTargets': existingTargets,
+      'updatedAt': nowIso,
+    });
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+
+    return runSearchForSingleGuest(
+      guestId,
+      slotLabel: 'Added Vehicle Search (${newTargetModel.label})',
+      onlyTargetId: newTargetId,
+    );
+  }
+
+  static Future<({GuestProfile guest, List<VehicleMatch> matches})>
+      removeVehicleTargetFromGuest(String guestId, String targetId) async {
+    await ensureInitialized();
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final existingTargets = List<Map<String, dynamic>>.from(
+      (_guests[idx]['vehicleTargets'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map)),
+    );
+    if (existingTargets.length <= 1) {
+      throw Exception('A guest must have at least one vehicle target.');
+    }
+
+    final remaining = existingTargets
+        .where((t) => t['id']?.toString() != targetId)
+        .toList();
+    if (remaining.length == existingTargets.length) {
+      throw Exception('Vehicle target not found on guest.');
+    }
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    _matches.removeWhere(
+      (m) =>
+          m['guestId']?.toString() == guestId &&
+          m['targetId']?.toString() == targetId,
+    );
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'vehicleTargets': remaining,
+      'updatedAt': nowIso,
+    });
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+
+    return getGuestWithMatches(guestId);
+  }
+
   static Future<
       ({
         GuestProfile guest,
@@ -605,17 +843,57 @@ class LocalScoutEngine {
       })> runSearchForSingleGuest(
     String guestId, {
     String slotLabel = 'On-Demand Gemini Search',
+    String? onlyTargetId,
   }) async {
     await ensureInitialized();
     final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
     if (idx == -1) throw Exception('Guest not found');
 
-    // Ensure normalized specs (e.g., Make=Ford / MaxPrice=60000) are persisted on existing guests too
+    // Ensure normalized specs across all vehicleTargets are persisted
     _guests[idx] = _normalizeGuestMap(_guests[idx]);
     final guest = _hydrateGuest(_guests[idx]);
+    final allTargets = guest.effectiveTargets;
+    final targetsToRun = onlyTargetId != null
+        ? allTargets.where((t) => t.id == onlyTargetId).toList()
+        : allTargets;
 
-    final candidates = await _fetchPrestonCandidates(guest);
-    final eval = await _evaluateCandidates(guest, candidates);
+    if (targetsToRun.isEmpty) {
+      final unchanged = await getGuestWithMatches(guestId);
+      return (
+        guest: unchanged.guest,
+        matches: unchanged.matches,
+        summary: 'No vehicle criteria found to search.',
+      );
+    }
+
+    int totalCandidatesScanned = 0;
+    final bestByVin = <String, Map<String, dynamic>>{};
+    final targetSummaries = <String>[];
+
+    for (final target in targetsToRun) {
+      final specGuest = _buildSingleTargetGuestSpec(guest, target);
+      final candidates = await _fetchPrestonCandidates(specGuest);
+      final eval = await _evaluateCandidates(specGuest, candidates);
+      totalCandidatesScanned += candidates.length;
+      targetSummaries.add('${target.label}: ${eval.matches.length} match(es)');
+
+      for (final item in eval.matches) {
+        final v = item['vehicle'] as Map<String, dynamic>;
+        final vin = v['vin']?.toString() ?? '';
+        if (vin.isEmpty) continue;
+        final prev = bestByVin[vin];
+        final score = (item['matchScore'] as num?)?.toInt() ?? 85;
+        final prevScore = (prev?['matchScore'] as num?)?.toInt() ?? 0;
+        if (prev == null || score >= prevScore) {
+          bestByVin[vin] = <String, dynamic>{
+            ...item,
+            'targetId': target.id,
+            'targetLabel': target.label,
+          };
+        }
+      }
+    }
+
     final nowIso = DateTime.now().toUtc().toIso8601String();
 
     // Index existing matches for O(1) VIN lookup when saving 1,000+ matches
@@ -627,12 +905,22 @@ class LocalScoutEngine {
       }
     }
 
-    if (candidates.isNotEmpty) {
-      // Remove old matches for this guest and rebuild cleanly while preserving original foundAt timestamps
-      _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
+    if (totalCandidatesScanned > 0) {
+      if (onlyTargetId != null) {
+        // Keep matches belonging to the guest's other vehicle targets; replace onlyTargetId's matches & duplicate VINs
+        _matches.removeWhere((m) {
+          if (m['guestId']?.toString() != guestId) return false;
+          final mTarget = m['targetId']?.toString() ?? '';
+          final mVin = m['vin']?.toString() ?? '';
+          return mTarget == onlyTargetId || bestByVin.containsKey(mVin);
+        });
+      } else {
+        // Full scan across all vehicleTargets: rebuild cleanly while preserving original foundAt timestamps
+        _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
+      }
 
       int seq = 0;
-      for (final item in eval.matches) {
+      for (final item in bestByVin.values) {
         final v = item['vehicle'] as Map<String, dynamic>;
         final vin = v['vin']?.toString() ?? '';
         if (vin.isEmpty) continue;
@@ -669,14 +957,24 @@ class LocalScoutEngine {
           'foundAt': prev?['foundAt'] ?? nowIso,
           'searchSlot': prev?['searchSlot'] ?? slotLabel,
           'lastSeenAt': nowIso,
+          'targetId': item['targetId'] ?? '',
+          'targetLabel': item['targetLabel'] ?? '',
         });
       }
     }
 
+    final locCount = bestByVin.values
+        .map((m) => (m['vehicle'] as Map)['location']?.toString() ?? '')
+        .toSet()
+        .length;
+    final summaryText = targetsToRun.length > 1
+        ? 'Scanned ${targetsToRun.length} vehicle criteria (${targetSummaries.join(' • ')}) — ${bestByVin.length} match(es) across $locCount Preston location(s).'
+        : 'Scanned $totalCandidatesScanned live prestonmotor.com vehicles for ${targetsToRun.first.label}; verified ${bestByVin.length} match(es) across $locCount Preston location(s).';
+
     _guests[idx] = {
       ..._guests[idx],
       'lastSearchedAt': nowIso,
-      'lastSearchSummary': eval.summary,
+      'lastSearchSummary': summaryText,
       'updatedAt': nowIso,
     };
     await _persist();
@@ -688,7 +986,7 @@ class LocalScoutEngine {
     return (
       guest: updated.guest,
       matches: updated.matches,
-      summary: eval.summary,
+      summary: summaryText,
     );
   }
 
@@ -1701,6 +1999,35 @@ class LocalScoutEngine {
     List<Map<String, dynamic>> candidates,
   ) =>
       _deterministicEvaluate(guest, _preFilter(guest, candidates));
+
+  @visibleForTesting
+  static List<Map<String, dynamic>> evaluateMultiTargetGuestForTest(
+    GuestProfile guest,
+    List<Map<String, dynamic>> candidates,
+  ) {
+    final bestByVin = <String, Map<String, dynamic>>{};
+    for (final target in guest.effectiveTargets) {
+      final specGuest = _buildSingleTargetGuestSpec(guest, target);
+      final matched =
+          _deterministicEvaluate(specGuest, _preFilter(specGuest, candidates));
+      for (final item in matched) {
+        final v = item['vehicle'] as Map<String, dynamic>;
+        final vin = v['vin']?.toString() ?? '';
+        if (vin.isEmpty) continue;
+        final prev = bestByVin[vin];
+        final score = (item['matchScore'] as num?)?.toInt() ?? 85;
+        final prevScore = (prev?['matchScore'] as num?)?.toInt() ?? 0;
+        if (prev == null || score >= prevScore) {
+          bestByVin[vin] = <String, dynamic>{
+            ...item,
+            'targetId': target.id,
+            'targetLabel': target.label,
+          };
+        }
+      }
+    }
+    return bestByVin.values.toList();
+  }
 
   @visibleForTesting
   static Map<String, dynamic> simulateMultiDeviceCloudMergeForTest({

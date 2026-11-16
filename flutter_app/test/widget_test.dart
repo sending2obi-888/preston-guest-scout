@@ -210,5 +210,146 @@ void main() {
     expect(fordMatch['price'], 49995.0);
     expect(fordMatch['foundAt'], '2026-11-16T08:05:00Z');
   });
+
+  test('Guest with multiple vehicle makes/models evaluates each target independently and syncs across devices', () {
+    final multiGuest = GuestProfile.fromJson({
+      'id': 'guest-multi',
+      'name': 'Jordan Taylor',
+      'createdAt': '2026-11-16T10:00:00Z',
+      'vehicleTargets': [
+        {
+          'id': 'vt-expedition',
+          'condition': 'New',
+          'minYear': 2025,
+          'maxYear': 2026,
+          'make': 'Ford',
+          'model': 'Expedition',
+          'maxPrice': 78000,
+          'drivetrain': '4WD',
+          'features': ['3rd Row Seating'],
+        },
+        {
+          'id': 'vt-navigator',
+          'condition': 'Pre-Owned',
+          'minYear': 2022,
+          'maxYear': 2024,
+          'make': 'Lincoln',
+          'model': 'Navigator',
+          'maxPrice': 62000,
+          'drivetrain': '4WD',
+          'features': ['Leather Seats'],
+        },
+      ],
+    });
+
+    expect(multiGuest.effectiveTargets.length, 2);
+    expect(multiGuest.targetVehicleLabel, contains('Ford Expedition'));
+    expect(multiGuest.targetVehicleLabel, contains('Lincoln Navigator'));
+    expect(multiGuest.allSearchableSpecsText.contains('navigator'), isTrue);
+
+    final sampleInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FMJU1J80TEA00011',
+        'title': '2026 Ford Expedition XLT 4WD',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'Expedition',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 72900.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'mileage': 8,
+        'drivetrain': '4WD',
+        'highlights': ['3rd Row Seating', 'Apple CarPlay'],
+        'commentsSummary': 'New Expedition 4WD in stock.',
+      },
+      {
+        'vin': '5LMJJ2LG4PEL00022',
+        'title': '2023 Lincoln Navigator Reserve 4WD',
+        'year': 2023,
+        'make': 'Lincoln',
+        'model': 'Navigator',
+        'trim': 'Reserve',
+        'condition': 'Pre-Owned',
+        'price': 58900.0,
+        'location': 'Boulevard Lincoln Lewes',
+        'mileage': 24500,
+        'drivetrain': '4WD',
+        'highlights': ['Leather Seats', 'Panoramic Vista Roof'],
+        'commentsSummary': 'Clean 1-owner Lincoln Navigator.',
+      },
+      {
+        'vin': '5LMJJ2LG4PEL99999',
+        'title': '2024 Lincoln Navigator Black Label 4WD',
+        'year': 2024,
+        'make': 'Lincoln',
+        'model': 'Navigator',
+        'trim': 'Black Label',
+        'condition': 'Pre-Owned',
+        'price': 84000.0, // Exceeds Navigator $62K cap (even though Expedition cap is $78K!)
+        'location': 'Boulevard Lincoln Lewes',
+        'mileage': 9000,
+        'drivetrain': '4WD',
+        'highlights': ['Leather Seats'],
+        'commentsSummary': 'Above Navigator budget.',
+      },
+    ];
+
+    final matched = LocalScoutEngine.evaluateMultiTargetGuestForTest(
+      multiGuest,
+      sampleInventory,
+    );
+    expect(matched.length, 2);
+
+    final matchedVins =
+        matched.map((m) => (m['vehicle'] as Map)['vin']).toSet();
+    expect(matchedVins, {'1FMJU1J80TEA00011', '5LMJJ2LG4PEL00022'});
+
+    final navMatch = matched.firstWhere(
+      (m) => (m['vehicle'] as Map)['vin'] == '5LMJJ2LG4PEL00022',
+    );
+    expect(navMatch['targetId'], 'vt-navigator');
+    expect(navMatch['targetLabel'], contains('Lincoln Navigator'));
+
+    // Verify cloud sync updates single-vehicle guest on Device A to 2-vehicle guest added on Device B
+    final merged = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: {
+        'schemaVersion': 2,
+        'guests': [
+          {
+            'id': 'guest-multi',
+            'name': 'Jordan Taylor',
+            'make': 'Ford',
+            'model': 'Expedition',
+            'createdAt': '2026-11-16T10:00:00Z',
+            'updatedAt': '2026-11-16T10:00:00Z',
+          },
+        ],
+        'matches': [],
+      },
+      deviceBSnapshot: {
+        'schemaVersion': 2,
+        'guests': [
+          {
+            'id': 'guest-multi',
+            'name': 'Jordan Taylor',
+            'make': 'Ford',
+            'model': 'Expedition',
+            'createdAt': '2026-11-16T10:00:00Z',
+            'updatedAt': '2026-11-16T11:30:00Z',
+            'vehicleTargets': multiGuest.effectiveTargets
+                .map((t) => t.toJson())
+                .toList(),
+          },
+        ],
+        'matches': [],
+      },
+    );
+
+    final syncedGuest = GuestProfile.fromJson(
+      Map<String, dynamic>.from((merged['guests'] as List).first as Map),
+    );
+    expect(syncedGuest.effectiveTargets.length, 2);
+  });
 }
 

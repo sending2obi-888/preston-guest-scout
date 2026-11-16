@@ -3,7 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { db, getSetting, setSetting, mapGuestRow, mapMatchRow } from './db.mjs';
+import {
+  db,
+  getSetting,
+  setSetting,
+  mapGuestRow,
+  mapMatchRow,
+  formatVehicleTargetLabel,
+} from './db.mjs';
 import { normalizeGuestSpecs } from './preston_scraper.mjs';
 import {
   queryAndSyncWithGoogleDrive,
@@ -68,6 +75,39 @@ function readJsonBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+function buildNormalizedVehicleTarget(rawSpec, fallbackId, createdAtIso) {
+  const features = Array.isArray(rawSpec.features)
+    ? rawSpec.features.map((f) => String(f).trim()).filter(Boolean)
+    : [];
+  const normalized = normalizeGuestSpecs({
+    make: (rawSpec.make || '').trim(),
+    model: (rawSpec.model || '').trim(),
+    trim: (rawSpec.trim || '').trim(),
+    condition: rawSpec.condition || 'Any',
+    drivetrain: rawSpec.drivetrain || 'Any',
+    maxPrice: rawSpec.maxPrice ? Number(rawSpec.maxPrice) : null,
+    notes: (rawSpec.notes || '').trim(),
+    features,
+  });
+
+  return {
+    id: String(rawSpec.id || fallbackId),
+    condition: normalized.condition || 'Any',
+    minYear: rawSpec.minYear ? Number(rawSpec.minYear) : null,
+    maxYear: rawSpec.maxYear ? Number(rawSpec.maxYear) : null,
+    make: normalized.make || '',
+    model: normalized.model || '',
+    trim: normalized.trim || '',
+    maxPrice: normalized.maxPrice ?? null,
+    maxMileage: rawSpec.maxMileage ? Number(rawSpec.maxMileage) : null,
+    drivetrain: normalized.drivetrain || 'Any',
+    exteriorColor: (rawSpec.exteriorColor || '').trim(),
+    features,
+    notes: (rawSpec.notes || '').trim(),
+    createdAt: String(rawSpec.createdAt || createdAtIso),
+  };
 }
 
 async function seedInitialGuestsIfEmpty() {
@@ -276,17 +316,9 @@ const server = http.createServer(async (req, res) => {
         guests: guests.map((g) => ({
           id: g.id,
           name: g.name,
-          targetSummary: [
-            g.condition !== 'Any' ? g.condition : null,
-            g.minYear && g.maxYear
-              ? `${g.minYear}–${g.maxYear}`
-              : g.minYear || g.maxYear || null,
-            g.make,
-            g.model,
-            g.trim,
-          ]
-            .filter(Boolean)
-            .join(' '),
+          targetSummary: (g.vehicleTargets || [])
+            .map(formatVehicleTargetLabel)
+            .join(' + '),
           matchCount: g.matchCount,
           createdAt: g.createdAt,
         })),
@@ -313,47 +345,47 @@ const server = http.createServer(async (req, res) => {
 
       const id = crypto.randomUUID();
       const nowIso = new Date().toISOString();
-      const features = Array.isArray(body.features)
-        ? body.features.map((f) => String(f).trim()).filter(Boolean)
-        : [];
-      const normalized = normalizeGuestSpecs({
-        make: (body.make || '').trim(),
-        model: (body.model || '').trim(),
-        trim: (body.trim || '').trim(),
-        condition: body.condition || 'Any',
-        drivetrain: body.drivetrain || 'Any',
-        maxPrice: body.maxPrice ? Number(body.maxPrice) : null,
-        notes: (body.notes || '').trim(),
-        features,
-      });
+
+      let vehicleTargets = [];
+      if (Array.isArray(body.vehicleTargets) && body.vehicleTargets.length > 0) {
+        vehicleTargets = body.vehicleTargets.map((vt, idx) =>
+          buildNormalizedVehicleTarget(vt, `${id}-vt-${idx + 1}`, nowIso)
+        );
+      } else {
+        vehicleTargets = [
+          buildNormalizedVehicleTarget(body, `${id}-primary`, nowIso),
+        ];
+      }
+      const primary = vehicleTargets[0];
 
       db.prepare(`
         INSERT INTO guests (
           id, name, phone, email, condition, min_year, max_year, make, model, trim,
           max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
-          active, created_at, updated_at
+          vehicle_targets_json, active, created_at, updated_at
         ) VALUES (
           @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
           @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
-          1, @created_at, @updated_at
+          @vehicle_targets_json, 1, @created_at, @updated_at
         )
       `).run({
         id,
         name,
         phone: (body.phone || '').trim(),
         email: (body.email || '').trim(),
-        condition: normalized.condition || 'Any',
-        min_year: body.minYear ? Number(body.minYear) : null,
-        max_year: body.maxYear ? Number(body.maxYear) : null,
-        make: normalized.make || '',
-        model: normalized.model || '',
-        trim: normalized.trim || '',
-        max_price: normalized.maxPrice ?? null,
-        max_mileage: body.maxMileage ? Number(body.maxMileage) : null,
-        drivetrain: normalized.drivetrain || 'Any',
-        exterior_color: (body.exteriorColor || '').trim(),
-        features_json: JSON.stringify(features),
-        notes: (body.notes || '').trim(),
+        condition: primary.condition || 'Any',
+        min_year: primary.minYear,
+        max_year: primary.maxYear,
+        make: primary.make || '',
+        model: primary.model || '',
+        trim: primary.trim || '',
+        max_price: primary.maxPrice,
+        max_mileage: primary.maxMileage,
+        drivetrain: primary.drivetrain || 'Any',
+        exterior_color: primary.exteriorColor || '',
+        features_json: JSON.stringify(primary.features || []),
+        notes: primary.notes || '',
+        vehicle_targets_json: JSON.stringify(vehicleTargets),
         created_at: nowIso,
         updated_at: nowIso,
       });
@@ -382,11 +414,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, ...result });
     }
 
-    // Single guest routes: /api/guests/:id, /api/guests/:id/matches, /api/guests/:id/search
-    const guestRouteMatch = pathname.match(/^\/api\/guests\/([^/]+)(?:\/([^/]+))?$/);
+    // Single guest routes: /api/guests/:id, /api/guests/:id/matches, /api/guests/:id/search, /api/guests/:id/vehicles(/:targetId)
+    const guestRouteMatch = pathname.match(
+      /^\/api\/guests\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?$/
+    );
     if (guestRouteMatch) {
       const guestId = decodeURIComponent(guestRouteMatch[1]);
       const subResource = guestRouteMatch[2];
+      const subId = guestRouteMatch[3] ? decodeURIComponent(guestRouteMatch[3]) : null;
 
       if (!subResource && req.method === 'GET') {
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -427,7 +462,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { guest: mapGuestRow(updated) });
       }
 
-      if (subResource === 'matches' && req.method === 'GET') {
+      if (subResource === 'matches' && !subId && req.method === 'GET') {
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
         if (!row) return sendJson(res, 404, { error: 'Guest not found' });
         const matchRows = db
@@ -441,7 +476,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      if (subResource === 'search' && req.method === 'POST') {
+      if (subResource === 'search' && !subId && req.method === 'POST') {
         const result = await runSearchForGuest(guestId, 'On-Demand Gemini Search');
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
         const matchRows = db
@@ -452,6 +487,152 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, {
           ok: true,
           result,
+          guest: mapGuestRow(row),
+          matches: matchRows.map(mapMatchRow),
+        });
+      }
+
+      // Add an additional vehicle criteria target to an existing guest & immediately search prestonmotor.com
+      if (subResource === 'vehicles' && !subId && req.method === 'POST') {
+        const existingRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existingRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const body = await readJsonBody(req);
+        const nowIso = new Date().toISOString();
+        const currentGuest = mapGuestRow(existingRow);
+        const newTarget = buildNormalizedVehicleTarget(
+          body,
+          `vt-${crypto.randomUUID()}`,
+          nowIso
+        );
+
+        const hasAnyCriteria = Boolean(
+          newTarget.make ||
+            newTarget.model ||
+            newTarget.trim ||
+            newTarget.maxPrice ||
+            newTarget.minYear ||
+            newTarget.maxYear ||
+            newTarget.notes ||
+            (newTarget.features && newTarget.features.length > 0) ||
+            newTarget.condition !== 'Any' ||
+            newTarget.drivetrain !== 'Any'
+        );
+        if (!hasAnyCriteria) {
+          return sendJson(res, 400, {
+            error: 'Please enter at least a make, model, budget, or requirement for the vehicle.',
+          });
+        }
+
+        // Backfill target_id/target_label on legacy single-vehicle matches before adding 2nd vehicle
+        if ((currentGuest.vehicleTargets || []).length === 1) {
+          const primaryTarget = currentGuest.vehicleTargets[0];
+          db.prepare(
+            `UPDATE matches
+             SET target_id = ?, target_label = ?
+             WHERE guest_id = ? AND (target_id IS NULL OR target_id = '')`
+          ).run(
+            primaryTarget.id,
+            formatVehicleTargetLabel(primaryTarget),
+            guestId
+          );
+        }
+
+        const updatedTargets = [...(currentGuest.vehicleTargets || []), newTarget];
+        db.prepare(
+          `UPDATE guests
+           SET vehicle_targets_json = ?, updated_at = ?
+           WHERE id = ?`
+        ).run(JSON.stringify(updatedTargets), nowIso, guestId);
+
+        let result = null;
+        if (body.runImmediateSearch !== false) {
+          result = await runSearchForGuest(
+            guestId,
+            `Added Vehicle Search (${formatVehicleTargetLabel(newTarget)})`,
+            { onlyTargetId: newTarget.id }
+          );
+        }
+
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        const matchRows = db
+          .prepare(
+            'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
+          )
+          .all(guestId);
+
+        return sendJson(res, 201, {
+          ok: true,
+          addedTarget: newTarget,
+          result,
+          guest: mapGuestRow(row),
+          matches: matchRows.map(mapMatchRow),
+        });
+      }
+
+      // Remove a specific vehicle target from an existing guest (requires >= 1 target remaining)
+      if (subResource === 'vehicles' && subId && req.method === 'DELETE') {
+        const existingRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existingRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const currentGuest = mapGuestRow(existingRow);
+        const currentTargets = currentGuest.vehicleTargets || [];
+        if (currentTargets.length <= 1) {
+          return sendJson(res, 400, {
+            error: 'A guest must have at least one vehicle target. Delete the guest instead if no longer needed.',
+          });
+        }
+
+        const remaining = currentTargets.filter((t) => t.id !== subId);
+        if (remaining.length === currentTargets.length) {
+          return sendJson(res, 404, { error: 'Vehicle target not found on guest.' });
+        }
+
+        const primary = remaining[0];
+        const nowIso = new Date().toISOString();
+
+        db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
+          guestId,
+          subId
+        );
+
+        db.prepare(
+          `UPDATE guests SET
+             condition = ?, min_year = ?, max_year = ?, make = ?, model = ?, trim = ?,
+             max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
+             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?
+           WHERE id = ?`
+        ).run(
+          primary.condition || 'Any',
+          primary.minYear,
+          primary.maxYear,
+          primary.make || '',
+          primary.model || '',
+          primary.trim || '',
+          primary.maxPrice,
+          primary.maxMileage,
+          primary.drivetrain || 'Any',
+          primary.exteriorColor || '',
+          JSON.stringify(primary.features || []),
+          primary.notes || '',
+          JSON.stringify(remaining),
+          nowIso,
+          guestId
+        );
+
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        const matchRows = db
+          .prepare(
+            'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
+          )
+          .all(guestId);
+
+        return sendJson(res, 200, {
+          ok: true,
           guest: mapGuestRow(row),
           matches: matchRows.map(mapMatchRow),
         });

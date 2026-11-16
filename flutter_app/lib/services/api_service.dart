@@ -253,6 +253,108 @@ class ApiService {
     }
   }
 
+  static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
+      addVehicleToGuest({
+    required String guestId,
+    String condition = 'Any',
+    int? minYear,
+    int? maxYear,
+    String make = '',
+    String model = '',
+    String trim = '',
+    double? maxPrice,
+    int? maxMileage,
+    String drivetrain = 'Any',
+    String exteriorColor = '',
+    List<String> features = const [],
+    String notes = '',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.addVehicleTargetToGuest(
+        guestId: guestId,
+        condition: condition,
+        minYear: minYear,
+        maxYear: maxYear,
+        make: make,
+        model: model,
+        trim: trim,
+        maxPrice: maxPrice,
+        maxMileage: maxMileage,
+        drivetrain: drivetrain,
+        exteriorColor: exteriorColor,
+        features: features,
+        notes: notes,
+      );
+    }
+
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/vehicles'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'runImmediateSearch': true,
+      }),
+    );
+
+    if (res.statusCode != 201 && res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to add vehicle to guest');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final result = data['result'] as Map<String, dynamic>?;
+    await fetchLauncherWidgetGuests();
+
+    return (
+      guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
+      matches: (data['matches'] as List<dynamic>? ?? [])
+          .map((e) => VehicleMatch.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      summary: result?['summary']?.toString() ??
+          'Added vehicle criteria and searched prestonmotor.com.',
+    );
+  }
+
+  static Future<({GuestProfile guest, List<VehicleMatch> matches})>
+      removeVehicleFromGuest(String guestId, String targetId) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.removeVehicleTargetFromGuest(guestId, targetId);
+    }
+
+    final res = await http.delete(
+      Uri.parse(
+        '$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/vehicles/${Uri.encodeComponent(targetId)}',
+      ),
+      headers: _headers(),
+    );
+
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to remove vehicle target');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    await fetchLauncherWidgetGuests();
+
+    return (
+      guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
+      matches: (data['matches'] as List<dynamic>? ?? [])
+          .map((e) => VehicleMatch.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
   static Future<void> deleteGuest(String guestId) async {
     if (_useLocalOnDeviceEngine) {
       await LocalScoutEngine.deleteGuest(guestId);

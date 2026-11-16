@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { db, getSetting, mapGuestRow } from './db.mjs';
+import { db, getSetting, mapGuestRow, formatVehicleTargetLabel } from './db.mjs';
 import { searchPrestonInventory } from './preston_scraper.mjs';
 import { evaluateInventoryWithGeminiAgent } from './gemini_agent.mjs';
 import { scheduleAutoSaveToGoogleDrive } from './drive_sync.mjs';
@@ -53,15 +53,11 @@ export function getScheduleStatus() {
   }
 
   const lastRun = db
-    .prepare(
-      'SELECT * FROM search_runs ORDER BY started_at DESC LIMIT 1'
-    )
+    .prepare('SELECT * FROM search_runs ORDER BY started_at DESC LIMIT 1')
     .get();
 
   const recentRuns = db
-    .prepare(
-      'SELECT * FROM search_runs ORDER BY started_at DESC LIMIT 10'
-    )
+    .prepare('SELECT * FROM search_runs ORDER BY started_at DESC LIMIT 10')
     .all();
 
   return {
@@ -82,13 +78,13 @@ const upsertMatchStmt = db.prepare(`
     price, msrp, dealer_fee, location, mileage, drivetrain, engine,
     exterior_color, interior_color, photo_url, listing_url,
     matched_features_json, all_highlights_json, agent_summary, match_score,
-    found_at, search_slot, last_seen_at
+    found_at, search_slot, last_seen_at, target_id, target_label
   ) VALUES (
     @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
     @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
     @exterior_color, @interior_color, @photo_url, @listing_url,
     @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
-    @found_at, @search_slot, @last_seen_at
+    @found_at, @search_slot, @last_seen_at, @target_id, @target_label
   )
   ON CONFLICT(guest_id, vin) DO UPDATE SET
     price = excluded.price,
@@ -102,15 +98,96 @@ const upsertMatchStmt = db.prepare(`
     all_highlights_json = excluded.all_highlights_json,
     agent_summary = excluded.agent_summary,
     match_score = excluded.match_score,
-    last_seen_at = excluded.last_seen_at
+    last_seen_at = excluded.last_seen_at,
+    target_id = excluded.target_id,
+    target_label = excluded.target_label
 `);
 
-export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Search') {
+async function evaluateTargetsForGuest(guest, targetsToRun) {
+  let totalCandidatesScanned = 0;
+  let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
+  const bestByVin = new Map();
+  const targetSummaries = [];
+
+  for (const target of targetsToRun) {
+    const targetLabel = formatVehicleTargetLabel(target);
+    const virtualGuestSpec = {
+      id: guest.id,
+      name: guest.name,
+      condition: target.condition || 'Any',
+      minYear: target.minYear,
+      maxYear: target.maxYear,
+      make: target.make || '',
+      model: target.model || '',
+      trim: target.trim || '',
+      maxPrice: target.maxPrice,
+      maxMileage: target.maxMileage,
+      drivetrain: target.drivetrain || 'Any',
+      exteriorColor: target.exteriorColor || '',
+      features: Array.isArray(target.features) ? target.features : [],
+      notes: target.notes || '',
+    };
+
+    const candidates = await searchPrestonInventory(virtualGuestSpec);
+    const evaluation = await evaluateInventoryWithGeminiAgent(virtualGuestSpec, candidates);
+    totalCandidatesScanned += candidates.length;
+    modeUsed = evaluation.mode;
+    targetSummaries.push(`${targetLabel}: ${evaluation.matches.length} match(es)`);
+
+    for (const m of evaluation.matches) {
+      const vin = m?.vehicle?.vin;
+      if (!vin) continue;
+      const prev = bestByVin.get(vin);
+      if (!prev || (m.matchScore || 0) >= (prev.matchScore || 0)) {
+        bestByVin.set(vin, {
+          ...m,
+          targetId: target.id,
+          targetLabel,
+        });
+      }
+    }
+  }
+
+  const combinedMatches = Array.from(bestByVin.values());
+  const locCount = new Set(combinedMatches.map((m) => m.vehicle.location)).size;
+  const summary =
+    targetsToRun.length > 1
+      ? `Scanned ${targetsToRun.length} vehicle criteria (${targetSummaries.join(' • ')}) — ${combinedMatches.length} total match(es) across ${locCount} Preston dealership location(s).`
+      : `Scanned ${totalCandidatesScanned} live prestonmotor.com vehicles for ${formatVehicleTargetLabel(targetsToRun[0])}; verified ${combinedMatches.length} match(es) across ${locCount} Preston location(s).`;
+
+  return {
+    candidatesScanned: totalCandidatesScanned,
+    matches: combinedMatches,
+    mode: modeUsed,
+    summary,
+  };
+}
+
+export async function runSearchForGuest(
+  guestId,
+  slotLabel = 'Manual Gemini Search',
+  { onlyTargetId = null } = {}
+) {
   const rawGuest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
   if (!rawGuest) {
     throw new Error('Guest not found');
   }
   const guest = mapGuestRow(rawGuest);
+  const allTargets = guest.vehicleTargets || [];
+  const targetsToRun = onlyTargetId
+    ? allTargets.filter((t) => t.id === onlyTargetId)
+    : allTargets;
+
+  if (targetsToRun.length === 0) {
+    return {
+      guestId: guest.id,
+      candidatesScanned: 0,
+      matchesFound: 0,
+      mode: 'smart-matcher',
+      summary: 'No vehicle criteria specified.',
+    };
+  }
+
   const startedAt = new Date().toISOString();
   const runId = crypto.randomUUID();
 
@@ -120,13 +197,35 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
   ).run(runId, guest.id, slotLabel, startedAt);
 
   try {
-    const candidates = await searchPrestonInventory(guest);
-    const evaluation = await evaluateInventoryWithGeminiAgent(guest, candidates);
+    const evalRes = await evaluateTargetsForGuest(guest, targetsToRun);
     const nowIso = new Date().toISOString();
+    const validTargetIds = new Set(allTargets.map((t) => t.id));
 
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const m of evaluation.matches) {
+      if (!onlyTargetId && evalRes.candidatesScanned > 0) {
+        // Clean up matches belonging to removed targets or sold VINs on full scan
+        const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
+        const existingRows = db
+          .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
+          .all(guest.id);
+        const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+        for (const r of existingRows) {
+          if (
+            (r.target_id && !validTargetIds.has(r.target_id)) ||
+            !foundVins.has(r.vin)
+          ) {
+            delStmt.run(r.id);
+          }
+        }
+      } else if (onlyTargetId && evalRes.candidatesScanned > 0) {
+        db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
+          guest.id,
+          onlyTargetId
+        );
+      }
+
+      for (const m of evalRes.matches) {
         const v = m.vehicle;
         upsertMatchStmt.run({
           id: crypto.randomUUID(),
@@ -157,6 +256,8 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
           found_at: nowIso,
           search_slot: slotLabel,
           last_seen_at: nowIso,
+          target_id: m.targetId || '',
+          target_label: m.targetLabel || '',
         });
       }
       db.exec('COMMIT');
@@ -169,16 +270,16 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
 
     db.prepare(
       'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
-    ).run(nowIso, evaluation.summary, nowIso, guest.id);
+    ).run(nowIso, evalRes.summary, nowIso, guest.id);
 
     db.prepare(
       `UPDATE search_runs
        SET candidates_scanned = ?, matches_found = ?, agent_mode = ?, completed_at = ?
        WHERE id = ?`
     ).run(
-      candidates.length,
-      evaluation.matches.length,
-      evaluation.mode,
+      evalRes.candidatesScanned,
+      evalRes.matches.length,
+      evalRes.mode,
       nowIso,
       runId
     );
@@ -187,10 +288,10 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
 
     return {
       guestId: guest.id,
-      candidatesScanned: candidates.length,
-      matchesFound: evaluation.matches.length,
-      mode: evaluation.mode,
-      summary: evaluation.summary,
+      candidatesScanned: evalRes.candidatesScanned,
+      matchesFound: evalRes.matches.length,
+      mode: evalRes.mode,
+      summary: evalRes.summary,
     };
   } catch (err) {
     const nowIso = new Date().toISOString();
@@ -226,16 +327,33 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
     for (const row of activeRows) {
       const guest = mapGuestRow(row);
       try {
-        const candidates = await searchPrestonInventory(guest);
-        const evaluation = await evaluateInventoryWithGeminiAgent(guest, candidates);
+        const evalRes = await evaluateTargetsForGuest(guest, guest.vehicleTargets || []);
         const nowIso = new Date().toISOString();
-        modeUsed = evaluation.mode;
-        totalCandidates += candidates.length;
-        totalMatches += evaluation.matches.length;
+        modeUsed = evalRes.mode;
+        totalCandidates += evalRes.candidatesScanned;
+        totalMatches += evalRes.matches.length;
+
+        const validTargetIds = new Set((guest.vehicleTargets || []).map((t) => t.id));
 
         db.exec('BEGIN IMMEDIATE');
         try {
-          for (const m of evaluation.matches) {
+          if (evalRes.candidatesScanned > 0) {
+            const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
+            const existingRows = db
+              .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
+              .all(guest.id);
+            const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+            for (const r of existingRows) {
+              if (
+                (r.target_id && !validTargetIds.has(r.target_id)) ||
+                !foundVins.has(r.vin)
+              ) {
+                delStmt.run(r.id);
+              }
+            }
+          }
+
+          for (const m of evalRes.matches) {
             const v = m.vehicle;
             upsertMatchStmt.run({
               id: crypto.randomUUID(),
@@ -266,6 +384,8 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
               found_at: nowIso,
               search_slot: slotLabel,
               last_seen_at: nowIso,
+              target_id: m.targetId || '',
+              target_label: m.targetLabel || '',
             });
           }
           db.exec('COMMIT');
@@ -278,7 +398,7 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
 
         db.prepare(
           'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
-        ).run(nowIso, evaluation.summary, nowIso, guest.id);
+        ).run(nowIso, evalRes.summary, nowIso, guest.id);
       } catch (guestErr) {
         console.error(`[Scheduler] Error searching for ${guest.name}:`, guestErr.message);
       }
