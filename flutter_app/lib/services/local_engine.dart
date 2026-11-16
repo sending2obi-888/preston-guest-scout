@@ -270,6 +270,42 @@ class LocalScoutEngine {
       );
     }
 
+    final deletedNoteSet = <String>{
+      ...((raw['deletedNoteIds'] as List<dynamic>?)
+              ?.map((e) => e.toString()) ??
+          const <String>[]),
+    };
+
+    final normalizedNotes = <Map<String, dynamic>>[];
+    final rawClientNotes = raw['clientNotes'];
+    if (rawClientNotes is List) {
+      final seenIds = <String>{};
+      for (var i = 0; i < rawClientNotes.length; i++) {
+        final item = rawClientNotes[i];
+        if (item is Map) {
+          final text = (item['text']?.toString() ?? '').trim();
+          if (text.isEmpty) continue;
+          final noteId = (item['id']?.toString() ?? '').isNotEmpty
+              ? item['id'].toString()
+              : '${gid.isNotEmpty ? gid : 'guest'}-note-${i + 1}';
+          if (deletedNoteSet.contains(noteId) || !seenIds.add(noteId)) continue;
+          final noteCreated = (item['createdAt']?.toString() ?? '').isNotEmpty
+              ? item['createdAt'].toString()
+              : createdAt;
+          normalizedNotes.add(<String, dynamic>{
+            'id': noteId,
+            'text': text,
+            'createdAt': noteCreated,
+          });
+        }
+      }
+    }
+    normalizedNotes.sort(
+      (a, b) => (b['createdAt'] ?? '')
+          .toString()
+          .compareTo((a['createdAt'] ?? '').toString()),
+    );
+
     final primary = normalizedTargets.first;
 
     return <String, dynamic>{
@@ -287,6 +323,8 @@ class LocalScoutEngine {
       'features': primary['features'],
       'notes': primary['notes'],
       'vehicleTargets': normalizedTargets,
+      'clientNotes': normalizedNotes,
+      'deletedNoteIds': deletedNoteSet.toList(),
     };
   }
 
@@ -833,6 +871,76 @@ class LocalScoutEngine {
     onDataMutatedForCloudSave?.call();
 
     return getGuestWithMatches(guestId);
+  }
+
+  static Future<GuestProfile> addGuestNote({
+    required String guestId,
+    required String text,
+  }) async {
+    await ensureInitialized();
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      throw Exception('Note text cannot be empty.');
+    }
+
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final newNote = <String, dynamic>{
+      'id': 'note-${DateTime.now().microsecondsSinceEpoch}',
+      'text': trimmed,
+      'createdAt': nowIso,
+    };
+
+    final existingNotes = List<Map<String, dynamic>>.from(
+      (_guests[idx]['clientNotes'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map)),
+    );
+    existingNotes.insert(0, newNote);
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'clientNotes': existingNotes,
+      'updatedAt': nowIso,
+    });
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+    return _hydrateGuest(_guests[idx]);
+  }
+
+  static Future<GuestProfile> deleteGuestNote({
+    required String guestId,
+    required String noteId,
+  }) async {
+    await ensureInitialized();
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final remainingNotes = List<Map<String, dynamic>>.from(
+      (_guests[idx]['clientNotes'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .where((n) => n['id']?.toString() != noteId),
+    );
+    final deletedNoteIds = <String>{
+      ...((_guests[idx]['deletedNoteIds'] as List<dynamic>?)
+              ?.map((e) => e.toString()) ??
+          const <String>[]),
+      noteId,
+    }.toList();
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'clientNotes': remainingNotes,
+      'deletedNoteIds': deletedNoteIds,
+      'updatedAt': nowIso,
+    });
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+    return _hydrateGuest(_guests[idx]);
   }
 
   static Future<
@@ -1880,15 +1988,61 @@ class LocalScoutEngine {
           localGuestsById[id] = _guests.length - 1;
           localChanged = true;
         } else {
-          final existing = _guests[existingIdx];
+          final existing = _normalizeGuestMap(_guests[existingIdx]);
           final localStamp = (existing['updatedAt'] ??
                   existing['lastSearchedAt'] ??
                   existing['createdAt'] ??
                   '')
               .toString();
+
+          // Conflict-free union merge of dated clientNotes + deletedNoteIds across devices
+          final mergedDelSet = <String>{
+            ...((existing['deletedNoteIds'] as List<dynamic>?)
+                    ?.map((e) => e.toString()) ??
+                const <String>[]),
+            ...((rg['deletedNoteIds'] as List<dynamic>?)
+                    ?.map((e) => e.toString()) ??
+                const <String>[]),
+          };
+          final notesById = <String, Map<String, dynamic>>{};
+          for (final n in [
+            ...(existing['clientNotes'] as List<dynamic>? ?? []),
+            ...(rg['clientNotes'] as List<dynamic>? ?? []),
+          ]) {
+            if (n is! Map) continue;
+            final nid = n['id']?.toString() ?? '';
+            final ntext = (n['text']?.toString() ?? '').trim();
+            if (nid.isEmpty || ntext.isEmpty || mergedDelSet.contains(nid)) {
+              continue;
+            }
+            notesById[nid] = Map<String, dynamic>.from(n);
+          }
+          final mergedNotesList = notesById.values.toList()
+            ..sort((a, b) => (b['createdAt'] ?? '')
+                .toString()
+                .compareTo((a['createdAt'] ?? '').toString()));
+
           if (rgStamp.compareTo(localStamp) > 0) {
-            _guests[existingIdx] = rg;
+            _guests[existingIdx] = _normalizeGuestMap(<String, dynamic>{
+              ...rg,
+              'clientNotes': mergedNotesList,
+              'deletedNoteIds': mergedDelSet.toList(),
+            });
             localChanged = true;
+          } else {
+            final prevNotesLen =
+                (existing['clientNotes'] as List<dynamic>? ?? []).length;
+            final prevDelLen =
+                (existing['deletedNoteIds'] as List<dynamic>? ?? []).length;
+            if (mergedNotesList.length != prevNotesLen ||
+                mergedDelSet.length != prevDelLen) {
+              _guests[existingIdx] = _normalizeGuestMap(<String, dynamic>{
+                ...existing,
+                'clientNotes': mergedNotesList,
+                'deletedNoteIds': mergedDelSet.toList(),
+              });
+              localChanged = true;
+            }
           }
         }
       }
@@ -1998,6 +2152,16 @@ class LocalScoutEngine {
   static void cancelSchedulerForTest() {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
+  }
+
+  @visibleForTesting
+  static void resetForTest() {
+    _scheduleTimer?.cancel();
+    _scheduleTimer = null;
+    _initialized = false;
+    _guests = [];
+    _matches = [];
+    _deletedGuestIds = {};
   }
 
   @visibleForTesting

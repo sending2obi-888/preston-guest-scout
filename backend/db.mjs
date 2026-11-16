@@ -34,9 +34,11 @@ db.exec(`
     max_mileage INTEGER,
     drivetrain TEXT DEFAULT 'Any',
     exterior_color TEXT DEFAULT '',
-    features_json TEXT DEFAULT '[]',
+      features_json TEXT DEFAULT '[]',
     notes TEXT DEFAULT '',
     vehicle_targets_json TEXT DEFAULT '[]',
+    client_notes_json TEXT DEFAULT '[]',
+    deleted_note_ids_json TEXT DEFAULT '[]',
     active INTEGER DEFAULT 1,
     last_searched_at TEXT,
     last_search_summary TEXT DEFAULT '',
@@ -106,6 +108,8 @@ db.exec(`
 for (const ddl of [
   `ALTER TABLE guests ADD COLUMN updated_at TEXT`,
   `ALTER TABLE guests ADD COLUMN vehicle_targets_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE guests ADD COLUMN client_notes_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE guests ADD COLUMN deleted_note_ids_json TEXT DEFAULT '[]'`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
 ]) {
@@ -224,6 +228,33 @@ export function mapGuestRow(row) {
 
   const primary = normalizedTargets[0];
 
+  let parsedClientNotes = [];
+  try {
+    parsedClientNotes = JSON.parse(row.client_notes_json || '[]');
+    if (!Array.isArray(parsedClientNotes)) parsedClientNotes = [];
+  } catch {
+    parsedClientNotes = [];
+  }
+
+  let deletedNoteIds = [];
+  try {
+    deletedNoteIds = JSON.parse(row.deleted_note_ids_json || '[]');
+    if (!Array.isArray(deletedNoteIds)) deletedNoteIds = [];
+  } catch {
+    deletedNoteIds = [];
+  }
+  const deletedSet = new Set(deletedNoteIds.map(String));
+
+  const clientNotes = parsedClientNotes
+    .filter((n) => n && typeof n === 'object' && String(n.text || '').trim().length > 0)
+    .map((n, idx) => ({
+      id: String(n.id || `${row.id}-note-${idx + 1}`),
+      text: String(n.text || '').trim(),
+      createdAt: String(n.createdAt || row.created_at),
+    }))
+    .filter((n) => !deletedSet.has(n.id))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
   const matchStats = db
     .prepare(
       'SELECT COUNT(*) AS count, MIN(price) AS lowest_price FROM matches WHERE guest_id = ?'
@@ -248,6 +279,8 @@ export function mapGuestRow(row) {
     features: primary.features,
     notes: primary.notes || '',
     vehicleTargets: normalizedTargets,
+    clientNotes,
+    deletedNoteIds: [...deletedSet],
     active: Boolean(row.active),
     lastSearchedAt: row.last_searched_at,
     lastSearchSummary: row.last_search_summary || '',

@@ -643,6 +643,72 @@ const server = http.createServer(async (req, res) => {
           matches: matchRows.map(mapMatchRow),
         });
       }
+
+      // Add a dated client note to an existing guest + auto-save to Google Drive
+      if (subResource === 'notes' && !subId && req.method === 'POST') {
+        const existingRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existingRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const body = await readJsonBody(req);
+        const text = String(body.text || '').trim();
+        if (!text) {
+          return sendJson(res, 400, { error: 'Note text cannot be empty.' });
+        }
+
+        const currentGuest = mapGuestRow(existingRow);
+        const nowIso = new Date().toISOString();
+        const newNote = {
+          id: `note-${crypto.randomUUID()}`,
+          text,
+          createdAt: nowIso,
+        };
+        const updatedNotes = [newNote, ...(currentGuest.clientNotes || [])];
+
+        db.prepare(
+          'UPDATE guests SET client_notes_json = ?, updated_at = ? WHERE id = ?'
+        ).run(JSON.stringify(updatedNotes), nowIso, guestId);
+
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        return sendJson(res, 201, {
+          ok: true,
+          addedNote: newNote,
+          guest: mapGuestRow(row),
+        });
+      }
+
+      // Delete a specific client note from a guest + record tombstone for multi-device sync
+      if (subResource === 'notes' && subId && req.method === 'DELETE') {
+        const existingRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existingRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const currentGuest = mapGuestRow(existingRow);
+        const nowIso = new Date().toISOString();
+        const remainingNotes = (currentGuest.clientNotes || []).filter(
+          (n) => n.id !== subId
+        );
+        const updatedDeletedIds = [
+          ...new Set([...(currentGuest.deletedNoteIds || []), subId]),
+        ];
+
+        db.prepare(
+          'UPDATE guests SET client_notes_json = ?, deleted_note_ids_json = ?, updated_at = ? WHERE id = ?'
+        ).run(
+          JSON.stringify(remainingNotes),
+          JSON.stringify(updatedDeletedIds),
+          nowIso,
+          guestId
+        );
+
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        return sendJson(res, 200, {
+          ok: true,
+          guest: mapGuestRow(row),
+        });
+      }
     }
 
     // Single match detail route: /api/matches/:matchId

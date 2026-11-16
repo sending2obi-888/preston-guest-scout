@@ -140,16 +140,18 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     const allDeletedRows = db.prepare('SELECT id, deleted_at FROM deleted_guests').all();
     const localDeletedMap = new Map(allDeletedRows.map((r) => [r.id, r.deleted_at]));
 
-    // 2. Merge remote guests
+    // 2. Merge remote guests (including conflict-free union merge of dated clientNotes)
     const upsertGuestStmt = db.prepare(`
       INSERT INTO guests (
         id, name, phone, email, condition, min_year, max_year, make, model, trim,
         max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
-        vehicle_targets_json, active, last_searched_at, last_search_summary, created_at, updated_at
+        vehicle_targets_json, client_notes_json, deleted_note_ids_json,
+        active, last_searched_at, last_search_summary, created_at, updated_at
       ) VALUES (
         @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
         @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
-        @vehicle_targets_json, @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
+        @vehicle_targets_json, @client_notes_json, @deleted_note_ids_json,
+        @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -171,6 +173,8 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           WHEN excluded.vehicle_targets_json != '[]' THEN excluded.vehicle_targets_json
           ELSE guests.vehicle_targets_json
         END,
+        client_notes_json = excluded.client_notes_json,
+        deleted_note_ids_json = excluded.deleted_note_ids_json,
         active = excluded.active,
         last_searched_at = COALESCE(excluded.last_searched_at, guests.last_searched_at),
         last_search_summary = CASE
@@ -180,6 +184,33 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         updated_at = excluded.updated_at
     `);
 
+    const updateOnlyNotesStmt = db.prepare(
+      'UPDATE guests SET client_notes_json = ?, deleted_note_ids_json = ?, updated_at = ? WHERE id = ?'
+    );
+
+    const mergeClientNotes = (localNotesArr, remoteNotesArr, localDelArr, remoteDelArr) => {
+      const delSet = new Set([
+        ...(Array.isArray(localDelArr) ? localDelArr.map(String) : []),
+        ...(Array.isArray(remoteDelArr) ? remoteDelArr.map(String) : []),
+      ]);
+      const byId = new Map();
+      for (const n of [
+        ...(Array.isArray(localNotesArr) ? localNotesArr : []),
+        ...(Array.isArray(remoteNotesArr) ? remoteNotesArr : []),
+      ]) {
+        if (!n || typeof n !== 'object') continue;
+        const text = String(n.text || '').trim();
+        const id = String(n.id || '');
+        if (!id || !text || delSet.has(id)) continue;
+        const createdAt = String(n.createdAt || new Date().toISOString());
+        byId.set(id, { id, text, createdAt });
+      }
+      const notes = [...byId.values()].sort((a, b) =>
+        b.createdAt.localeCompare(a.createdAt)
+      );
+      return { notes, deletedNoteIds: [...delSet] };
+    };
+
     const remoteGuests = Array.isArray(remote.guests) ? remote.guests : [];
     for (const rg of remoteGuests) {
       if (!rg || !rg.id || !rg.name) continue;
@@ -188,11 +219,31 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       if (tomb && tomb >= rgStamp) continue;
 
       const existing = db
-        .prepare('SELECT updated_at, last_searched_at, created_at FROM guests WHERE id = ?')
+        .prepare(
+          'SELECT updated_at, last_searched_at, created_at, client_notes_json, deleted_note_ids_json FROM guests WHERE id = ?'
+        )
         .get(rg.id);
       const localStamp = existing
         ? existing.updated_at || existing.last_searched_at || existing.created_at || ''
         : '';
+
+      let localNotes = [];
+      let localDelNotes = [];
+      if (existing) {
+        try {
+          localNotes = JSON.parse(existing.client_notes_json || '[]');
+        } catch {}
+        try {
+          localDelNotes = JSON.parse(existing.deleted_note_ids_json || '[]');
+        } catch {}
+      }
+
+      const mergedNotes = mergeClientNotes(
+        localNotes,
+        rg.clientNotes,
+        localDelNotes,
+        rg.deletedNoteIds
+      );
 
       if (!existing || rgStamp > localStamp) {
         const rgTargets = Array.isArray(rg.vehicleTargets) ? rg.vehicleTargets : [];
@@ -214,12 +265,26 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           features_json: JSON.stringify(Array.isArray(rg.features) ? rg.features : []),
           notes: String(rg.notes || ''),
           vehicle_targets_json: JSON.stringify(rgTargets),
+          client_notes_json: JSON.stringify(mergedNotes.notes),
+          deleted_note_ids_json: JSON.stringify(mergedNotes.deletedNoteIds),
           active: rg.active === false ? 0 : 1,
           last_searched_at: rg.lastSearchedAt || null,
           last_search_summary: String(rg.lastSearchSummary || ''),
           created_at: String(rg.createdAt || rgStamp),
           updated_at: String(rgStamp),
         });
+        localChanged = true;
+      } else if (
+        mergedNotes.notes.length !== (Array.isArray(localNotes) ? localNotes.length : 0) ||
+        mergedNotes.deletedNoteIds.length !==
+          (Array.isArray(localDelNotes) ? localDelNotes.length : 0)
+      ) {
+        updateOnlyNotesStmt.run(
+          JSON.stringify(mergedNotes.notes),
+          JSON.stringify(mergedNotes.deletedNoteIds),
+          localStamp > rgStamp ? localStamp : rgStamp,
+          String(rg.id)
+        );
         localChanged = true;
       }
     }

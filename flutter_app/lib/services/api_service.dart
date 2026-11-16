@@ -355,6 +355,53 @@ class ApiService {
     );
   }
 
+  static Future<GuestProfile> addGuestNote({
+    required String guestId,
+    required String text,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.addGuestNote(guestId: guestId, text: text);
+    }
+
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/notes'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({'text': text}),
+    );
+
+    if (res.statusCode != 201 && res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to save client note');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return GuestProfile.fromJson(data['guest'] as Map<String, dynamic>);
+  }
+
+  static Future<GuestProfile> deleteGuestNote({
+    required String guestId,
+    required String noteId,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.deleteGuestNote(guestId: guestId, noteId: noteId);
+    }
+
+    final res = await http.delete(
+      Uri.parse(
+        '$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/notes/${Uri.encodeComponent(noteId)}',
+      ),
+      headers: _headers(),
+    );
+
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to delete client note');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return GuestProfile.fromJson(data['guest'] as Map<String, dynamic>);
+  }
+
   static Future<void> deleteGuest(String guestId) async {
     if (_useLocalOnDeviceEngine) {
       await LocalScoutEngine.deleteGuest(guestId);

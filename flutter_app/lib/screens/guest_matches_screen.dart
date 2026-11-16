@@ -36,6 +36,9 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   String _sortBy = 'score';
   String _searchQuery = '';
   final TextEditingController _searchCtrl = TextEditingController();
+  final TextEditingController _newNoteCtrl = TextEditingController();
+  bool _notesDropdownOpen = false;
+  bool _savingNote = false;
 
   @override
   void initState() {
@@ -46,6 +49,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   @override
   void dispose() {
     _searchCtrl.dispose();
+    _newNoteCtrl.dispose();
     super.dispose();
   }
 
@@ -188,6 +192,65 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     final dt = DateTime.tryParse(iso)?.toLocal();
     if (dt == null) return iso;
     return DateFormat('MMM d, yyyy • h:mm a').format(dt);
+  }
+
+  String _formatNoteDate(String iso) {
+    final dt = DateTime.tryParse(iso)?.toLocal();
+    if (dt == null) return iso;
+    return DateFormat('MMM d, yyyy • h:mm a').format(dt);
+  }
+
+  Future<void> _saveNewClientNote() async {
+    final g = _guest;
+    final trimmed = _newNoteCtrl.text.trim();
+    if (g == null || trimmed.isEmpty || _savingNote) return;
+
+    setState(() => _savingNote = true);
+    try {
+      final updatedGuest = await ApiService.addGuestNote(
+        guestId: g.id,
+        text: trimmed,
+      );
+      _newNoteCtrl.clear();
+      widget.onDataChanged();
+      if (!mounted) return;
+      setState(() {
+        _guest = updatedGuest;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saved note for ${updatedGuest.name}.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save note: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _savingNote = false);
+    }
+  }
+
+  Future<void> _deleteClientNote(GuestNote note) async {
+    final g = _guest;
+    if (g == null) return;
+    try {
+      final updatedGuest = await ApiService.deleteGuestNote(
+        guestId: g.id,
+        noteId: note.id,
+      );
+      widget.onDataChanged();
+      if (!mounted) return;
+      setState(() {
+        _guest = updatedGuest;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove note: $e')),
+      );
+    }
   }
 
   List<MapEntry<String, int>> _computeLocationCounts() {
@@ -355,9 +418,13 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  if (_guest != null)
+                                  if (_guest != null) ...[
+                                    _buildClientNotesDropdownCard(
+                                        scheme, textTheme),
+                                    const SizedBox(height: 14),
                                     _buildRequirementsCard(
                                         scheme, textTheme, currencyFmt),
+                                  ],
                                   const SizedBox(height: 20),
                                   Wrap(
                                     spacing: 12,
@@ -634,6 +701,284 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
           ),
         ],
       ],
+    );
+  }
+
+  Widget _buildClientNotesDropdownCard(
+    ColorScheme scheme,
+    TextTheme textTheme,
+  ) {
+    final g = _guest!;
+    final notes = g.clientNotes;
+    final latest = g.latestClientNote;
+
+    return Card(
+      color: scheme.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Dropdown Header + Always-Visible Most Recent Note Preview
+            Material(
+              color: scheme.surface,
+              borderRadius: BorderRadius.circular(14),
+              child: InkWell(
+                key: const ValueKey('client_notes_dropdown_toggle'),
+                borderRadius: BorderRadius.circular(14),
+                onTap: () =>
+                    setState(() => _notesDropdownOpen = !_notesDropdownOpen),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: _notesDropdownOpen
+                          ? scheme.primary
+                          : scheme.outlineVariant,
+                      width: _notesDropdownOpen ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.sticky_note_2_outlined,
+                            size: 20,
+                            color: scheme.primary,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Client Notes',
+                              style: textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: notes.isNotEmpty
+                                  ? scheme.primaryContainer
+                                  : scheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              '${notes.length} ${notes.length == 1 ? 'Note' : 'Notes'}',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: notes.isNotEmpty
+                                    ? scheme.onPrimaryContainer
+                                    : scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _notesDropdownOpen ? 'Hide History' : 'All Notes',
+                            style: textTheme.labelMedium?.copyWith(
+                              color: scheme.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          Icon(
+                            _notesDropdownOpen
+                                ? Icons.arrow_drop_up_rounded
+                                : Icons.arrow_drop_down_rounded,
+                            color: scheme.primary,
+                            size: 26,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      // Most recent note is ALWAYS visible here without selecting/opening the dropdown!
+                      if (latest != null)
+                        Container(
+                          key: const ValueKey('most_recent_client_note_preview'),
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: scheme.secondaryContainer
+                                .withValues(alpha: 0.38),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.schedule_rounded,
+                                    size: 14,
+                                    color: scheme.onSecondaryContainer,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Expanded(
+                                    child: Text(
+                                      'Most Recent Note • ${_formatNoteDate(latest.createdAt)}',
+                                      style: textTheme.labelSmall?.copyWith(
+                                        color: scheme.onSecondaryContainer,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                latest.text,
+                                style: textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else
+                        Text(
+                          'No notes added yet for ${g.name}. Enter a new note below.',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // Expanded Dropdown Content — displays all saved notes with the date each note was added
+            if (_notesDropdownOpen) ...[
+              const SizedBox(height: 10),
+              Container(
+                key: const ValueKey('client_notes_dropdown_list'),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: notes.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          'Saved notes will appear here with the date each note was added.',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    : ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 260),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: notes.length,
+                          separatorBuilder: (_, _) =>
+                              const Divider(height: 14),
+                          itemBuilder: (context, idx) {
+                            final n = notes[idx];
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Icon(
+                                  idx == 0
+                                      ? Icons.bookmark_added_rounded
+                                      : Icons.notes_rounded,
+                                  size: 18,
+                                  color: idx == 0
+                                      ? scheme.primary
+                                      : scheme.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Added ${_formatNoteDate(n.createdAt)}',
+                                        style: textTheme.labelSmall?.copyWith(
+                                          color: scheme.primary,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        n.text,
+                                        style: textTheme.bodyMedium,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Delete note',
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () => _deleteClientNote(n),
+                                  icon: Icon(
+                                    Icons.delete_outline,
+                                    size: 18,
+                                    color: scheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+              ),
+            ],
+
+            const SizedBox(height: 12),
+
+            // Field for entering new notes + Save Note button
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey('new_client_note_input'),
+                    controller: _newNoteCtrl,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _saveNewClientNote(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: 'Enter a new note for ${g.name}...',
+                      prefixIcon: const Icon(Icons.edit_note_rounded, size: 20),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.icon(
+                  key: const ValueKey('save_client_note_button'),
+                  onPressed: _savingNote ? null : _saveNewClientNote,
+                  icon: _savingNote
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save_outlined, size: 18),
+                  label: const Text('Save Note'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

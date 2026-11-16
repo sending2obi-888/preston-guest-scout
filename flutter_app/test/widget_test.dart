@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:preston_guest_scout/models/models.dart';
+import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
@@ -401,7 +403,227 @@ void main() {
     expect(svc.needsOAuthSetup, isTrue);
     expect(svc.lastError ?? '', isNot(contains('Google Sign-In was canceled')));
     expect(svc.lastError ?? '', contains('sales@prestonmotor.com'));
-    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+  });
+
+  test('Client notes sort newest-first and union-merge across devices without loss', () {
+    final guest = GuestProfile.fromJson({
+      'id': 'guest-notes-1',
+      'name': 'Rhonda Vanvorst',
+      'make': 'Lincoln',
+      'model': 'Nautilus',
+      'createdAt': '2026-11-14T12:00:00Z',
+      'clientNotes': [
+        {
+          'id': 'note-older',
+          'text': 'Prefers white or silver exterior.',
+          'createdAt': '2026-11-15T09:00:00Z',
+        },
+        {
+          'id': 'note-newer',
+          'text': 'Called Tuesday — ready to test drive this weekend.',
+          'createdAt': '2026-11-16T14:30:00Z',
+        },
+      ],
+    });
+
+    expect(guest.clientNotes.length, 2);
+    expect(guest.latestClientNote?.id, 'note-newer');
+    expect(
+      guest.latestClientNote?.text,
+      'Called Tuesday — ready to test drive this weekend.',
+    );
+
+    final merged = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: {
+        'schemaVersion': 2,
+        'guests': [
+          {
+            'id': 'guest-notes-1',
+            'name': 'Rhonda Vanvorst',
+            'make': 'Lincoln',
+            'model': 'Nautilus',
+            'createdAt': '2026-11-14T12:00:00Z',
+            'updatedAt': '2026-11-16T10:00:00Z',
+            'clientNotes': [
+              {
+                'id': 'note-chromebook',
+                'text': 'Added on Googlebook: trading in 2019 Edge.',
+                'createdAt': '2026-11-16T10:00:00Z',
+              },
+            ],
+          },
+        ],
+        'matches': [],
+      },
+      deviceBSnapshot: {
+        'schemaVersion': 2,
+        'guests': [
+          {
+            'id': 'guest-notes-1',
+            'name': 'Rhonda Vanvorst',
+            'make': 'Lincoln',
+            'model': 'Nautilus',
+            'createdAt': '2026-11-14T12:00:00Z',
+            'updatedAt': '2026-11-16T11:15:00Z',
+            'clientNotes': [
+              {
+                'id': 'note-phone',
+                'text': 'Added on Android phone: pre-approved financing.',
+                'createdAt': '2026-11-16T11:15:00Z',
+              },
+            ],
+          },
+        ],
+        'matches': [],
+      },
+    );
+
+    final syncedGuest = GuestProfile.fromJson(
+      Map<String, dynamic>.from((merged['guests'] as List).first as Map),
+    );
+    expect(syncedGuest.clientNotes.length, 2);
+    expect(syncedGuest.latestClientNote?.id, 'note-phone');
+    expect(
+      syncedGuest.clientNotes.map((n) => n.id).toList(),
+      ['note-phone', 'note-chromebook'],
+    );
+  });
+
+  testWidgets(
+      'GuestMatchesScreen renders Client Notes dropdown above Target Vehicles, shows most recent note without opening dropdown, and displays saved notes with date inside dropdown',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+
+    String persistedJson = jsonEncode({
+      'guests': [
+        {
+          'id': 'guest-rhonda-test',
+          'name': 'Rhonda Vanvorst',
+          'condition': 'Pre-Owned',
+          'minYear': 2022,
+          'maxYear': 2024,
+          'make': 'Lincoln',
+          'model': 'Nautilus',
+          'createdAt': '2026-11-14T12:00:00Z',
+          'updatedAt': '2026-11-15T10:00:00Z',
+          'clientNotes': [
+            {
+              'id': 'note-initial-1',
+              'text': 'Initial note: prefers panoramic roof.',
+              'createdAt': '2026-11-15T10:00:00Z',
+            },
+          ],
+        },
+      ],
+      'matches': [],
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedJson;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['json'] is String) {
+            persistedJson = args['json'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: 'guest-rhonda-test',
+          onDataChanged: () {},
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final dropdownToggle =
+        find.byKey(const ValueKey('client_notes_dropdown_toggle'));
+    final targetSectionHeader =
+        find.textContaining('Target Vehicles for Rhonda Vanvorst');
+
+    expect(dropdownToggle, findsOneWidget);
+    expect(targetSectionHeader, findsOneWidget);
+
+    // 1. Dropdown is placed directly ABOVE the Target Vehicle section
+    expect(
+      tester.getTopLeft(dropdownToggle).dy,
+      lessThan(tester.getTopLeft(targetSectionHeader).dy),
+    );
+
+    // 2. Most recent note is visible WITHOUT selecting/opening the dropdown
+    expect(
+      find.byKey(const ValueKey('client_notes_dropdown_list')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('most_recent_client_note_preview')),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Initial note: prefers panoramic roof.'),
+      findsOneWidget,
+    );
+
+    // 3. Enter and save a new note — updates visible most recent note immediately
+    await tester.enterText(
+      find.byKey(const ValueKey('new_client_note_input')),
+      'Spoke on phone — coming in Saturday at 11 AM.',
+    );
+    await tester.tap(find.byKey(const ValueKey('save_client_note_button')));
+    await tester.pumpAndSettle();
+
+    // Dropdown is still closed, yet the new note is visible as the Most Recent Note
+    expect(
+      find.byKey(const ValueKey('client_notes_dropdown_list')),
+      findsNothing,
+    );
+    expect(
+      find.text('Spoke on phone — coming in Saturday at 11 AM.'),
+      findsOneWidget,
+    );
+
+    // 4. Open dropdown — both saved notes are displayed inside the dropdown with the date added
+    await tester.tap(dropdownToggle);
+    await tester.pumpAndSettle();
+
+    final dropdownList =
+        find.byKey(const ValueKey('client_notes_dropdown_list'));
+    expect(dropdownList, findsOneWidget);
+    expect(
+      find.descendant(
+        of: dropdownList,
+        matching: find.text('Spoke on phone — coming in Saturday at 11 AM.'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dropdownList,
+        matching: find.text('Initial note: prefers panoramic roof.'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dropdownList,
+        matching: find.textContaining('Added '),
+      ),
+      findsNWidgets(2),
+    );
+
+    LocalScoutEngine.resetForTest();
   });
 }
+
+
 

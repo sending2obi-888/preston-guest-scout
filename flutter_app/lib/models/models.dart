@@ -97,6 +97,32 @@ class VehicleSearchTarget {
   }
 }
 
+class GuestNote {
+  final String id;
+  final String text;
+  final String createdAt;
+
+  const GuestNote({
+    required this.id,
+    required this.text,
+    required this.createdAt,
+  });
+
+  factory GuestNote.fromJson(Map<String, dynamic> json) {
+    return GuestNote(
+      id: json['id']?.toString() ?? '',
+      text: json['text']?.toString() ?? '',
+      createdAt: json['createdAt']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'text': text,
+        'createdAt': createdAt,
+      };
+}
+
 class GuestProfile {
   final String id;
   final String name;
@@ -115,6 +141,7 @@ class GuestProfile {
   final List<String> features;
   final String notes;
   final List<VehicleSearchTarget> vehicleTargets;
+  final List<GuestNote> clientNotes;
   final bool active;
   final String? lastSearchedAt;
   final String lastSearchSummary;
@@ -140,6 +167,7 @@ class GuestProfile {
     this.features = const [],
     this.notes = '',
     this.vehicleTargets = const [],
+    this.clientNotes = const [],
     this.active = true,
     this.lastSearchedAt,
     this.lastSearchSummary = '',
@@ -195,6 +223,38 @@ class GuestProfile {
       );
     }
 
+    final deletedNoteIds = (json['deletedNoteIds'] as List<dynamic>?)
+            ?.map((e) => e.toString())
+            .toSet() ??
+        const <String>{};
+
+    final rawClientNotes = json['clientNotes'];
+    final parsedNotes = <GuestNote>[];
+    if (rawClientNotes is List) {
+      for (var i = 0; i < rawClientNotes.length; i++) {
+        final item = rawClientNotes[i];
+        if (item is Map) {
+          final map = Map<String, dynamic>.from(item);
+          final text = (map['text']?.toString() ?? '').trim();
+          if (text.isEmpty) continue;
+          final noteId = (map['id']?.toString() ?? '').isNotEmpty
+              ? map['id'].toString()
+              : '$guestId-note-${i + 1}';
+          if (deletedNoteIds.contains(noteId)) continue;
+          parsedNotes.add(
+            GuestNote(
+              id: noteId,
+              text: text,
+              createdAt: (map['createdAt']?.toString() ?? '').isNotEmpty
+                  ? map['createdAt'].toString()
+                  : createdAtStr,
+            ),
+          );
+        }
+      }
+    }
+    parsedNotes.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
     final first = parsedTargets.first;
 
     return GuestProfile(
@@ -215,6 +275,7 @@ class GuestProfile {
       features: first.features,
       notes: first.notes,
       vehicleTargets: parsedTargets,
+      clientNotes: parsedNotes,
       active: json['active'] != false,
       lastSearchedAt: json['lastSearchedAt']?.toString(),
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
@@ -223,6 +284,9 @@ class GuestProfile {
       lowestMatchPrice: (json['lowestMatchPrice'] as num?)?.toDouble(),
     );
   }
+
+  GuestNote? get latestClientNote =>
+      clientNotes.isNotEmpty ? clientNotes.first : null;
 
   List<VehicleSearchTarget> get effectiveTargets {
     if (vehicleTargets.isNotEmpty) return vehicleTargets;
@@ -277,6 +341,11 @@ class GuestProfile {
         ..write(t.notes)
         ..write(' ')
         ..write(t.features.join(' '));
+    }
+    for (final n in clientNotes) {
+      buf
+        ..write(' ')
+        ..write(n.text);
     }
     return buf.toString().toLowerCase();
   }
