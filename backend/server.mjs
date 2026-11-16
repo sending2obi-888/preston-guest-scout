@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { db, getSetting, setSetting, mapGuestRow, mapMatchRow } from './db.mjs';
+import { normalizeGuestSpecs } from './preston_scraper.mjs';
 import {
   getScheduleStatus,
   runSearchForGuest,
@@ -279,6 +280,16 @@ const server = http.createServer(async (req, res) => {
       const features = Array.isArray(body.features)
         ? body.features.map((f) => String(f).trim()).filter(Boolean)
         : [];
+      const normalized = normalizeGuestSpecs({
+        make: (body.make || '').trim(),
+        model: (body.model || '').trim(),
+        trim: (body.trim || '').trim(),
+        condition: body.condition || 'Any',
+        drivetrain: body.drivetrain || 'Any',
+        maxPrice: body.maxPrice ? Number(body.maxPrice) : null,
+        notes: (body.notes || '').trim(),
+        features,
+      });
 
       db.prepare(`
         INSERT INTO guests (
@@ -295,15 +306,15 @@ const server = http.createServer(async (req, res) => {
         name,
         phone: (body.phone || '').trim(),
         email: (body.email || '').trim(),
-        condition: body.condition || 'Any',
+        condition: normalized.condition || 'Any',
         min_year: body.minYear ? Number(body.minYear) : null,
         max_year: body.maxYear ? Number(body.maxYear) : null,
-        make: (body.make || '').trim(),
-        model: (body.model || '').trim(),
-        trim: (body.trim || '').trim(),
-        max_price: body.maxPrice ? Number(body.maxPrice) : null,
+        make: normalized.make || '',
+        model: normalized.model || '',
+        trim: normalized.trim || '',
+        max_price: normalized.maxPrice ?? null,
         max_mileage: body.maxMileage ? Number(body.maxMileage) : null,
-        drivetrain: body.drivetrain || 'Any',
+        drivetrain: normalized.drivetrain || 'Any',
         exterior_color: (body.exteriorColor || '').trim(),
         features_json: JSON.stringify(features),
         notes: (body.notes || '').trim(),

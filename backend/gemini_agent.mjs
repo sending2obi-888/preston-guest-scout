@@ -1,38 +1,67 @@
 import { getSetting } from './db.mjs';
+import { normalizeGuestSpecs } from './preston_scraper.mjs';
 
-function preFilterCandidates(guest, candidates) {
+function preFilterCandidates(rawGuest, candidates) {
+  const guest = normalizeGuestSpecs(rawGuest);
+
   return candidates.filter((v) => {
     if (guest.make) {
       const targetMake = guest.make.trim().toLowerCase();
-      if (v.make && !v.make.toLowerCase().includes(targetMake) && !v.title.toLowerCase().includes(targetMake)) {
+      if (
+        v.make &&
+        !v.make.toLowerCase().includes(targetMake) &&
+        !v.title.toLowerCase().includes(targetMake)
+      ) {
         return false;
       }
     }
+
     if (guest.model) {
       const tokens = guest.model
         .toLowerCase()
         .split(/[\s-]+/)
         .filter((t) => t.length >= 2);
       const hay = `${v.model} ${v.title} ${v.trim}`.toLowerCase().replace(/-/g, ' ');
-      const normalizedTokens = guest.model.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(Boolean);
+      const normalizedTokens = guest.model
+        .toLowerCase()
+        .replace(/-/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
       const matchesAll = normalizedTokens.every((t) => hay.includes(t));
-      const matchesRaw = `${v.model} ${v.title}`.toLowerCase().includes(guest.model.trim().toLowerCase());
+      const matchesRaw = `${v.model} ${v.title}`
+        .toLowerCase()
+        .includes(guest.model.trim().toLowerCase());
       if (!matchesAll && !matchesRaw && tokens.length > 0) {
         return false;
       }
     }
+
     if (guest.minYear && v.year && v.year < Number(guest.minYear)) {
       return false;
     }
     if (guest.maxYear && v.year && v.year > Number(guest.maxYear)) {
       return false;
     }
-    if (guest.maxPrice && v.price && v.price > Number(guest.maxPrice)) {
-      return false;
+
+    // Strict maxPrice check: when a budget cap (e.g. "under $60K") is specified,
+    // require either a verified selling/final price <= maxPrice, or (if unpriced) an MSRP <= maxPrice.
+    if (guest.maxPrice != null && Number(guest.maxPrice) > 0) {
+      const cap = Number(guest.maxPrice);
+      const effectivePrice =
+        typeof v.price === 'number' && v.price > 0
+          ? v.price
+          : typeof v.msrp === 'number' && v.msrp > 0
+            ? v.msrp
+            : null;
+      if (effectivePrice == null || effectivePrice > cap) {
+        return false;
+      }
     }
+
     if (guest.maxMileage && typeof v.mileage === 'number' && v.mileage > Number(guest.maxMileage)) {
       return false;
     }
+
     if (guest.condition && guest.condition !== 'Any') {
       const c = guest.condition.toLowerCase();
       const vc = (v.condition || '').toLowerCase();
@@ -40,17 +69,25 @@ function preFilterCandidates(guest, candidates) {
       if (c === 'cpo' && !vc.includes('certified')) return false;
       if (c === 'pre-owned' && vc.includes('new') && !vc.includes('pre')) return false;
     }
+
+    // If the guest explicitly specified a dealership/town in notes (e.g., "Boulevard Ford" or "Millsboro"),
+    // enforce that location requirement; otherwise include all Preston Automotive Group locations.
+    if (Array.isArray(guest.locationHints) && guest.locationHints.length > 0) {
+      const locHay = `${v.location || ''} ${v.dealerCity || ''} ${v.dealerState || ''}`.toLowerCase();
+      const matchesLocation = guest.locationHints.some((hint) => locHay.includes(hint));
+      if (!matchesLocation) return false;
+    }
+
     return true;
   });
 }
 
-function deterministicEvaluate(guest, candidates) {
+function deterministicEvaluate(rawGuest, candidates) {
+  const guest = normalizeGuestSpecs(rawGuest);
   const strictFiltered = preFilterCandidates(guest, candidates);
   const results = [];
 
-  const desiredFeatures = [
-    ...(Array.isArray(guest.features) ? guest.features : []),
-  ];
+  const desiredFeatures = [...(Array.isArray(guest.features) ? guest.features : [])];
   const noteTokens = (guest.notes || '')
     .split(/[,;\n•]+/)
     .map((s) => s.trim())
@@ -58,7 +95,7 @@ function deterministicEvaluate(guest, candidates) {
 
   for (const v of strictFiltered) {
     const matchedFeatures = [];
-    let score = 78;
+    let score = 80;
 
     // 1. Drivetrain check
     if (guest.drivetrain && guest.drivetrain !== 'Any') {
@@ -74,7 +111,6 @@ function deterministicEvaluate(guest, candidates) {
         matchedFeatures.push(`${v.drivetrain || targetDt} Drivetrain`);
         score += 5;
       } else {
-        // Hard requirement mismatch if explicit drivetrain requested and vehicle clearly differs
         if (vDt && vDt !== targetDt) continue;
       }
     } else if (v.drivetrain) {
@@ -94,7 +130,12 @@ function deterministicEvaluate(guest, candidates) {
       matchedFeatures.push(`${v.trim} Trim`);
     }
 
-    // 3. Price check
+    // 3. Make / Condition badge
+    if (guest.make && v.make) {
+      matchedFeatures.push(`${v.year || ''} ${v.make} ${v.model} (${v.condition})`.trim());
+    }
+
+    // 4. Price check
     if (guest.maxPrice && v.price) {
       const savings = Math.round(Number(guest.maxPrice) - v.price);
       matchedFeatures.push(
@@ -105,15 +146,17 @@ function deterministicEvaluate(guest, candidates) {
       score += 4;
     }
 
-    // 4. Year & Condition check
+    // 5. Year & Mileage check
     if ((guest.minYear || guest.maxYear) && v.year) {
       matchedFeatures.push(`${v.year} ${v.condition} Model Year`);
     }
     if (guest.maxMileage && typeof v.mileage === 'number') {
-      matchedFeatures.push(`${v.mileage.toLocaleString()} mi (Under ${Number(guest.maxMileage).toLocaleString()} mi limit)`);
+      matchedFeatures.push(
+        `${v.mileage.toLocaleString()} mi (Under ${Number(guest.maxMileage).toLocaleString()} mi limit)`
+      );
     }
 
-    // 5. Color check
+    // 6. Color check
     if (guest.exteriorColor) {
       const targetColor = guest.exteriorColor.trim().toLowerCase();
       if ((v.exteriorColor || '').toLowerCase().includes(targetColor)) {
@@ -122,8 +165,9 @@ function deterministicEvaluate(guest, candidates) {
       }
     }
 
-    // 6. Specific requested features & notes against vehicle highlights + build sheet
-    const fullText = `${v.highlights.join(' | ')} | ${v.engine} | ${v.transmission} | ${v.exteriorColor} | ${v.interiorColor} | ${v.commentsSummary}`.toLowerCase();
+    // 7. Specific requested features & notes against vehicle highlights + build sheet
+    const fullText =
+      `${v.highlights.join(' | ')} | ${v.engine} | ${v.transmission} | ${v.exteriorColor} | ${v.interiorColor} | ${v.location} | ${v.commentsSummary}`.toLowerCase();
 
     for (const reqFeat of desiredFeatures) {
       const cleanReq = reqFeat.trim();
@@ -134,9 +178,10 @@ function deterministicEvaluate(guest, candidates) {
         .split(/\s+/)
         .filter((w) => w.length >= 3);
 
-      const exactHighlight = v.highlights.find((h) =>
-        h.toLowerCase().includes(cleanReq.toLowerCase()) ||
-        keywords.some((kw) => h.toLowerCase().includes(kw))
+      const exactHighlight = v.highlights.find(
+        (h) =>
+          h.toLowerCase().includes(cleanReq.toLowerCase()) ||
+          keywords.some((kw) => h.toLowerCase().includes(kw))
       );
 
       if (exactHighlight) {
@@ -151,16 +196,23 @@ function deterministicEvaluate(guest, candidates) {
     for (const phrase of noteTokens) {
       const kws = phrase
         .toLowerCase()
+        .replace(/\$?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:k|thousand)?/gi, ' ')
         .split(/\s+/)
-        .filter((w) => w.length >= 4 && !['must', 'have', 'with', 'prefer', 'wants', 'needs', 'under'].includes(w));
+        .filter(
+          (w) =>
+            w.length >= 4 &&
+            !['must', 'have', 'with', 'prefer', 'wants', 'needs', 'under', 'below', 'ford', 'lincoln'].includes(
+              w
+            )
+        );
       if (kws.length > 0 && kws.every((kw) => fullText.includes(kw))) {
         matchedFeatures.push(phrase);
         score += 2;
       }
     }
 
-    // Fill in standout vehicle highlights if user kept feature requirements broad
-    if (matchedFeatures.length < 4) {
+    // Fill in standout vehicle highlights if user kept feature requirements broad (e.g. "Ford under $60K")
+    if (matchedFeatures.length < 5) {
       for (const h of v.highlights.slice(0, 5)) {
         if (!matchedFeatures.includes(h)) {
           matchedFeatures.push(h);
@@ -178,22 +230,65 @@ function deterministicEvaluate(guest, candidates) {
       matchedFeatures: dedupedFeatures,
       agentSummary: `Verified match at ${v.location}: ${v.title} (${v.condition}) priced at ${
         v.price ? `$${v.price.toLocaleString()}` : 'Call for Price'
-      } satisfies ${guest.name}'s ${[
-        guest.minYear || guest.maxYear ? 'model year' : null,
-        guest.maxPrice ? 'budget' : null,
-        guest.drivetrain && guest.drivetrain !== 'Any' ? guest.drivetrain : null,
-        desiredFeatures.length > 0 ? 'feature' : 'inventory',
-      ]
-        .filter(Boolean)
-        .join(', ')} criteria.`,
+      } satisfies ${guest.name}'s ${
+        [
+          guest.make || null,
+          guest.minYear || guest.maxYear ? 'model year' : null,
+          guest.maxPrice ? `under $${Number(guest.maxPrice).toLocaleString()} budget` : null,
+          guest.drivetrain && guest.drivetrain !== 'Any' ? guest.drivetrain : null,
+          desiredFeatures.length > 0 ? 'feature' : 'inventory',
+        ]
+          .filter(Boolean)
+          .join(', ')
+      } criteria.`,
     });
   }
 
-  results.sort((a, b) => b.matchScore - a.matchScore);
-  return results.slice(0, 25);
+  // Sort highest match score first, then lowest price so best-value deals surface cleanly,
+  // WITHOUT truncating results so ALL qualifying vehicles across all Preston locations are returned.
+  results.sort((a, b) => {
+    if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+    const pa = a.vehicle.price ?? Number.MAX_SAFE_INTEGER;
+    const pb = b.vehicle.price ?? Number.MAX_SAFE_INTEGER;
+    return pa - pb;
+  });
+
+  return results;
 }
 
-export async function evaluateInventoryWithGeminiAgent(guest, candidates) {
+/**
+ * Selects a diverse sample across dealerships when sending a batch to Gemini so
+ * multi-location inventories (Hurlock, Millsboro, Pittsville, Aberdeen, etc.) are
+ * all represented in Gemini's semantic pass, while ALL remaining qualifying vehicles
+ * are preserved via hybrid merge (zero match truncation).
+ */
+function sampleAcrossLocations(vehicles, limit = 30) {
+  if (vehicles.length <= limit) return vehicles;
+  const byLoc = new Map();
+  for (const v of vehicles) {
+    const loc = v.location || 'Preston Automotive Group';
+    if (!byLoc.has(loc)) byLoc.set(loc, []);
+    byLoc.get(loc).push(v);
+  }
+  const picked = [];
+  let idx = 0;
+  while (picked.length < limit) {
+    let addedInRound = false;
+    for (const list of byLoc.values()) {
+      if (idx < list.length) {
+        picked.push(list[idx]);
+        addedInRound = true;
+        if (picked.length >= limit) break;
+      }
+    }
+    if (!addedInRound) break;
+    idx++;
+  }
+  return picked;
+}
+
+export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
+  const guest = normalizeGuestSpecs(rawGuest);
   const apiKey = getSetting('gemini_api_key');
   const model = getSetting('gemini_model') || 'gemini-2.5-flash';
 
@@ -206,17 +301,21 @@ export async function evaluateInventoryWithGeminiAgent(guest, candidates) {
     };
   }
 
+  // Always compute full-inventory deterministic matches across ALL qualifying vehicles (no cap)
+  const fullDeterministicMatches = deterministicEvaluate(guest, preFiltered);
+
   if (!apiKey) {
-    const matches = deterministicEvaluate(guest, preFiltered);
+    const locCount = new Set(fullDeterministicMatches.map((m) => m.vehicle.location)).size;
     return {
       mode: 'smart-matcher',
-      matches,
-      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles (${preFiltered.length} candidates); found ${matches.length} match(es). Add a Gemini API key in Settings to enable full Gemini LLM semantic reasoning.`,
+      matches: fullDeterministicMatches,
+      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles across all pages; found ${fullDeterministicMatches.length} matching vehicle(s) across ${locCount} Preston dealership location(s).`,
     };
   }
 
-  // Prepare compact candidate payload for Gemini Agent (up to 35 top candidates)
-  const compactCandidates = preFiltered.slice(0, 35).map((v) => ({
+  // Sample up to 30 vehicles distributed across all Preston dealerships for Gemini LLM enrichment
+  const sampledVehicles = sampleAcrossLocations(preFiltered, 30);
+  const compactCandidates = sampledVehicles.map((v) => ({
     vin: v.vin,
     title: v.title,
     year: v.year,
@@ -254,8 +353,8 @@ export async function evaluateInventoryWithGeminiAgent(guest, candidates) {
   const systemPrompt = `You are the Preston Automotive Group Gemini Inventory Scout Agent.
 Evaluate live vehicle listings from prestonmotor.com against the guest's target vehicle specifications and requirements.
 Rules:
-1. Only include vehicles that genuinely satisfy the guest's core requirements (make, model, trim if specified, drivetrain if specified, price cap if specified, and critical must-have features).
-2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's previously input specs & requirements (e.g., "4WD Drivetrain", "Reserve Trim", "Apple CarPlay & Navigation", "Leather Heated Seats", "$28,900 ($1,100 under $30,000 budget)", "Rhapsody Blue Exterior").
+1. Only include vehicles that genuinely satisfy the guest's core requirements (make, model if specified, trim if specified, drivetrain if specified, price cap if specified, and critical must-have features).
+2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's previously input specs & requirements (e.g., "4WD Drivetrain", "Reserve Trim", "Apple CarPlay & Navigation", "$42,900 ($17,100 under $60,000 cap)", "Oxford White Exterior").
 3. Provide a concise, helpful 1-2 sentence "agentSummary" explaining why this specific unit at its Preston dealership location fits the guest.`;
 
   const body = {
@@ -269,7 +368,8 @@ Rules:
           {
             text: JSON.stringify({
               guestRequirements: guestCriteria,
-              prestonMotorCandidates: compactCandidates,
+              totalQualifyingInventoryCount: preFiltered.length,
+              prestonMotorCandidatesSample: compactCandidates,
             }),
           },
         ],
@@ -325,12 +425,13 @@ Rules:
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
     const parsed = JSON.parse(rawText);
     const byVin = new Map(preFiltered.map((v) => [v.vin, v]));
+    const sampledVinSet = new Set(sampledVehicles.map((v) => v.vin));
 
-    const hydrated = [];
+    const geminiByVin = new Map();
     for (const m of parsed.matches || []) {
       const vehicle = byVin.get(m.vin);
       if (!vehicle) continue;
-      hydrated.push({
+      geminiByVin.set(m.vin, {
         vehicle,
         matchScore: Math.max(1, Math.min(100, Number(m.matchScore) || 88)),
         matchedFeatures: Array.isArray(m.matchedFeatures) ? m.matchedFeatures : [],
@@ -338,21 +439,44 @@ Rules:
       });
     }
 
-    hydrated.sort((a, b) => b.matchScore - a.matchScore);
+    // If all candidates fit inside Gemini's single-call window (<= 30), use Gemini's exact verified list.
+    // If there are more than 30 qualifying vehicles (e.g., "Ford under $60K" -> 1,000+ matches across
+    // all Preston dealerships including Boulevard Ford in Millsboro), merge Gemini's enriched cards
+    // with the full verified inventory so NO qualifying vehicle is ever dropped!
+    let mergedMatches;
+    if (preFiltered.length <= 30) {
+      mergedMatches = Array.from(geminiByVin.values());
+    } else {
+      mergedMatches = [];
+      for (const dm of fullDeterministicMatches) {
+        const vin = dm.vehicle.vin;
+        if (geminiByVin.has(vin)) {
+          mergedMatches.push(geminiByVin.get(vin));
+        } else if (!sampledVinSet.has(vin)) {
+          mergedMatches.push(dm);
+        }
+      }
+    }
+
+    mergedMatches.sort((a, b) => {
+      if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+      const pa = a.vehicle.price ?? Number.MAX_SAFE_INTEGER;
+      const pb = b.vehicle.price ?? Number.MAX_SAFE_INTEGER;
+      return pa - pb;
+    });
+
+    const locCount = new Set(mergedMatches.map((m) => m.vehicle.location)).size;
     return {
       mode: 'gemini',
-      matches: hydrated,
-      summary:
-        parsed.overallSummary ||
-        `Gemini Agent (${model}) evaluated ${compactCandidates.length} prestonmotor.com candidates and verified ${hydrated.length} match(es).`,
+      matches: mergedMatches,
+      summary: `Gemini Agent (${model}) scanned ${candidates.length} live prestonmotor.com vehicles and verified ${mergedMatches.length} match(es) across ${locCount} Preston dealership location(s).`,
     };
   } catch (err) {
-    // Graceful fallback so twice-daily searches never drop matches on transient API issues
-    const fallbackMatches = deterministicEvaluate(guest, preFiltered);
+    const locCount = new Set(fullDeterministicMatches.map((m) => m.vehicle.location)).size;
     return {
       mode: 'gemini-fallback',
-      matches: fallbackMatches,
-      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles (${fallbackMatches.length} matches). Note: Gemini fallback used (${err.message}).`,
+      matches: fullDeterministicMatches,
+      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles (${fullDeterministicMatches.length} matches across ${locCount} locations). Note: Gemini fallback used (${err.message}).`,
     };
   }
 }

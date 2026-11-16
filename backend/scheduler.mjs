@@ -123,38 +123,47 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
     const evaluation = await evaluateInventoryWithGeminiAgent(guest, candidates);
     const nowIso = new Date().toISOString();
 
-    for (const m of evaluation.matches) {
-      const v = m.vehicle;
-      upsertMatchStmt.run({
-        id: crypto.randomUUID(),
-        guest_id: guest.id,
-        vin: v.vin,
-        stock_number: v.stockNumber || '',
-        title: v.title,
-        year: v.year,
-        make: v.make || '',
-        model: v.model || '',
-        trim: v.trim || '',
-        condition: v.condition || '',
-        price: v.price ?? null,
-        msrp: v.msrp ?? null,
-        dealer_fee: v.dealerFee ?? null,
-        location: v.location || 'Preston Automotive Group',
-        mileage: v.mileage ?? 0,
-        drivetrain: v.drivetrain || '',
-        engine: v.engine || '',
-        exterior_color: v.exteriorColor || '',
-        interior_color: v.interiorColor || '',
-        photo_url: v.photoUrl || '',
-        listing_url: v.listingUrl || 'https://www.prestonmotor.com',
-        matched_features_json: JSON.stringify(m.matchedFeatures || []),
-        all_highlights_json: JSON.stringify(v.highlights || []),
-        agent_summary: m.agentSummary || '',
-        match_score: m.matchScore || 85,
-        found_at: nowIso,
-        search_slot: slotLabel,
-        last_seen_at: nowIso,
-      });
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const m of evaluation.matches) {
+        const v = m.vehicle;
+        upsertMatchStmt.run({
+          id: crypto.randomUUID(),
+          guest_id: guest.id,
+          vin: v.vin,
+          stock_number: v.stockNumber || '',
+          title: v.title,
+          year: v.year,
+          make: v.make || '',
+          model: v.model || '',
+          trim: v.trim || '',
+          condition: v.condition || '',
+          price: v.price ?? null,
+          msrp: v.msrp ?? null,
+          dealer_fee: v.dealerFee ?? null,
+          location: v.location || 'Preston Automotive Group',
+          mileage: v.mileage ?? 0,
+          drivetrain: v.drivetrain || '',
+          engine: v.engine || '',
+          exterior_color: v.exteriorColor || '',
+          interior_color: v.interiorColor || '',
+          photo_url: v.photoUrl || '',
+          listing_url: v.listingUrl || 'https://www.prestonmotor.com',
+          matched_features_json: JSON.stringify(m.matchedFeatures || []),
+          all_highlights_json: JSON.stringify(v.highlights || []),
+          agent_summary: m.agentSummary || '',
+          match_score: m.matchScore || 85,
+          found_at: nowIso,
+          search_slot: slotLabel,
+          last_seen_at: nowIso,
+        });
+      }
+      db.exec('COMMIT');
+    } catch (txErr) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {}
+      throw txErr;
     }
 
     db.prepare(
@@ -221,38 +230,47 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
         totalCandidates += candidates.length;
         totalMatches += evaluation.matches.length;
 
-        for (const m of evaluation.matches) {
-          const v = m.vehicle;
-          upsertMatchStmt.run({
-            id: crypto.randomUUID(),
-            guest_id: guest.id,
-            vin: v.vin,
-            stock_number: v.stockNumber || '',
-            title: v.title,
-            year: v.year,
-            make: v.make || '',
-            model: v.model || '',
-            trim: v.trim || '',
-            condition: v.condition || '',
-            price: v.price ?? null,
-            msrp: v.msrp ?? null,
-            dealer_fee: v.dealerFee ?? null,
-            location: v.location || 'Preston Automotive Group',
-            mileage: v.mileage ?? 0,
-            drivetrain: v.drivetrain || '',
-            engine: v.engine || '',
-            exterior_color: v.exteriorColor || '',
-            interior_color: v.interiorColor || '',
-            photo_url: v.photoUrl || '',
-            listing_url: v.listingUrl || 'https://www.prestonmotor.com',
-            matched_features_json: JSON.stringify(m.matchedFeatures || []),
-            all_highlights_json: JSON.stringify(v.highlights || []),
-            agent_summary: m.agentSummary || '',
-            match_score: m.matchScore || 85,
-            found_at: nowIso,
-            search_slot: slotLabel,
-            last_seen_at: nowIso,
-          });
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const m of evaluation.matches) {
+            const v = m.vehicle;
+            upsertMatchStmt.run({
+              id: crypto.randomUUID(),
+              guest_id: guest.id,
+              vin: v.vin,
+              stock_number: v.stockNumber || '',
+              title: v.title,
+              year: v.year,
+              make: v.make || '',
+              model: v.model || '',
+              trim: v.trim || '',
+              condition: v.condition || '',
+              price: v.price ?? null,
+              msrp: v.msrp ?? null,
+              dealer_fee: v.dealerFee ?? null,
+              location: v.location || 'Preston Automotive Group',
+              mileage: v.mileage ?? 0,
+              drivetrain: v.drivetrain || '',
+              engine: v.engine || '',
+              exterior_color: v.exteriorColor || '',
+              interior_color: v.interiorColor || '',
+              photo_url: v.photoUrl || '',
+              listing_url: v.listingUrl || 'https://www.prestonmotor.com',
+              matched_features_json: JSON.stringify(m.matchedFeatures || []),
+              all_highlights_json: JSON.stringify(v.highlights || []),
+              agent_summary: m.agentSummary || '',
+              match_score: m.matchScore || 85,
+              found_at: nowIso,
+              search_slot: slotLabel,
+              last_seen_at: nowIso,
+            });
+          }
+          db.exec('COMMIT');
+        } catch (txErr) {
+          try {
+            db.exec('ROLLBACK');
+          } catch {}
+          throw txErr;
         }
 
         db.prepare(

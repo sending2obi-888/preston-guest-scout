@@ -119,11 +119,25 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     });
   }
 
+  double? _parseMaxPrice(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    final hasK = RegExp(r'[kK]\b').hasMatch(trimmed);
+    final numeric = trimmed.replaceAll(RegExp(r'[^0-9.]'), '');
+    final parsed = double.tryParse(numeric);
+    if (parsed == null || parsed <= 0) return null;
+    if (hasK || parsed < 500) {
+      return parsed * 1000.0;
+    }
+    return parsed;
+  }
+
   Future<void> _submitIntake() async {
     if (!_formKey.currentState!.validate()) return;
 
     final hasAnyVehicleSpec = _makeCtrl.text.trim().isNotEmpty ||
         _modelCtrl.text.trim().isNotEmpty ||
+        _maxPriceCtrl.text.trim().isNotEmpty ||
         _notesCtrl.text.trim().isNotEmpty ||
         _selectedFeatures.isNotEmpty;
 
@@ -131,7 +145,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              'Please enter at least a Make, Model, or Requirements note for the Gemini Agent.'),
+              'Please enter at least a Make, Model, Max Price, or Requirements note for the Gemini Agent.'),
         ),
       );
       return;
@@ -149,8 +163,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         make: _makeCtrl.text.trim(),
         model: _modelCtrl.text.trim(),
         trim: _trimCtrl.text.trim(),
-        maxPrice: double.tryParse(
-            _maxPriceCtrl.text.replaceAll(RegExp(r'[^0-9.]'), '')),
+        maxPrice: _parseMaxPrice(_maxPriceCtrl.text),
         maxMileage: int.tryParse(
             _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), '')),
         drivetrain: _drivetrain,
@@ -549,13 +562,15 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             );
                             final maxPriceField = TextFormField(
                               controller: _maxPriceCtrl,
-                              keyboardType: TextInputType.number,
+                              keyboardType: TextInputType.text,
                               inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
+                                FilteringTextInputFormatter.allow(
+                                  RegExp(r'[0-9kK.$,\s]'),
+                                ),
                               ],
                               decoration: const InputDecoration(
                                 labelText: 'Max Price (\$)',
-                                hintText: '30000',
+                                hintText: '60000 or 60K',
                                 prefixIcon: Icon(Icons.attach_money),
                               ),
                             );
