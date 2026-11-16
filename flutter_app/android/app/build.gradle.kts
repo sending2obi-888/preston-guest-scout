@@ -14,26 +14,41 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    val hasPrestonKeystore = file("preston-signing.keystore").exists()
+
+    signingConfigs {
+        if (hasPrestonKeystore) {
+            create("preston") {
+                storeFile = file("preston-signing.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.prestonmotor.preston_guest_scout"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
-        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
-        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
-        // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
     buildTypes {
+        debug {
+            signingConfig = if (hasPrestonKeystore) {
+                signingConfigs.getByName("preston")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+        }
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasPrestonKeystore) {
+                signingConfigs.getByName("preston")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }
@@ -42,6 +57,10 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+dependencies {
+    implementation("com.google.android.gms:play-services-auth:21.2.0")
 }
 
 flutter {

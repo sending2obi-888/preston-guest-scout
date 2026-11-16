@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { db, getSetting, mapGuestRow } from './db.mjs';
 import { searchPrestonInventory } from './preston_scraper.mjs';
 import { evaluateInventoryWithGeminiAgent } from './gemini_agent.mjs';
+import { scheduleAutoSaveToGoogleDrive } from './drive_sync.mjs';
 
 let isRunningBatch = false;
 
@@ -167,8 +168,8 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
     }
 
     db.prepare(
-      'UPDATE guests SET last_searched_at = ?, last_search_summary = ? WHERE id = ?'
-    ).run(nowIso, evaluation.summary, guest.id);
+      'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
+    ).run(nowIso, evaluation.summary, nowIso, guest.id);
 
     db.prepare(
       `UPDATE search_runs
@@ -181,6 +182,8 @@ export async function runSearchForGuest(guestId, slotLabel = 'Manual Gemini Sear
       nowIso,
       runId
     );
+
+    scheduleAutoSaveToGoogleDrive();
 
     return {
       guestId: guest.id,
@@ -274,8 +277,8 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
         }
 
         db.prepare(
-          'UPDATE guests SET last_searched_at = ?, last_search_summary = ? WHERE id = ?'
-        ).run(nowIso, evaluation.summary, guest.id);
+          'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
+        ).run(nowIso, evaluation.summary, nowIso, guest.id);
       } catch (guestErr) {
         console.error(`[Scheduler] Error searching for ${guest.name}:`, guestErr.message);
       }
@@ -286,6 +289,8 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
        SET candidates_scanned = ?, matches_found = ?, agent_mode = ?, completed_at = ?
        WHERE id = ?`
     ).run(totalCandidates, totalMatches, modeUsed, new Date().toISOString(), batchRunId);
+
+    scheduleAutoSaveToGoogleDrive();
 
     return {
       guestsChecked: activeRows.length,

@@ -88,10 +88,21 @@ db.exec(`
     error TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS deleted_guests (
+    id TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_matches_guest_id ON matches(guest_id, match_score DESC, found_at DESC);
   CREATE INDEX IF NOT EXISTS idx_runs_slot_key ON search_runs(slot_key);
 `);
+
+try {
+  db.exec(`ALTER TABLE guests ADD COLUMN updated_at TEXT`);
+} catch {
+  // Column already exists
+}
 
 const defaultSettings = {
   timezone: 'America/New_York',
@@ -157,6 +168,7 @@ export function mapGuestRow(row) {
     lastSearchedAt: row.last_searched_at,
     lastSearchSummary: row.last_search_summary || '',
     createdAt: row.created_at,
+    updatedAt: row.updated_at || row.last_searched_at || row.created_at,
     matchCount: Number(matchStats?.count || 0),
     lowestMatchPrice: matchStats?.lowest_price ?? null,
   };

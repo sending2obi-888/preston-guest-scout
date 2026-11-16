@@ -116,4 +116,99 @@ void main() {
     expect(find.text('Reserve Trim Package'), findsOneWidget);
     expect(find.text('Apple CarPlay & Navigation'), findsOneWidget);
   });
+
+  test('Multi-device Google Drive sync merges guests, matches, and delete tombstones cleanly', () {
+    final deviceA = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-a',
+          'name': 'Alex Chromebook',
+          'make': 'Ford',
+          'maxPrice': 60000.0,
+          'createdAt': '2026-11-16T08:00:00Z',
+          'updatedAt': '2026-11-16T08:00:00Z',
+        },
+        {
+          'id': 'guest-deleted-later',
+          'name': 'Old Guest',
+          'make': 'Mazda',
+          'createdAt': '2026-11-16T07:00:00Z',
+          'updatedAt': '2026-11-16T07:00:00Z',
+        },
+      ],
+      'deletedGuestIds': <String, String>{},
+      'matches': [
+        {
+          'id': 'm-a1',
+          'guestId': 'guest-a',
+          'vin': '1FTFW1E50TFA00001',
+          'title': '2026 Ford F-150 XLT',
+          'price': 51900.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'foundAt': '2026-11-16T08:05:00Z',
+          'lastSeenAt': '2026-11-16T08:05:00Z',
+        },
+      ],
+    };
+
+    final deviceB = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-b',
+          'name': 'Brianna Android',
+          'make': 'Lincoln',
+          'model': 'Nautilus',
+          'createdAt': '2026-11-16T09:00:00Z',
+          'updatedAt': '2026-11-16T09:00:00Z',
+        },
+      ],
+      'deletedGuestIds': <String, String>{
+        'guest-deleted-later': '2026-11-16T09:10:00Z',
+      },
+      'matches': [
+        {
+          'id': 'm-a1-updated',
+          'guestId': 'guest-a',
+          'vin': '1FTFW1E50TFA00001',
+          'title': '2026 Ford F-150 XLT',
+          'price': 49995.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'foundAt': '2026-11-16T09:15:00Z',
+          'lastSeenAt': '2026-11-16T09:15:00Z',
+        },
+        {
+          'id': 'm-b1',
+          'guestId': 'guest-b',
+          'vin': '2LMPJ8KP3LBL00999',
+          'title': '2024 Lincoln Nautilus Reserve',
+          'price': 46500.0,
+          'location': 'Boulevard Lincoln Lewes',
+          'foundAt': '2026-11-16T09:05:00Z',
+          'lastSeenAt': '2026-11-16T09:05:00Z',
+        },
+      ],
+    };
+
+    final merged = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: deviceA,
+      deviceBSnapshot: deviceB,
+    );
+
+    final guests = merged['guests'] as List<dynamic>;
+    final guestIds = guests.map((g) => (g as Map)['id']).toSet();
+    expect(guestIds, {'guest-a', 'guest-b'});
+    expect(guestIds.contains('guest-deleted-later'), isFalse);
+
+    final matches = merged['matches'] as List<dynamic>;
+    expect(matches.length, 2);
+    final fordMatch = matches.firstWhere(
+      (m) => (m as Map)['vin'] == '1FTFW1E50TFA00001',
+    ) as Map;
+    // Price updated from newer scan on Device B, while original earliest foundAt from Device A is preserved!
+    expect(fordMatch['price'], 49995.0);
+    expect(fordMatch['foundAt'], '2026-11-16T08:05:00Z');
+  });
 }
+

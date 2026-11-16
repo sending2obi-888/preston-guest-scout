@@ -64,12 +64,20 @@ class LocalScoutEngine {
   static bool _isRunningBatch = false;
   static Timer? _scheduleTimer;
 
+  /// Invoked automatically whenever local guests, matches, or settings mutate
+  /// so GoogleDriveSyncService saves the latest search state to Google Drive.
+  static void Function()? onDataMutatedForCloudSave;
+
   static List<Map<String, dynamic>> _guests = [];
   static List<Map<String, dynamic>> _matches = [];
+  static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
     'geminiModel': 'gemini-2.5-flash',
     'timezone': 'America/New_York',
+    'googleOAuthClientId': '',
+    'googleOAuthClientSecret': '',
+    'driveSyncFileId': '',
     'completedSlots': <String>[],
   };
 
@@ -87,6 +95,11 @@ class LocalScoutEngine {
         _matches = (decoded['matches'] as List<dynamic>? ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
+        if (decoded['deletedGuestIds'] is Map) {
+          _deletedGuestIds = (decoded['deletedGuestIds'] as Map).map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          );
+        }
         if (decoded['settings'] is Map) {
           _settings = {
             ..._settings,
@@ -221,6 +234,7 @@ class LocalScoutEngine {
       final payload = jsonEncode({
         'guests': _guests,
         'matches': _matches,
+        'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
       await _channel.invokeMethod('writeLocalStore', {'storeJson': payload});
@@ -481,9 +495,12 @@ class LocalScoutEngine {
       'lastSearchedAt': null,
       'lastSearchSummary': '',
       'createdAt': nowIso,
+      'updatedAt': nowIso,
     });
+    _deletedGuestIds.remove(id);
     _guests.insert(0, map);
     await _persist();
+    onDataMutatedForCloudSave?.call();
 
     final searchRes =
         await runSearchForSingleGuest(id, slotLabel: 'Initial Intake Search');
@@ -517,9 +534,11 @@ class LocalScoutEngine {
 
   static Future<void> deleteGuest(String guestId) async {
     await ensureInitialized();
+    _deletedGuestIds[guestId] = DateTime.now().toUtc().toIso8601String();
     _guests.removeWhere((g) => g['id']?.toString() == guestId);
     _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
     await _persist();
+    onDataMutatedForCloudSave?.call();
   }
 
   static Future<Map<String, dynamic>> getSettings() async {
@@ -532,6 +551,8 @@ class LocalScoutEngine {
           : (key.isNotEmpty ? '••••' : ''),
       'geminiModel': _settings['geminiModel']?.toString() ?? 'gemini-2.5-flash',
       'timezone': _settings['timezone']?.toString() ?? 'America/New_York',
+      'googleOAuthClientId':
+          _settings['googleOAuthClientId']?.toString() ?? '',
     };
   }
 
@@ -539,6 +560,7 @@ class LocalScoutEngine {
     String? geminiApiKey,
     String? geminiModel,
     String? timezone,
+    String? googleOAuthClientId,
   }) async {
     await ensureInitialized();
     if (geminiApiKey != null) _settings['geminiApiKey'] = geminiApiKey.trim();
@@ -548,7 +570,11 @@ class LocalScoutEngine {
     if (timezone != null && timezone.trim().isNotEmpty) {
       _settings['timezone'] = timezone.trim();
     }
+    if (googleOAuthClientId != null) {
+      _settings['googleOAuthClientId'] = googleOAuthClientId.trim();
+    }
     await _persist();
+    onDataMutatedForCloudSave?.call();
   }
 
   static Future<void> runSearchForAllGuests({
@@ -567,6 +593,7 @@ class LocalScoutEngine {
       }
     } finally {
       _isRunningBatch = false;
+      onDataMutatedForCloudSave?.call();
     }
   }
 
@@ -650,8 +677,12 @@ class LocalScoutEngine {
       ..._guests[idx],
       'lastSearchedAt': nowIso,
       'lastSearchSummary': eval.summary,
+      'updatedAt': nowIso,
     };
     await _persist();
+    if (!_isRunningBatch) {
+      onDataMutatedForCloudSave?.call();
+    }
 
     final updated = await getGuestWithMatches(guestId);
     return (
@@ -1387,6 +1418,279 @@ class LocalScoutEngine {
     );
   }
 
+  // --- Multi-Device Google Drive Cloud Sync & Auth Persistence ---
+
+  static Future<Map<String, dynamic>> getLocalAuthConfig() async {
+    await ensureInitialized();
+    final session = _settings['googleAuthSession'];
+    return <String, dynamic>{
+      'googleOAuthClientId':
+          _settings['googleOAuthClientId']?.toString() ?? '',
+      'googleOAuthClientSecret':
+          _settings['googleOAuthClientSecret']?.toString() ?? '',
+      'driveSyncFileId': _settings['driveSyncFileId']?.toString() ?? '',
+      'session': session is Map
+          ? Map<String, dynamic>.from(session)
+          : <String, dynamic>{},
+    };
+  }
+
+  static Future<void> saveLocalAuthConfig({
+    String? googleOAuthClientId,
+    String? googleOAuthClientSecret,
+    String? driveSyncFileId,
+    Map<String, dynamic>? session,
+  }) async {
+    await ensureInitialized();
+    if (googleOAuthClientId != null) {
+      _settings['googleOAuthClientId'] = googleOAuthClientId.trim();
+    }
+    if (googleOAuthClientSecret != null) {
+      _settings['googleOAuthClientSecret'] = googleOAuthClientSecret.trim();
+    }
+    if (driveSyncFileId != null) {
+      _settings['driveSyncFileId'] = driveSyncFileId.trim();
+    }
+    if (session != null) {
+      _settings['googleAuthSession'] = session;
+    }
+    await _persist();
+  }
+
+  static Future<Map<String, dynamic>> exportCloudSnapshot({
+    String deviceLabel = 'Preston Guest Scout Device',
+  }) async {
+    await ensureInitialized();
+    return _buildCloudSnapshotSync(deviceLabel: deviceLabel);
+  }
+
+  static Map<String, dynamic> _buildCloudSnapshotSync({
+    String deviceLabel = 'Preston Guest Scout Device',
+  }) {
+    final compactMatches = _matches.map((m) {
+      final hl = (m['allHighlights'] as List<dynamic>? ?? [])
+          .take(8)
+          .map((e) => e.toString())
+          .toList();
+      return <String, dynamic>{
+        ...m,
+        'allHighlights': hl,
+      };
+    }).toList();
+
+    return <String, dynamic>{
+      'schemaVersion': 2,
+      'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      'updatedByDevice': deviceLabel,
+      'guests': _guests,
+      'deletedGuestIds': Map<String, String>.from(_deletedGuestIds),
+      'matches': compactMatches,
+      'settings': <String, dynamic>{
+        'geminiModel': _settings['geminiModel']?.toString() ?? 'gemini-2.5-flash',
+        'timezone': _settings['timezone']?.toString() ?? 'America/New_York',
+        'geminiApiKey': _settings['geminiApiKey']?.toString() ?? '',
+        'googleOAuthClientId':
+            _settings['googleOAuthClientId']?.toString() ?? '',
+      },
+    };
+  }
+
+  /// Conflict-free multi-device merge of remote Google Drive snapshot into local store.
+  /// Preserves guests created/updated on any device, applies delete tombstones across
+  /// devices, and merges vehicle matches by (guestId, vin) keeping earliest foundAt.
+  static Future<({int totalGuests, int totalMatches, bool localChanged})>
+      mergeCloudSnapshot(Map<String, dynamic> remote) async {
+    await ensureInitialized();
+    final res = _mergeCloudSnapshotSync(remote);
+    if (res.localChanged) {
+      await _persist();
+    } else {
+      await _syncWidget();
+    }
+    return res;
+  }
+
+  static ({int totalGuests, int totalMatches, bool localChanged})
+      _mergeCloudSnapshotSync(Map<String, dynamic> remote) {
+    bool localChanged = false;
+
+    // 1. Merge remote deletedGuestIds tombstones
+    final remoteDeleted = remote['deletedGuestIds'];
+    if (remoteDeleted is Map) {
+      remoteDeleted.forEach((key, value) {
+        final delId = key?.toString() ?? '';
+        final delIso = value?.toString() ?? '';
+        if (delId.isEmpty || delIso.isEmpty) return;
+
+        final prevTomb = _deletedGuestIds[delId] ?? '';
+        if (delIso.compareTo(prevTomb) > 0) {
+          _deletedGuestIds[delId] = delIso;
+        }
+
+        final existingIdx =
+            _guests.indexWhere((g) => g['id']?.toString() == delId);
+        if (existingIdx != -1) {
+          final existing = _guests[existingIdx];
+          final localStamp = (existing['updatedAt'] ??
+                  existing['lastSearchedAt'] ??
+                  existing['createdAt'] ??
+                  '')
+              .toString();
+          if (delIso.compareTo(localStamp) >= 0) {
+            _guests.removeAt(existingIdx);
+            _matches.removeWhere((m) => m['guestId']?.toString() == delId);
+            localChanged = true;
+          }
+        }
+      });
+    }
+
+    // 2. Merge remote guests
+    final localGuestsById = <String, int>{};
+    for (var i = 0; i < _guests.length; i++) {
+      final id = _guests[i]['id']?.toString() ?? '';
+      if (id.isNotEmpty) localGuestsById[id] = i;
+    }
+
+    final remoteGuests = remote['guests'];
+    if (remoteGuests is List) {
+      for (final item in remoteGuests) {
+        if (item is! Map) continue;
+        final rg = _normalizeGuestMap(Map<String, dynamic>.from(item));
+        final id = rg['id']?.toString() ?? '';
+        final name = rg['name']?.toString() ?? '';
+        if (id.isEmpty || name.isEmpty) continue;
+
+        final rgStamp = (rg['updatedAt'] ??
+                rg['lastSearchedAt'] ??
+                rg['createdAt'] ??
+                DateTime.now().toUtc().toIso8601String())
+            .toString();
+        rg['updatedAt'] = rgStamp;
+
+        final tomb = _deletedGuestIds[id];
+        if (tomb != null && tomb.compareTo(rgStamp) >= 0) continue;
+
+        final existingIdx = localGuestsById[id];
+        if (existingIdx == null) {
+          _guests.add(rg);
+          localGuestsById[id] = _guests.length - 1;
+          localChanged = true;
+        } else {
+          final existing = _guests[existingIdx];
+          final localStamp = (existing['updatedAt'] ??
+                  existing['lastSearchedAt'] ??
+                  existing['createdAt'] ??
+                  '')
+              .toString();
+          if (rgStamp.compareTo(localStamp) > 0) {
+            _guests[existingIdx] = rg;
+            localChanged = true;
+          }
+        }
+      }
+    }
+
+    // Sort guests newest-first by createdAt
+    _guests.sort((a, b) => (b['createdAt'] ?? '')
+        .toString()
+        .compareTo((a['createdAt'] ?? '').toString()));
+
+    // 3. Merge remote matches for active non-deleted guests
+    final activeGuestIds = _guests
+        .map((g) => g['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    _matches.removeWhere(
+        (m) => !activeGuestIds.contains(m['guestId']?.toString() ?? ''));
+
+    final localMatchesByKey = <String, int>{};
+    for (var i = 0; i < _matches.length; i++) {
+      final gid = _matches[i]['guestId']?.toString() ?? '';
+      final vin = _matches[i]['vin']?.toString() ?? '';
+      if (gid.isNotEmpty && vin.isNotEmpty) {
+        localMatchesByKey['$gid::$vin'] = i;
+      }
+    }
+
+    final remoteMatches = remote['matches'];
+    if (remoteMatches is List) {
+      for (final item in remoteMatches) {
+        if (item is! Map) continue;
+        final rm = Map<String, dynamic>.from(item);
+        final gid = rm['guestId']?.toString() ?? '';
+        final vin = rm['vin']?.toString() ?? '';
+        if (gid.isEmpty || vin.isEmpty || !activeGuestIds.contains(gid)) {
+          continue;
+        }
+
+        final key = '$gid::$vin';
+        final rmSeen = (rm['lastSeenAt'] ?? rm['foundAt'] ?? '').toString();
+        final existingIdx = localMatchesByKey[key];
+
+        if (existingIdx == null) {
+          _matches.add(rm);
+          localMatchesByKey[key] = _matches.length - 1;
+          localChanged = true;
+        } else {
+          final existing = _matches[existingIdx];
+          final localSeen =
+              (existing['lastSeenAt'] ?? existing['foundAt'] ?? '').toString();
+          if (rmSeen.compareTo(localSeen) > 0) {
+            final localFound = (existing['foundAt'] ?? rmSeen).toString();
+            final remoteFound = (rm['foundAt'] ?? rmSeen).toString();
+            final earliestFound =
+                remoteFound.isNotEmpty && remoteFound.compareTo(localFound) < 0
+                    ? remoteFound
+                    : localFound;
+            _matches[existingIdx] = <String, dynamic>{
+              ...existing,
+              ...rm,
+              'foundAt': earliestFound,
+            };
+            localChanged = true;
+          }
+        }
+      }
+    }
+
+    // 4. Sync shared settings (Gemini API key if empty locally, model, timezone, OAuth client ID)
+    final remoteSettings = remote['settings'];
+    if (remoteSettings is Map) {
+      final localKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+      final remKey = (remoteSettings['geminiApiKey']?.toString() ?? '').trim();
+      if (localKey.isEmpty && remKey.isNotEmpty) {
+        _settings['geminiApiKey'] = remKey;
+        localChanged = true;
+      }
+      final remModel = (remoteSettings['geminiModel']?.toString() ?? '').trim();
+      if (remModel.isNotEmpty && remModel != _settings['geminiModel']) {
+        _settings['geminiModel'] = remModel;
+        localChanged = true;
+      }
+      final remTz = (remoteSettings['timezone']?.toString() ?? '').trim();
+      if (remTz.isNotEmpty && remTz != _settings['timezone']) {
+        _settings['timezone'] = remTz;
+        localChanged = true;
+      }
+      final localOAuth =
+          (_settings['googleOAuthClientId']?.toString() ?? '').trim();
+      final remOAuth =
+          (remoteSettings['googleOAuthClientId']?.toString() ?? '').trim();
+      if (localOAuth.isEmpty && remOAuth.isNotEmpty) {
+        _settings['googleOAuthClientId'] = remOAuth;
+        localChanged = true;
+      }
+    }
+
+    return (
+      totalGuests: _guests.length,
+      totalMatches: _matches.length,
+      localChanged: localChanged,
+    );
+  }
+
   @visibleForTesting
   static Map<String, dynamic> normalizeSpecsForTest(Map<String, dynamic> raw) =>
       _normalizeGuestMap(raw);
@@ -1397,4 +1701,18 @@ class LocalScoutEngine {
     List<Map<String, dynamic>> candidates,
   ) =>
       _deterministicEvaluate(guest, _preFilter(guest, candidates));
+
+  @visibleForTesting
+  static Map<String, dynamic> simulateMultiDeviceCloudMergeForTest({
+    required Map<String, dynamic> deviceASnapshot,
+    required Map<String, dynamic> deviceBSnapshot,
+  }) {
+    _guests = [];
+    _matches = [];
+    _deletedGuestIds = {};
+    _mergeCloudSnapshotSync(deviceASnapshot);
+    _mergeCloudSnapshotSync(deviceBSnapshot);
+    return _buildCloudSnapshotSync(deviceLabel: 'TestMergedDevice');
+  }
 }
+

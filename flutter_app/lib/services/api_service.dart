@@ -10,6 +10,7 @@ class ApiService {
     'API_BASE_URL',
     defaultValue: '',
   );
+  static String _authBearerToken = '';
 
   /// When running as a standalone Android / Googlebook APK with no external API_BASE_URL,
   /// use the built-in LocalScoutEngine so the APK works 100% self-contained on-device.
@@ -25,6 +26,19 @@ class ApiService {
     _customBaseUrl = url.trim().replaceAll(RegExp(r'/$'), '');
   }
 
+  static void setAuthBearerToken(String token) {
+    _authBearerToken = token.trim();
+  }
+
+  static Map<String, String> _headers({bool jsonBody = false}) {
+    final map = <String, String>{};
+    if (jsonBody) map['Content-Type'] = 'application/json';
+    if (_authBearerToken.isNotEmpty) {
+      map['Authorization'] = 'Bearer $_authBearerToken';
+    }
+    return map;
+  }
+
   static String resolveVehiclePhotoUrl(String rawUrl) {
     if (rawUrl.isEmpty) return '';
     if (kIsWeb && rawUrl.contains('prestonmotor.com')) {
@@ -37,7 +51,10 @@ class ApiService {
     if (_useLocalOnDeviceEngine) {
       return LocalScoutEngine.getStatus();
     }
-    final res = await http.get(Uri.parse('$baseUrl/api/status'));
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/status'),
+      headers: _headers(),
+    );
     if (res.statusCode != 200) {
       throw Exception('Failed to load system status (${res.statusCode})');
     }
@@ -48,7 +65,10 @@ class ApiService {
     if (_useLocalOnDeviceEngine) {
       return LocalScoutEngine.getAllGuests();
     }
-    final res = await http.get(Uri.parse('$baseUrl/api/guests'));
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/guests'),
+      headers: _headers(),
+    );
     if (res.statusCode != 200) {
       throw Exception('Failed to load guests (${res.statusCode})');
     }
@@ -75,7 +95,10 @@ class ApiService {
     if (_useLocalOnDeviceEngine) {
       return LocalScoutEngine.getRecentTenWidgetGuests();
     }
-    final res = await http.get(Uri.parse('$baseUrl/api/widget/recent-guests'));
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/widget/recent-guests'),
+      headers: _headers(),
+    );
     if (res.statusCode != 200) {
       throw Exception('Failed to load widget guests (${res.statusCode})');
     }
@@ -128,7 +151,7 @@ class ApiService {
 
     final res = await http.post(
       Uri.parse('$baseUrl/api/guests'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(jsonBody: true),
       body: jsonEncode({
         'name': name,
         'phone': phone,
@@ -177,6 +200,7 @@ class ApiService {
     }
     final res = await http.get(
       Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/matches'),
+      headers: _headers(),
     );
     if (res.statusCode != 200) {
       throw Exception('Guest not found (${res.statusCode})');
@@ -197,6 +221,7 @@ class ApiService {
     }
     final res = await http.post(
       Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/search'),
+      headers: _headers(),
     );
     if (res.statusCode != 200) {
       throw Exception('Search failed (${res.statusCode})');
@@ -219,7 +244,10 @@ class ApiService {
           slotLabel: 'Manual All-Guests Search');
       return;
     }
-    final res = await http.post(Uri.parse('$baseUrl/api/search-all'));
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/search-all'),
+      headers: _headers(),
+    );
     if (res.statusCode != 200) {
       throw Exception('Batch search failed (${res.statusCode})');
     }
@@ -232,6 +260,7 @@ class ApiService {
     }
     final res = await http.delete(
       Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}'),
+      headers: _headers(),
     );
     if (res.statusCode != 200) {
       throw Exception('Delete failed (${res.statusCode})');
@@ -243,7 +272,10 @@ class ApiService {
     if (_useLocalOnDeviceEngine) {
       return LocalScoutEngine.getSettings();
     }
-    final res = await http.get(Uri.parse('$baseUrl/api/settings'));
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/settings'),
+      headers: _headers(),
+    );
     if (res.statusCode != 200) {
       throw Exception('Failed to load settings');
     }
@@ -254,12 +286,14 @@ class ApiService {
     String? geminiApiKey,
     String? geminiModel,
     String? timezone,
+    String? googleOAuthClientId,
   }) async {
     if (_useLocalOnDeviceEngine) {
       await LocalScoutEngine.updateSettings(
         geminiApiKey: geminiApiKey,
         geminiModel: geminiModel,
         timezone: timezone,
+        googleOAuthClientId: googleOAuthClientId,
       );
       return;
     }
@@ -267,10 +301,13 @@ class ApiService {
     if (geminiApiKey != null) payload['geminiApiKey'] = geminiApiKey;
     if (geminiModel != null) payload['geminiModel'] = geminiModel;
     if (timezone != null) payload['timezone'] = timezone;
+    if (googleOAuthClientId != null) {
+      payload['googleOAuthClientId'] = googleOAuthClientId;
+    }
 
     final res = await http.put(
       Uri.parse('$baseUrl/api/settings'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _headers(jsonBody: true),
       body: jsonEncode(payload),
     );
     if (res.statusCode != 200) {

@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { db, getSetting, setSetting, mapGuestRow, mapMatchRow } from './db.mjs';
 import { normalizeGuestSpecs } from './preston_scraper.mjs';
 import {
+  queryAndSyncWithGoogleDrive,
+  scheduleAutoSaveToGoogleDrive,
+  getDriveSyncStatus,
+} from './drive_sync.mjs';
+import {
   getScheduleStatus,
   runSearchForGuest,
   runSearchForAllActiveGuests,
@@ -182,21 +187,46 @@ const server = http.createServer(async (req, res) => {
 
   const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = parsedUrl.pathname;
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
 
   try {
     // Health & Scheduler Status
     if (pathname === '/api/status' && req.method === 'GET') {
       const totalGuests = db.prepare('SELECT COUNT(*) AS c FROM guests').get()?.c || 0;
       const totalMatches = db.prepare('SELECT COUNT(*) AS c FROM matches').get()?.c || 0;
+      const driveStatus = await getDriveSyncStatus();
       return sendJson(res, 200, {
         ok: true,
         totalGuests,
         totalMatches,
+        driveSync: driveStatus,
         ...getScheduleStatus(),
       });
     }
 
-    // Settings GET / PUT (Gemini API key, model, timezone)
+    // Google Drive Cloud Sync endpoints (queried every time app is opened + manual sync)
+    if (pathname === '/api/drive-sync/status' && req.method === 'GET') {
+      const status = await getDriveSyncStatus();
+      return sendJson(res, 200, { ok: true, ...status });
+    }
+
+    if (pathname === '/api/drive-sync/sync' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const token = bearerToken || (body.accessToken || '').trim();
+      const syncRes = await queryAndSyncWithGoogleDrive({
+        bearerToken: token,
+        pushAfterMerge: body.pushAfterMerge !== false,
+        deviceLabel: body.deviceLabel || 'Preston Guest Scout Web',
+      });
+      const rows = db.prepare('SELECT * FROM guests ORDER BY created_at DESC').all();
+      return sendJson(res, 200, {
+        ...syncRes,
+        guests: rows.map(mapGuestRow),
+      });
+    }
+
+    // Settings GET / PUT (Gemini API key, model, timezone, Google OAuth Client ID)
     if (pathname === '/api/settings' && req.method === 'GET') {
       const rawKey = getSetting('gemini_api_key');
       return sendJson(res, 200, {
@@ -206,6 +236,7 @@ const server = http.createServer(async (req, res) => {
           : '',
         geminiModel: getSetting('gemini_model') || 'gemini-2.5-flash',
         timezone: getSetting('timezone') || 'America/New_York',
+        googleOAuthClientId: getSetting('google_oauth_client_id') || '',
         morningSlot: '07:30',
         afternoonSlot: '14:00',
       });
@@ -222,9 +253,14 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.timezone === 'string' && body.timezone.trim()) {
         setSetting('timezone', body.timezone.trim());
       }
+      if (typeof body.googleOAuthClientId === 'string') {
+        setSetting('google_oauth_client_id', body.googleOAuthClientId.trim());
+      }
+      scheduleAutoSaveToGoogleDrive(bearerToken);
       return sendJson(res, 200, {
         ok: true,
         geminiConfigured: Boolean(getSetting('gemini_api_key')),
+        googleOAuthClientId: getSetting('google_oauth_client_id') || '',
       });
     }
 
@@ -267,7 +303,7 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // Create new guest + trigger initial Gemini Agent search on prestonmotor.com
+    // Create new guest + trigger initial Gemini Agent search on prestonmotor.com + auto-save to Drive
     if (pathname === '/api/guests' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const name = (body.name || '').trim();
@@ -295,11 +331,11 @@ const server = http.createServer(async (req, res) => {
         INSERT INTO guests (
           id, name, phone, email, condition, min_year, max_year, make, model, trim,
           max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
-          active, created_at
+          active, created_at, updated_at
         ) VALUES (
           @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
           @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
-          1, @created_at
+          1, @created_at, @updated_at
         )
       `).run({
         id,
@@ -319,6 +355,7 @@ const server = http.createServer(async (req, res) => {
         features_json: JSON.stringify(features),
         notes: (body.notes || '').trim(),
         created_at: nowIso,
+        updated_at: nowIso,
       });
 
       let searchResult = null;
@@ -330,6 +367,8 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      scheduleAutoSaveToGoogleDrive(bearerToken);
+
       const created = mapGuestRow(
         db.prepare('SELECT * FROM guests WHERE id = ?').get(id)
       );
@@ -339,6 +378,7 @@ const server = http.createServer(async (req, res) => {
     // Trigger batch search across all active guests
     if (pathname === '/api/search-all' && req.method === 'POST') {
       const result = await runSearchForAllActiveGuests('Manual All-Guests Search');
+      scheduleAutoSaveToGoogleDrive(bearerToken);
       return sendJson(res, 200, { ok: true, ...result });
     }
 
@@ -363,17 +403,25 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!subResource && req.method === 'DELETE') {
+        const deletedIso = new Date().toISOString();
+        db.prepare(
+          `INSERT INTO deleted_guests (id, deleted_at) VALUES (?, ?)
+           ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`
+        ).run(guestId, deletedIso);
         db.prepare('DELETE FROM guests WHERE id = ?').run(guestId);
+        scheduleAutoSaveToGoogleDrive(bearerToken);
         return sendJson(res, 200, { ok: true });
       }
 
       if (!subResource && req.method === 'PATCH') {
         const body = await readJsonBody(req);
         if (typeof body.active === 'boolean') {
-          db.prepare('UPDATE guests SET active = ? WHERE id = ?').run(
+          db.prepare('UPDATE guests SET active = ?, updated_at = ? WHERE id = ?').run(
             body.active ? 1 : 0,
+            new Date().toISOString(),
             guestId
           );
+          scheduleAutoSaveToGoogleDrive(bearerToken);
         }
         const updated = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
         return sendJson(res, 200, { guest: mapGuestRow(updated) });
@@ -502,6 +550,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 await seedInitialGuestsIfEmpty();
+queryAndSyncWithGoogleDrive({
+  pushAfterMerge: true,
+  deviceLabel: 'Preston Guest Scout Server Startup',
+}).catch((err) => console.error('[DriveSync] Startup sync warning:', err.message));
 startTwiceDailyScheduler();
 
 server.listen(PORT, '0.0.0.0', () => {

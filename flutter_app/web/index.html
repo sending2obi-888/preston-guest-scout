@@ -5,7 +5,7 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Material Design 3 Guest & Vehicle Inventory Scout powered by a twice-daily (7:30 AM & 2:00 PM) Gemini Agent searching prestonmotor.com.">
+  <meta name="description" content="Material Design 3 Guest & Vehicle Inventory Scout powered by a twice-daily (7:30 AM & 2:00 PM) Gemini Agent searching prestonmotor.com with Google SSO & Google Drive multi-device sync.">
   <meta name="theme-color" content="#0B57D0">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -14,6 +14,122 @@
   <link rel="icon" type="image/png" href="favicon.png"/>
   <title>Preston Motor Guest Scout • Gemini Inventory Agent</title>
   <link rel="manifest" href="manifest.json">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+    (function () {
+      const STORAGE_KEY = 'preston_google_web_session_v1';
+
+      window.prestonReadSavedWebSession = function () {
+        try {
+          return window.localStorage.getItem(STORAGE_KEY) || '';
+        } catch (_) {
+          return '';
+        }
+      };
+
+      window.prestonClearSavedWebSession = function () {
+        try {
+          window.localStorage.removeItem(STORAGE_KEY);
+        } catch (_) {}
+      };
+
+      window.prestonGoogleWebSignIn = function (clientId, driveScope) {
+        return new Promise(function (resolve) {
+          if (!clientId || !clientId.trim()) {
+            resolve(JSON.stringify({
+              signedIn: false,
+              error: 'Enter a Web Google OAuth Client ID to launch browser popup SSO, or use the connected Google Drive account.'
+            }));
+            return;
+          }
+          if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+            resolve(JSON.stringify({
+              signedIn: false,
+              error: 'Google Identity Services script is still loading. Please try again in a moment.'
+            }));
+            return;
+          }
+
+          const scope = (driveScope || 'https://www.googleapis.com/auth/drive') +
+            ' openid email profile';
+
+          try {
+            const tokenClient = window.google.accounts.oauth2.initTokenClient({
+              client_id: clientId.trim(),
+              scope: scope,
+              callback: async function (resp) {
+                if (!resp || resp.error || !resp.access_token) {
+                  resolve(JSON.stringify({
+                    signedIn: false,
+                    error: (resp && (resp.error_description || resp.error)) || 'Google Sign-In canceled.'
+                  }));
+                  return;
+                }
+                let email = '';
+                let displayName = 'Google Account';
+                let photoUrl = '';
+                try {
+                  const uRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                    headers: { Authorization: 'Bearer ' + resp.access_token }
+                  });
+                  if (uRes.ok) {
+                    const info = await uRes.json();
+                    email = info.email || '';
+                    displayName = info.name || info.email || 'Google Account';
+                    photoUrl = info.picture || '';
+                  }
+                } catch (_) {}
+
+                const expiresInSec = Number(resp.expires_in || 3500);
+                const sessionPayload = {
+                  signedIn: true,
+                  email: email,
+                  displayName: displayName,
+                  photoUrl: photoUrl,
+                  accessToken: resp.access_token,
+                  expiresAtMs: Date.now() + expiresInSec * 1000,
+                  authMethod: 'web_gis_sso'
+                };
+                try {
+                  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sessionPayload));
+                } catch (_) {}
+                resolve(JSON.stringify(sessionPayload));
+              },
+              error_callback: function (err) {
+                resolve(JSON.stringify({
+                  signedIn: false,
+                  error: (err && err.message) || 'Google Sign-In popup closed.'
+                }));
+              }
+            });
+            tokenClient.requestAccessToken({ prompt: 'select_account' });
+          } catch (e) {
+            resolve(JSON.stringify({
+              signedIn: false,
+              error: (e && e.message) || 'Failed to initialize Google Identity Services.'
+            }));
+          }
+        });
+      };
+
+      window.prestonOnPageVisibleCallbacks = [];
+      window.prestonRegisterVisibilityListener = function (cb) {
+        window.prestonOnPageVisibleCallbacks.push(cb);
+      };
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          for (const fn of window.prestonOnPageVisibleCallbacks) {
+            try { fn(); } catch (_) {}
+          }
+        }
+      });
+      window.addEventListener('focus', function () {
+        for (const fn of window.prestonOnPageVisibleCallbacks) {
+          try { fn(); } catch (_) {}
+        }
+      });
+    })();
+  </script>
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>

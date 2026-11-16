@@ -7,8 +7,10 @@ import 'screens/guest_matches_screen.dart';
 import 'screens/home_intake_screen.dart';
 import 'screens/match_detail_screen.dart';
 import 'services/api_service.dart';
+import 'services/google_drive_sync_service.dart';
 import 'services/widget_sync_service.dart';
 import 'theme/app_theme.dart';
+import 'widgets/google_account_sync_dialog.dart';
 import 'widgets/launcher_widget_sheet.dart';
 import 'widgets/settings_and_chromebook_dialog.dart';
 
@@ -35,9 +37,12 @@ class _PrestonGuestScoutAppState extends State<PrestonGuestScoutApp> {
     });
   }
 
-  void _navigateToGuestMatches(String guestId) {
+  Future<void> _navigateToGuestMatches(String guestId) async {
+    if (guestId.isEmpty) return;
+    // Query Google Drive first when opening from the Launcher Widget so matches are fresh
+    unawaited(GoogleDriveSyncService.instance.queryDriveOnAppOpen());
     final nav = _navKey.currentState;
-    if (nav == null || guestId.isEmpty) return;
+    if (nav == null) return;
     nav.push(
       MaterialPageRoute(
         builder: (_) => GuestMatchesScreen(
@@ -108,8 +113,10 @@ class MainShellScreen extends StatefulWidget {
   State<MainShellScreen> createState() => _MainShellScreenState();
 }
 
-class _MainShellScreenState extends State<MainShellScreen> {
-  int _selectedPageIndex = 0; // 0 = Page 1 (Home Intake), 1 = Page 2 (Guests List)
+class _MainShellScreenState extends State<MainShellScreen>
+    with WidgetsBindingObserver {
+  int _selectedPageIndex =
+      0; // 0 = Page 1 (Home Intake), 1 = Page 2 (Guests List)
   SystemStatus _status = const SystemStatus();
   List<GuestProfile> _guests = [];
   bool _loadingGuests = true;
@@ -118,7 +125,12 @@ class _MainShellScreenState extends State<MainShellScreen> {
   @override
   void initState() {
     super.initState();
-    _refreshAll();
+    WidgetsBinding.instance.addObserver(this);
+    GoogleDriveSyncService.instance.addCloudMergeListener(_handleCloudMerged);
+
+    // Load local/cached data immediately and query Google Drive on app open
+    _initializeAndQueryDriveOnOpen();
+
     // Keep status and twice-daily match counts fresh automatically
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       _refreshAll(silent: true);
@@ -127,8 +139,37 @@ class _MainShellScreenState extends State<MainShellScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    GoogleDriveSyncService.instance
+        .removeCloudMergeListener(_handleCloudMerged);
     _pollTimer?.cancel();
     super.dispose();
+  }
+
+  /// Automatically queries Google Drive every time the app is opened or foregrounded
+  /// on any device so search requirements and matches are always up to date.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _queryDriveAndRefresh();
+    }
+  }
+
+  void _handleCloudMerged() {
+    if (!mounted) return;
+    _refreshAll(silent: true);
+  }
+
+  Future<void> _initializeAndQueryDriveOnOpen() async {
+    await _refreshAll();
+    await _queryDriveAndRefresh();
+  }
+
+  Future<void> _queryDriveAndRefresh() async {
+    final synced = await GoogleDriveSyncService.instance.queryDriveOnAppOpen();
+    if (synced && mounted) {
+      await _refreshAll(silent: true);
+    }
   }
 
   Future<void> _refreshAll({bool silent = false}) async {
@@ -170,6 +211,15 @@ class _MainShellScreenState extends State<MainShellScreen> {
     );
   }
 
+  void _openGoogleAccountSyncDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => GoogleAccountSyncDialog(
+        onSynced: () => _refreshAll(silent: true),
+      ),
+    );
+  }
+
   void _openLauncherWidgetPreview() {
     showDialog(
       context: context,
@@ -191,7 +241,9 @@ class _MainShellScreenState extends State<MainShellScreen> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final wideChromebook = MediaQuery.of(context).size.width >= 820;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final wideChromebook = screenWidth >= 820;
+    final compactMobile = screenWidth < 520;
 
     final pages = [
       HomeIntakeScreen(
@@ -203,7 +255,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
       GuestListScreen(
         guests: _guests,
         isLoading: _loadingGuests,
-        onRefresh: _refreshAll,
+        onRefresh: _queryDriveAndRefresh,
         onSelectGuest: _openGuestMatches,
         onSwitchToIntake: () => setState(() => _selectedPageIndex = 0),
       ),
@@ -235,16 +287,74 @@ class _MainShellScreenState extends State<MainShellScreen> {
           ],
         ),
         actions: [
+          // Google Single Sign-On & Multi-Device Google Drive Sync Button
+          ListenableBuilder(
+            listenable: GoogleDriveSyncService.instance,
+            builder: (context, _) {
+              final sync = GoogleDriveSyncService.instance;
+              final signedIn = sync.isSignedIn;
+              final syncing = sync.isSyncing || sync.isSigningIn;
+
+              if (!signedIn) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: compactMobile
+                      ? IconButton.filledTonal(
+                          tooltip: 'Sign in with Google & Sync Drive',
+                          onPressed: _openGoogleAccountSyncDialog,
+                          icon: const Icon(Icons.login_rounded, size: 18),
+                        )
+                      : OutlinedButton.icon(
+                          onPressed: _openGoogleAccountSyncDialog,
+                          icon: const Icon(Icons.account_circle_outlined,
+                              size: 18),
+                          label: const Text('Sign in with Google'),
+                        ),
+                );
+              }
+
+              final shortName = sync.userDisplayName.trim().isNotEmpty
+                  ? sync.userDisplayName.trim().split(' ').first
+                  : 'Drive Synced';
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: FilledButton.tonalIcon(
+                  onPressed: _openGoogleAccountSyncDialog,
+                  icon: syncing
+                      ? const SizedBox(
+                          width: 15,
+                          height: 15,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_done_outlined, size: 18),
+                  label: Text(
+                    wideChromebook
+                        ? '$shortName • Drive Synced'
+                        : (compactMobile ? 'Synced' : shortName),
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(width: 6),
           // Launcher Widget Preview Button (Strictly Last 10 Guests Input)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            child: FilledButton.tonalIcon(
-              onPressed: _openLauncherWidgetPreview,
-              icon: const Icon(Icons.widgets_outlined, size: 18),
-              label: Text(wideChromebook ? 'Launcher Widget (Last 10)' : 'Widget'),
-            ),
+            child: compactMobile
+                ? IconButton.filledTonal(
+                    tooltip: 'Launcher Widget (Last 10 Guests)',
+                    onPressed: _openLauncherWidgetPreview,
+                    icon: const Icon(Icons.widgets_outlined, size: 18),
+                  )
+                : FilledButton.tonalIcon(
+                    onPressed: _openLauncherWidgetPreview,
+                    icon: const Icon(Icons.widgets_outlined, size: 18),
+                    label: Text(
+                        wideChromebook ? 'Launcher Widget (Last 10)' : 'Widget'),
+                  ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           IconButton(
             tooltip: 'Gemini Agent & Googlebook Startup Settings',
             onPressed: _openSettingsDialog,
@@ -272,7 +382,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
                   selectedIndex: _selectedPageIndex,
                   onDestinationSelected: (idx) {
                     setState(() => _selectedPageIndex = idx);
-                    if (idx == 1) _refreshAll(silent: true);
+                    if (idx == 1) _queryDriveAndRefresh();
                   },
                   destinations: [
                     const NavigationRailDestination(
@@ -307,7 +417,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
               selectedIndex: _selectedPageIndex,
               onDestinationSelected: (idx) {
                 setState(() => _selectedPageIndex = idx);
-                if (idx == 1) _refreshAll(silent: true);
+                if (idx == 1) _queryDriveAndRefresh();
               },
               destinations: [
                 const NavigationDestination(
