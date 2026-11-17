@@ -7,6 +7,8 @@ import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
+import 'package:preston_guest_scout/services/match_notification_service.dart';
+import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
 
 void main() {
   test('GuestProfile targetVehicleLabel formats year range, make, model, and trim', () {
@@ -623,7 +625,219 @@ void main() {
 
     LocalScoutEngine.resetForTest();
   });
+
+  test('MatchAlertNotification formats exact Client Name - Match Found - Model message', () {
+    expect(
+      MatchAlertNotification.formatMessage(
+        clientName: 'Rhonda Vanvorst',
+        make: 'Lincoln',
+        model: 'Nautilus',
+        title: '2023 Lincoln Nautilus Reserve AWD',
+      ),
+      'Rhonda Vanvorst - Match Found - Lincoln Nautilus',
+    );
+
+    expect(
+      MatchAlertNotification.formatMessage(
+        clientName: 'Marcus Vance',
+        make: 'Ford',
+        model: 'Ford F-250',
+      ),
+      'Marcus Vance - Match Found - Ford F-250',
+    );
+
+    expect(
+      MatchAlertNotification.formatMessage(
+        clientName: 'Devon Brooks',
+        title: 'New 2026 Bronco Sport Big Bend',
+      ),
+      'Devon Brooks - Match Found - Bronco Sport Big Bend',
+    );
+  });
+
+  testWidgets(
+      'Post-initial-search new matches send OS notification saying Client Name - Match Found - Model while initial search sends 0 notifications',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    const notifChannel = MethodChannel('com.prestonmotor.scout/notifications');
+
+    String persistedStore = '{"guests":[],"matches":[],"notifications":[]}';
+    final dispatchedOsNotifications = <Map<String, dynamic>>[];
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      notifChannel,
+      (call) async {
+        if (call.method == 'requestNotificationPermission' ||
+            call.method == 'areNotificationsEnabled') {
+          return true;
+        }
+        if (call.method == 'showMatchNotification') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          dispatchedOsNotifications.add(args);
+          return true;
+        }
+        return null;
+      },
+    );
+
+    final initialInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FA6P8CF0R5100001',
+        'title': '2025 Ford Mustang GT Fastback',
+        'year': 2025,
+        'make': 'Ford',
+        'model': 'Mustang',
+        'trim': 'GT',
+        'condition': 'New',
+        'price': 46900.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'mileage': 12,
+        'drivetrain': 'RWD',
+        'highlights': ['Apple CarPlay', 'Backup Camera'],
+      },
+    ];
+
+    // 1. Initial Search when creating a new client: finds 1 match, MUST send 0 notifications!
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Alex Carter',
+      make: 'Ford',
+      model: 'Mustang',
+      maxPrice: 55000,
+      mockCandidatesOverride: initialInventory,
+    );
+    expect(created.matchesFound, 1);
+    expect(created.guest.initialSearchCompleted, isTrue);
+    expect(created.guest.seenMatchVins, contains('1FA6P8CF0R5100001'));
+    expect(dispatchedOsNotifications, isEmpty);
+    expect(MatchNotificationService.instance.notifications, isEmpty);
+
+    // 2. Adding a second vehicle target to the client: its initial search MUST ALSO send 0 notifications!
+    final addedTarget = await LocalScoutEngine.addVehicleTargetToGuest(
+      guestId: created.guest.id,
+      make: 'Ford',
+      model: 'Explorer',
+      maxPrice: 52000,
+      mockCandidatesOverride: [
+        {
+          'vin': '1FMSK8DH0RGA20002',
+          'title': '2025 Ford Explorer XLT 4WD',
+          'year': 2025,
+          'make': 'Ford',
+          'model': 'Explorer',
+          'trim': 'XLT',
+          'condition': 'New',
+          'price': 44500.0,
+          'location': 'Preston Ford of Hurlock',
+          'mileage': 9,
+          'drivetrain': '4WD',
+          'highlights': ['3rd Row Seating'],
+        },
+      ],
+    );
+    expect(addedTarget.matches.length, 2);
+    expect(dispatchedOsNotifications, isEmpty);
+
+    // 3. Subsequent search (e.g. 7:30 AM / 2:00 PM / Search Now) finds a NEW Mustang VIN:
+    // MUST send exactly 1 OS notification saying "Alex Carter - Match Found - Ford Mustang"!
+    final updatedInventory = <Map<String, dynamic>>[
+      ...initialInventory,
+      {
+        'vin': '1FMSK8DH0RGA20002',
+        'title': '2025 Ford Explorer XLT 4WD',
+        'year': 2025,
+        'make': 'Ford',
+        'model': 'Explorer',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 44500.0,
+        'location': 'Preston Ford of Hurlock',
+        'mileage': 9,
+        'drivetrain': '4WD',
+        'highlights': ['3rd Row Seating'],
+      },
+      {
+        'vin': '1FA6P8CF9S5300099',
+        'title': '2026 Ford Mustang EcoBoost Premium',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'Mustang',
+        'trim': 'EcoBoost Premium',
+        'condition': 'New',
+        'price': 38995.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'mileage': 5,
+        'drivetrain': 'RWD',
+        'highlights': ['Heated Seats'],
+      },
+    ];
+
+    final secondRun = await LocalScoutEngine.runSearchForSingleGuest(
+      created.guest.id,
+      slotLabel: '7:30 AM Daily Search',
+      mockCandidatesOverride: updatedInventory,
+    );
+    expect(secondRun.matches.length, 3);
+    expect(dispatchedOsNotifications.length, 1);
+    expect(
+      dispatchedOsNotifications.first['title'],
+      'Alex Carter - Match Found - Ford Mustang',
+    );
+    expect(
+      dispatchedOsNotifications.first['guestId'],
+      created.guest.id,
+    );
+    expect(MatchNotificationService.instance.unreadCount, 1);
+
+    // 4. Another subsequent search with no new VINs MUST send 0 duplicate notifications!
+    await LocalScoutEngine.runSearchForSingleGuest(
+      created.guest.id,
+      slotLabel: '2:00 PM Daily Search',
+      mockCandidatesOverride: updatedInventory,
+    );
+    expect(dispatchedOsNotifications.length, 1);
+
+    // 5. Verify MatchNotificationsDialog renders the exact notification message & navigates on tap
+    String? tappedGuestId;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MatchNotificationsDialog(
+            onSelectGuest: (gid) => tappedGuestId = gid,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Alex Carter - Match Found - Ford Mustang'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Alex Carter - Match Found - Ford Mustang'));
+    await tester.pumpAndSettle();
+    expect(tappedGuestId, created.guest.id);
+
+    LocalScoutEngine.resetForTest();
+  });
 }
+
 
 
 

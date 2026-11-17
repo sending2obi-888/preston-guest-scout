@@ -1,5 +1,13 @@
 import crypto from 'node:crypto';
-import { db, getSetting, mapGuestRow, formatVehicleTargetLabel } from './db.mjs';
+import {
+  db,
+  getSetting,
+  mapGuestRow,
+  formatVehicleTargetLabel,
+  extractVehicleModelLabel,
+  formatMatchNotificationMessage,
+  mapNotificationRow,
+} from './db.mjs';
 import { searchPrestonInventory } from './preston_scraper.mjs';
 import { evaluateInventoryWithGeminiAgent } from './gemini_agent.mjs';
 import { scheduleAutoSaveToGoogleDrive } from './drive_sync.mjs';
@@ -103,6 +111,14 @@ const upsertMatchStmt = db.prepare(`
     target_label = excluded.target_label
 `);
 
+const insertNotificationStmt = db.prepare(`
+  INSERT OR IGNORE INTO match_notifications (
+    id, guest_id, guest_name, vin, vehicle_model, message, location, price, created_at, read
+  ) VALUES (
+    @id, @guest_id, @guest_name, @vin, @vehicle_model, @message, @location, @price, @created_at, 0
+  )
+`);
+
 async function evaluateTargetsForGuest(guest, targetsToRun) {
   let totalCandidatesScanned = 0;
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
@@ -163,10 +179,143 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
   };
 }
 
+function persistEvaluatedMatchesAndNotifications({
+  rawGuest,
+  guest,
+  evalRes,
+  slotLabel,
+  nowIso,
+  onlyTargetId = null,
+  isInitialSearch = false,
+}) {
+  const allTargets = guest.vehicleTargets || [];
+  const validTargetIds = new Set(allTargets.map((t) => t.id));
+  const existingRows = db
+    .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
+    .all(guest.id);
+  const existingVins = new Set(existingRows.map((r) => String(r.vin || '')).filter(Boolean));
+  const seenVins = new Set([...(guest.seenMatchVins || []), ...existingVins]);
+
+  const hadCompletedInitialSearch =
+    !isInitialSearch &&
+    (Boolean(rawGuest.initial_search_completed) || Boolean(rawGuest.last_searched_at));
+
+  const createdNotifications = [];
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!onlyTargetId && evalRes.candidatesScanned > 0) {
+      const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
+      const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+      for (const r of existingRows) {
+        if (
+          (r.target_id && !validTargetIds.has(r.target_id)) ||
+          !foundVins.has(r.vin)
+        ) {
+          delStmt.run(r.id);
+        }
+      }
+    } else if (onlyTargetId && evalRes.candidatesScanned > 0) {
+      db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
+        guest.id,
+        onlyTargetId
+      );
+    }
+
+    for (const m of evalRes.matches) {
+      const v = m.vehicle;
+      const vin = String(v.vin || '').trim();
+      if (!vin) continue;
+
+      const isBrandNewMatch = !seenVins.has(vin);
+      seenVins.add(vin);
+
+      upsertMatchStmt.run({
+        id: crypto.randomUUID(),
+        guest_id: guest.id,
+        vin,
+        stock_number: v.stockNumber || '',
+        title: v.title,
+        year: v.year,
+        make: v.make || '',
+        model: v.model || '',
+        trim: v.trim || '',
+        condition: v.condition || '',
+        price: v.price ?? null,
+        msrp: v.msrp ?? null,
+        dealer_fee: v.dealerFee ?? null,
+        location: v.location || 'Preston Automotive Group',
+        mileage: v.mileage ?? 0,
+        drivetrain: v.drivetrain || '',
+        engine: v.engine || '',
+        exterior_color: v.exteriorColor || '',
+        interior_color: v.interiorColor || '',
+        photo_url: v.photoUrl || '',
+        listing_url: v.listingUrl || 'https://www.prestonmotor.com',
+        matched_features_json: JSON.stringify(m.matchedFeatures || []),
+        all_highlights_json: JSON.stringify(v.highlights || []),
+        agent_summary: m.agentSummary || '',
+        match_score: m.matchScore || 85,
+        found_at: nowIso,
+        search_slot: slotLabel,
+        last_seen_at: nowIso,
+        target_id: m.targetId || '',
+        target_label: m.targetLabel || '',
+      });
+
+      if (hadCompletedInitialSearch && isBrandNewMatch) {
+        const vehicleModel = extractVehicleModelLabel(v);
+        const message = formatMatchNotificationMessage(guest.name, v);
+        const notifId = `notif-${crypto.randomUUID()}`;
+        const info = insertNotificationStmt.run({
+          id: notifId,
+          guest_id: guest.id,
+          guest_name: guest.name,
+          vin,
+          vehicle_model: vehicleModel,
+          message,
+          location: v.location || 'Preston Automotive Group',
+          price: v.price ?? null,
+          created_at: nowIso,
+        });
+        if (info.changes > 0) {
+          const savedRow = db
+            .prepare('SELECT * FROM match_notifications WHERE id = ?')
+            .get(notifId);
+          if (savedRow) {
+            createdNotifications.push(mapNotificationRow(savedRow));
+          }
+        }
+      }
+    }
+
+    // Cap seen_match_vins_json at 2,500 entries per guest while keeping latest matches
+    const cappedSeen = [...seenVins].slice(-2500);
+    db.prepare(
+      `UPDATE guests
+       SET initial_search_completed = 1,
+           seen_match_vins_json = ?,
+           last_searched_at = ?,
+           last_search_summary = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).run(JSON.stringify(cappedSeen), nowIso, evalRes.summary, nowIso, guest.id);
+
+    db.exec('COMMIT');
+  } catch (txErr) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {}
+    throw txErr;
+  }
+
+  return createdNotifications;
+}
+
 export async function runSearchForGuest(
   guestId,
   slotLabel = 'Manual Gemini Search',
-  { onlyTargetId = null } = {}
+  { onlyTargetId = null, isInitialSearch = false } = {}
 ) {
   const rawGuest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
   if (!rawGuest) {
@@ -183,6 +332,7 @@ export async function runSearchForGuest(
       guestId: guest.id,
       candidatesScanned: 0,
       matchesFound: 0,
+      newNotifications: [],
       mode: 'smart-matcher',
       summary: 'No vehicle criteria specified.',
     };
@@ -199,78 +349,16 @@ export async function runSearchForGuest(
   try {
     const evalRes = await evaluateTargetsForGuest(guest, targetsToRun);
     const nowIso = new Date().toISOString();
-    const validTargetIds = new Set(allTargets.map((t) => t.id));
 
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      if (!onlyTargetId && evalRes.candidatesScanned > 0) {
-        // Clean up matches belonging to removed targets or sold VINs on full scan
-        const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
-        const existingRows = db
-          .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
-          .all(guest.id);
-        const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
-        for (const r of existingRows) {
-          if (
-            (r.target_id && !validTargetIds.has(r.target_id)) ||
-            !foundVins.has(r.vin)
-          ) {
-            delStmt.run(r.id);
-          }
-        }
-      } else if (onlyTargetId && evalRes.candidatesScanned > 0) {
-        db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
-          guest.id,
-          onlyTargetId
-        );
-      }
-
-      for (const m of evalRes.matches) {
-        const v = m.vehicle;
-        upsertMatchStmt.run({
-          id: crypto.randomUUID(),
-          guest_id: guest.id,
-          vin: v.vin,
-          stock_number: v.stockNumber || '',
-          title: v.title,
-          year: v.year,
-          make: v.make || '',
-          model: v.model || '',
-          trim: v.trim || '',
-          condition: v.condition || '',
-          price: v.price ?? null,
-          msrp: v.msrp ?? null,
-          dealer_fee: v.dealerFee ?? null,
-          location: v.location || 'Preston Automotive Group',
-          mileage: v.mileage ?? 0,
-          drivetrain: v.drivetrain || '',
-          engine: v.engine || '',
-          exterior_color: v.exteriorColor || '',
-          interior_color: v.interiorColor || '',
-          photo_url: v.photoUrl || '',
-          listing_url: v.listingUrl || 'https://www.prestonmotor.com',
-          matched_features_json: JSON.stringify(m.matchedFeatures || []),
-          all_highlights_json: JSON.stringify(v.highlights || []),
-          agent_summary: m.agentSummary || '',
-          match_score: m.matchScore || 85,
-          found_at: nowIso,
-          search_slot: slotLabel,
-          last_seen_at: nowIso,
-          target_id: m.targetId || '',
-          target_label: m.targetLabel || '',
-        });
-      }
-      db.exec('COMMIT');
-    } catch (txErr) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {}
-      throw txErr;
-    }
-
-    db.prepare(
-      'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
-    ).run(nowIso, evalRes.summary, nowIso, guest.id);
+    const newNotifications = persistEvaluatedMatchesAndNotifications({
+      rawGuest,
+      guest,
+      evalRes,
+      slotLabel,
+      nowIso,
+      onlyTargetId,
+      isInitialSearch,
+    });
 
     db.prepare(
       `UPDATE search_runs
@@ -290,6 +378,7 @@ export async function runSearchForGuest(
       guestId: guest.id,
       candidatesScanned: evalRes.candidatesScanned,
       matchesFound: evalRes.matches.length,
+      newNotifications,
       mode: evalRes.mode,
       summary: evalRes.summary,
     };
@@ -302,9 +391,13 @@ export async function runSearchForGuest(
   }
 }
 
-export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search', slotKey = null) {
+export async function runSearchForAllActiveGuests(
+  slotLabel = 'Scheduled Search',
+  slotKey = null,
+  { isInitialSearch = false } = {}
+) {
   if (isRunningBatch) {
-    return { skipped: true, reason: 'Batch already running' };
+    return { skipped: true, reason: 'Batch already running', newNotifications: [] };
   }
   isRunningBatch = true;
   const startedAt = new Date().toISOString();
@@ -322,6 +415,7 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
   let totalCandidates = 0;
   let totalMatches = 0;
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
+  const allNewNotifications = [];
 
   try {
     for (const row of activeRows) {
@@ -333,72 +427,16 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
         totalCandidates += evalRes.candidatesScanned;
         totalMatches += evalRes.matches.length;
 
-        const validTargetIds = new Set((guest.vehicleTargets || []).map((t) => t.id));
-
-        db.exec('BEGIN IMMEDIATE');
-        try {
-          if (evalRes.candidatesScanned > 0) {
-            const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
-            const existingRows = db
-              .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
-              .all(guest.id);
-            const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
-            for (const r of existingRows) {
-              if (
-                (r.target_id && !validTargetIds.has(r.target_id)) ||
-                !foundVins.has(r.vin)
-              ) {
-                delStmt.run(r.id);
-              }
-            }
-          }
-
-          for (const m of evalRes.matches) {
-            const v = m.vehicle;
-            upsertMatchStmt.run({
-              id: crypto.randomUUID(),
-              guest_id: guest.id,
-              vin: v.vin,
-              stock_number: v.stockNumber || '',
-              title: v.title,
-              year: v.year,
-              make: v.make || '',
-              model: v.model || '',
-              trim: v.trim || '',
-              condition: v.condition || '',
-              price: v.price ?? null,
-              msrp: v.msrp ?? null,
-              dealer_fee: v.dealerFee ?? null,
-              location: v.location || 'Preston Automotive Group',
-              mileage: v.mileage ?? 0,
-              drivetrain: v.drivetrain || '',
-              engine: v.engine || '',
-              exterior_color: v.exteriorColor || '',
-              interior_color: v.interiorColor || '',
-              photo_url: v.photoUrl || '',
-              listing_url: v.listingUrl || 'https://www.prestonmotor.com',
-              matched_features_json: JSON.stringify(m.matchedFeatures || []),
-              all_highlights_json: JSON.stringify(v.highlights || []),
-              agent_summary: m.agentSummary || '',
-              match_score: m.matchScore || 85,
-              found_at: nowIso,
-              search_slot: slotLabel,
-              last_seen_at: nowIso,
-              target_id: m.targetId || '',
-              target_label: m.targetLabel || '',
-            });
-          }
-          db.exec('COMMIT');
-        } catch (txErr) {
-          try {
-            db.exec('ROLLBACK');
-          } catch {}
-          throw txErr;
-        }
-
-        db.prepare(
-          'UPDATE guests SET last_searched_at = ?, last_search_summary = ?, updated_at = ? WHERE id = ?'
-        ).run(nowIso, evalRes.summary, nowIso, guest.id);
+        const created = persistEvaluatedMatchesAndNotifications({
+          rawGuest: row,
+          guest,
+          evalRes,
+          slotLabel,
+          nowIso,
+          onlyTargetId: null,
+          isInitialSearch,
+        });
+        allNewNotifications.push(...created);
       } catch (guestErr) {
         console.error(`[Scheduler] Error searching for ${guest.name}:`, guestErr.message);
       }
@@ -416,6 +454,7 @@ export async function runSearchForAllActiveGuests(slotLabel = 'Scheduled Search'
       guestsChecked: activeRows.length,
       candidatesScanned: totalCandidates,
       matchesFound: totalMatches,
+      newNotifications: allNewNotifications,
       mode: modeUsed,
     };
   } finally {

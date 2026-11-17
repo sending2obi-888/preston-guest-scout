@@ -142,6 +142,8 @@ class GuestProfile {
   final String notes;
   final List<VehicleSearchTarget> vehicleTargets;
   final List<GuestNote> clientNotes;
+  final bool initialSearchCompleted;
+  final List<String> seenMatchVins;
   final bool active;
   final String? lastSearchedAt;
   final String lastSearchSummary;
@@ -168,6 +170,8 @@ class GuestProfile {
     this.notes = '',
     this.vehicleTargets = const [],
     this.clientNotes = const [],
+    this.initialSearchCompleted = false,
+    this.seenMatchVins = const [],
     this.active = true,
     this.lastSearchedAt,
     this.lastSearchSummary = '',
@@ -255,6 +259,17 @@ class GuestProfile {
     }
     parsedNotes.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
+    final seenVins = (json['seenMatchVins'] as List<dynamic>?)
+            ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toSet()
+            .toList() ??
+        const <String>[];
+
+    final lastSearchedStr = json['lastSearchedAt']?.toString();
+    final hasCompletedInitial = json['initialSearchCompleted'] == true ||
+        (lastSearchedStr != null && lastSearchedStr.isNotEmpty);
+
     final first = parsedTargets.first;
 
     return GuestProfile(
@@ -276,8 +291,10 @@ class GuestProfile {
       notes: first.notes,
       vehicleTargets: parsedTargets,
       clientNotes: parsedNotes,
+      initialSearchCompleted: hasCompletedInitial,
+      seenMatchVins: seenVins,
       active: json['active'] != false,
-      lastSearchedAt: json['lastSearchedAt']?.toString(),
+      lastSearchedAt: lastSearchedStr,
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
       createdAt: createdAtStr,
       matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
@@ -532,3 +549,133 @@ class SystemStatus {
     );
   }
 }
+
+class MatchAlertNotification {
+  final String id;
+  final String guestId;
+  final String guestName;
+  final String vin;
+  final String vehicleModel;
+  final String message;
+  final String location;
+  final double? price;
+  final String createdAt;
+  final bool read;
+
+  const MatchAlertNotification({
+    required this.id,
+    required this.guestId,
+    required this.guestName,
+    required this.vin,
+    required this.vehicleModel,
+    required this.message,
+    this.location = '',
+    this.price,
+    required this.createdAt,
+    this.read = false,
+  });
+
+  /// Extracts a clean model label (e.g., "Ford F-250", "Lincoln Nautilus", "Ford Mustang")
+  /// for the OS notification text: `"Client Name - Match Found - <Model>"`.
+  static String extractVehicleModelLabel({
+    String make = '',
+    String model = '',
+    String title = '',
+  }) {
+    final cleanMake = make.trim();
+    final cleanModel = model.trim();
+    if (cleanMake.isNotEmpty && cleanModel.isNotEmpty) {
+      if (cleanModel.toLowerCase().startsWith(cleanMake.toLowerCase())) {
+        return cleanModel;
+      }
+      return '$cleanMake $cleanModel';
+    }
+    if (cleanModel.isNotEmpty) return cleanModel;
+
+    final cleanTitle = title.trim();
+    if (cleanTitle.isNotEmpty) {
+      final stripped = cleanTitle
+          .replaceFirst(
+            RegExp(
+              r'^(?:new|used|pre-owned|certified(?:\s+pre-owned)?|cpo)\s+',
+              caseSensitive: false,
+            ),
+            '',
+          )
+          .replaceFirst(RegExp(r'^\d{4}\s+'), '')
+          .trim();
+      if (stripped.isNotEmpty) return stripped;
+      return cleanTitle;
+    }
+
+    if (cleanMake.isNotEmpty) return cleanMake;
+    return 'Vehicle';
+  }
+
+  /// Formats the exact post-initial-search notification string:
+  /// `"Client Name - Match Found - <Model of vehicle>"`
+  static String formatMessage({
+    required String clientName,
+    String make = '',
+    String model = '',
+    String title = '',
+  }) {
+    final cleanClient =
+        clientName.trim().isNotEmpty ? clientName.trim() : 'Client';
+    final modelLabel = extractVehicleModelLabel(
+      make: make,
+      model: model,
+      title: title,
+    );
+    return '$cleanClient - Match Found - $modelLabel';
+  }
+
+  factory MatchAlertNotification.fromJson(Map<String, dynamic> json) {
+    final gName = json['guestName']?.toString() ?? 'Client';
+    final vModel = json['vehicleModel']?.toString() ?? 'Vehicle';
+    final rawMsg = (json['message']?.toString() ?? '').trim();
+    return MatchAlertNotification(
+      id: json['id']?.toString() ?? '',
+      guestId: json['guestId']?.toString() ?? '',
+      guestName: gName,
+      vin: json['vin']?.toString() ?? '',
+      vehicleModel: vModel,
+      message: rawMsg.isNotEmpty
+          ? rawMsg
+          : '$gName - Match Found - $vModel',
+      location: json['location']?.toString() ?? '',
+      price: (json['price'] as num?)?.toDouble(),
+      createdAt: json['createdAt']?.toString() ?? '',
+      read: json['read'] == true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'guestId': guestId,
+        'guestName': guestName,
+        'vin': vin,
+        'vehicleModel': vehicleModel,
+        'message': message,
+        'location': location,
+        'price': price,
+        'createdAt': createdAt,
+        'read': read,
+      };
+
+  MatchAlertNotification copyWith({bool? read}) {
+    return MatchAlertNotification(
+      id: id,
+      guestId: guestId,
+      guestName: guestName,
+      vin: vin,
+      vehicleModel: vehicleModel,
+      message: message,
+      location: location,
+      price: price,
+      createdAt: createdAt,
+      read: read ?? this.read,
+    );
+  }
+}
+

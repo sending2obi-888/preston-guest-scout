@@ -28,6 +28,10 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
    - **Google SSO Across Devices**: Sign in using native Android / Googlebook OS Google Account Picker (`AccountManager` + `GoogleAuthUtil` with non-sensitive `drive.file` scope), Googlebook-safe OAuth 2.0 Verification Code Flow (`google.com/device`), OAuth 2.0 PKCE Loopback SSO, optional Preston Sync Server Relay, or Google Identity Services on Web.
    - **Automatic Save to Google Drive**: Every new guest, client note, added/removed vehicle target, requirement edit, deletion tombstone, and vehicle search result is automatically saved to `preston_guest_scout_cloud_sync.json` in Google Drive.
    - **Automatic Query on Every App Open**: Every cold start, app foreground resume (`AppLifecycleState.resumed` / browser tab focus), and Launcher Widget launch automatically queries Google Drive and merges remote updates (including client notes added across multiple devices) conflict-free across all devices.
+7. **Post-Initial-Search New Match Notifications**
+   - **Silent Initial Search**: Initial intake searches (and the initial search when adding a new vehicle target to an existing client) record baseline matched VINs silently without spamming notifications.
+   - **Automatic OS & Browser Notifications on New Matches**: Whenever a **new** matching vehicle (new VIN) is discovered on any subsequent search (`7:30 AM` daily scan, `2:00 PM` daily scan, or manual `Search Now`), a system notification is posted to the Android / Googlebook notification shade, Web browser `Notification` API, ChromeOS extension notification tray, and in-app Notification Center with the exact text:
+     `"Client Name - Match Found - <Model of vehicle>"` (tapping opens that client's `GuestMatchesScreen`).
 
 ---
 

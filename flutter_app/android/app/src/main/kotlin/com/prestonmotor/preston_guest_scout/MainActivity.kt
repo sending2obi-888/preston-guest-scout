@@ -5,12 +5,17 @@ package com.prestonmotor.preston_guest_scout
 import android.accounts.Account
 import android.accounts.AccountManager
 import android.app.Activity
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import com.google.android.gms.auth.GoogleAuthUtil
@@ -30,6 +35,8 @@ class MainActivity : FlutterActivity() {
     companion object {
         const val CHANNEL = "com.prestonmotor.scout/launcher_widget"
         const val AUTH_CHANNEL = "com.prestonmotor.scout/google_auth"
+        const val NOTIF_CHANNEL = "com.prestonmotor.scout/notifications"
+        const val MATCH_ALERT_CHANNEL_ID = "preston_match_alerts"
         const val PREFS_NAME = "preston_scout_widget_prefs"
         const val KEY_RECENT_TEN_JSON = "recent_ten_guests_json"
         const val KEY_SIGNED_IN_EMAIL = "google_sso_selected_email"
@@ -40,11 +47,13 @@ class MainActivity : FlutterActivity() {
         private const val REQ_GOOGLE_SIGN_IN = 9001
         private const val REQ_GOOGLE_CONSENT = 9002
         private const val REQ_CHOOSE_GOOGLE_ACCOUNT = 9003
+        private const val REQ_POST_NOTIFICATIONS = 9004
         private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
     }
 
     private var methodChannel: MethodChannel? = null
     private var authChannel: MethodChannel? = null
+    private var notifChannel: MethodChannel? = null
     private var pendingLaunchGuestId: String? = null
     private var pendingScheduledSlot: String? = null
     private var pendingOAuthRedirectUri: String? = null
@@ -57,8 +66,96 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ensureNotificationChannelCreated()
+        requestPostNotificationsPermissionIfNeeded()
         DailySearchAlarmReceiver.scheduleTwiceDailyAlarms(this)
         handleIncomingIntent(intent, isColdStart = true)
+    }
+
+    private fun ensureNotificationChannelCreated() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val channel = NotificationChannel(
+                MATCH_ALERT_CHANNEL_ID,
+                "New Vehicle Match Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description =
+                    "Alerts when a new matching vehicle is found on prestonmotor.com after a client's initial search"
+                enableVibration(true)
+            }
+            nm.createNotificationChannel(channel)
+        }
+    }
+
+    private fun requestPostNotificationsPermissionIfNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val perm = "android.permission.POST_NOTIFICATIONS"
+            if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(perm), REQ_POST_NOTIFICATIONS)
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun postMatchSystemNotification(
+        notifId: Int,
+        guestId: String,
+        title: String,
+        body: String
+    ): Boolean {
+        ensureNotificationChannelCreated()
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPostNotificationsPermissionIfNeeded()
+            return false
+        }
+
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (guestId.isNotBlank()) {
+                putExtra(EXTRA_GUEST_ID, guestId)
+                data = Uri.parse("prestonscout://guest/$guestId")
+            }
+        }
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val contentPendingIntent = PendingIntent.getActivity(this, notifId, tapIntent, pendingFlags)
+
+        val displayBody = if (body.isNotBlank()) body else title
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, MATCH_ALERT_CHANNEL_ID)
+        } else {
+            Notification.Builder(this)
+        }
+
+        builder
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(displayBody)
+            .setStyle(
+                Notification.BigTextStyle()
+                    .setBigContentTitle(title)
+                    .bigText(displayBody)
+            )
+            .setAutoCancel(true)
+            .setContentIntent(contentPendingIntent)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            builder.setPriority(Notification.PRIORITY_HIGH)
+            builder.setDefaults(Notification.DEFAULT_ALL)
+        }
+
+        nm.notify(notifId, builder.build())
+        return true
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -492,5 +589,38 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // 3. Post-Initial-Search Match System Notification Channel
+        val nChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NOTIF_CHANNEL)
+        nChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestNotificationPermission" -> {
+                    val granted = requestPostNotificationsPermissionIfNeeded()
+                    result.success(granted)
+                }
+                "areNotificationsEnabled" -> {
+                    val granted = Build.VERSION.SDK_INT < 33 ||
+                        checkSelfPermission("android.permission.POST_NOTIFICATIONS") ==
+                            PackageManager.PERMISSION_GRANTED
+                    result.success(granted)
+                }
+                "showMatchNotification" -> {
+                    val notifId = call.argument<Int>("notifId")
+                        ?: (System.currentTimeMillis() % 1000000L).toInt()
+                    val guestId = call.argument<String>("guestId") ?: ""
+                    val title = call.argument<String>("title") ?: "Match Found"
+                    val body = call.argument<String>("body") ?: ""
+                    val ok = postMatchSystemNotification(
+                        notifId = notifId,
+                        guestId = guestId,
+                        title = title,
+                        body = body
+                    )
+                    result.success(ok)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 }
+

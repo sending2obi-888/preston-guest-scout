@@ -9,6 +9,7 @@ import {
   setSetting,
   mapGuestRow,
   mapMatchRow,
+  mapNotificationRow,
   formatVehicleTargetLabel,
 } from './db.mjs';
 import { normalizeGuestSpecs } from './preston_scraper.mjs';
@@ -212,7 +213,7 @@ async function seedInitialGuestsIfEmpty() {
   }
 
   // Kick off live prestonmotor.com initial search in background so startup is instant
-  runSearchForAllActiveGuests('7:30 AM Daily Search').catch((err) =>
+  runSearchForAllActiveGuests('Initial Seed Search', null, { isInitialSearch: true }).catch((err) =>
     console.error('[Seed] Initial live search error:', err.message)
   );
 }
@@ -399,7 +400,9 @@ const server = http.createServer(async (req, res) => {
       let searchResult = null;
       if (body.runImmediateSearch !== false) {
         try {
-          searchResult = await runSearchForGuest(id, 'Initial Intake Search');
+          searchResult = await runSearchForGuest(id, 'Initial Intake Search', {
+            isInitialSearch: true,
+          });
         } catch (err) {
           searchResult = { error: err.message };
         }
@@ -411,6 +414,28 @@ const server = http.createServer(async (req, res) => {
         db.prepare('SELECT * FROM guests WHERE id = ?').get(id)
       );
       return sendJson(res, 201, { guest: created, searchResult });
+    }
+
+    // Match Notifications endpoints (for new matches found AFTER the initial search)
+    if (pathname === '/api/notifications' && req.method === 'GET') {
+      const rows = db
+        .prepare(
+          'SELECT * FROM match_notifications ORDER BY created_at DESC LIMIT 100'
+        )
+        .all();
+      const notifications = rows.map(mapNotificationRow);
+      const unreadCount = notifications.filter((n) => !n.read).length;
+      return sendJson(res, 200, { ok: true, unreadCount, notifications });
+    }
+
+    if (pathname === '/api/notifications/mark-read' && req.method === 'POST') {
+      db.prepare('UPDATE match_notifications SET read = 1 WHERE read = 0').run();
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (pathname === '/api/notifications' && req.method === 'DELETE') {
+      db.prepare('DELETE FROM match_notifications').run();
+      return sendJson(res, 200, { ok: true });
     }
 
     // Trigger batch search across all active guests
@@ -556,7 +581,7 @@ const server = http.createServer(async (req, res) => {
           result = await runSearchForGuest(
             guestId,
             `Added Vehicle Search (${formatVehicleTargetLabel(newTarget)})`,
-            { onlyTargetId: newTarget.id }
+            { onlyTargetId: newTarget.id, isInitialSearch: true }
           );
         }
 

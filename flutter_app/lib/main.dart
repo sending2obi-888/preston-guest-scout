@@ -8,10 +8,12 @@ import 'screens/home_intake_screen.dart';
 import 'screens/match_detail_screen.dart';
 import 'services/api_service.dart';
 import 'services/google_drive_sync_service.dart';
+import 'services/match_notification_service.dart';
 import 'services/widget_sync_service.dart';
 import 'theme/app_theme.dart';
 import 'widgets/google_account_sync_dialog.dart';
 import 'widgets/launcher_widget_sheet.dart';
+import 'widgets/match_notifications_dialog.dart';
 import 'widgets/settings_and_chromebook_dialog.dart';
 
 void main() {
@@ -39,7 +41,7 @@ class _PrestonGuestScoutAppState extends State<PrestonGuestScoutApp> {
 
   Future<void> _navigateToGuestMatches(String guestId) async {
     if (guestId.isEmpty) return;
-    // Query Google Drive first when opening from the Launcher Widget so matches are fresh
+    // Query Google Drive first when opening from the Launcher Widget or OS Notification so matches are fresh
     unawaited(GoogleDriveSyncService.instance.queryDriveOnAppOpen());
     final nav = _navKey.currentState;
     if (nav == null) return;
@@ -64,8 +66,13 @@ class _PrestonGuestScoutAppState extends State<PrestonGuestScoutApp> {
   void initState() {
     super.initState();
     WidgetSyncService.initialize(onSelectGuest: _navigateToGuestMatches);
+    unawaited(
+      MatchNotificationService.instance.initialize(
+        onTapNotification: _navigateToGuestMatches,
+      ),
+    );
 
-    // Handle initial Web URL deep-link from ChromeOS Extension Widget (e.g. ?guestId=... or #/guest/...)
+    // Handle initial Web URL deep-link from ChromeOS Extension Widget or Notification (e.g. ?guestId=... or #/guest/...)
     if (kIsWeb) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final uri = Uri.base;
@@ -127,11 +134,13 @@ class _MainShellScreenState extends State<MainShellScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     GoogleDriveSyncService.instance.addCloudMergeListener(_handleCloudMerged);
+    MatchNotificationService.instance.onForegroundBanner =
+        _showNewMatchSnackBar;
 
     // Load local/cached data immediately and query Google Drive on app open
     _initializeAndQueryDriveOnOpen();
 
-    // Keep status and twice-daily match counts fresh automatically
+    // Keep status and twice-daily match counts & notifications fresh automatically
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       _refreshAll(silent: true);
     });
@@ -142,8 +151,47 @@ class _MainShellScreenState extends State<MainShellScreen>
     WidgetsBinding.instance.removeObserver(this);
     GoogleDriveSyncService.instance
         .removeCloudMergeListener(_handleCloudMerged);
+    if (MatchNotificationService.instance.onForegroundBanner ==
+        _showNewMatchSnackBar) {
+      MatchNotificationService.instance.onForegroundBanner = null;
+    }
     _pollTimer?.cancel();
     super.dispose();
+  }
+
+  void _showNewMatchSnackBar(MatchAlertNotification alert) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 7),
+        content: Row(
+          children: [
+            const Icon(
+              Icons.notifications_active_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                alert.message,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+        action: SnackBarAction(
+          label: 'View',
+          onPressed: () {
+            ApiService.markAllNotificationsRead();
+            _openGuestMatches(alert.guestId);
+          },
+        ),
+      ),
+    );
   }
 
   /// Automatically queries Google Drive every time the app is opened or foregrounded
@@ -180,6 +228,7 @@ class _MainShellScreenState extends State<MainShellScreen>
       final results = await Future.wait([
         ApiService.fetchStatus(),
         ApiService.fetchAllGuests(),
+        ApiService.fetchNotifications(),
       ]);
       if (!mounted) return;
       setState(() {
@@ -224,6 +273,15 @@ class _MainShellScreenState extends State<MainShellScreen>
     showDialog(
       context: context,
       builder: (_) => LauncherWidgetDialog(
+        onSelectGuest: _openGuestMatches,
+      ),
+    );
+  }
+
+  void _openMatchNotificationsDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => MatchNotificationsDialog(
         onSelectGuest: _openGuestMatches,
       ),
     );
@@ -355,6 +413,28 @@ class _MainShellScreenState extends State<MainShellScreen>
                   ),
           ),
           const SizedBox(width: 4),
+          // New Match Notifications Bell (Post-Initial-Search Alerts)
+          ListenableBuilder(
+            listenable: MatchNotificationService.instance,
+            builder: (context, _) {
+              final unread = MatchNotificationService.instance.unreadCount;
+              return IconButton(
+                tooltip: unread > 0
+                    ? 'New Match Notifications ($unread unread)'
+                    : 'New Match Notifications',
+                onPressed: _openMatchNotificationsDialog,
+                icon: Badge(
+                  isLabelVisible: unread > 0,
+                  label: Text('$unread'),
+                  child: Icon(
+                    unread > 0
+                        ? Icons.notifications_active_rounded
+                        : Icons.notifications_outlined,
+                  ),
+                ),
+              );
+            },
+          ),
           IconButton(
             tooltip: 'Gemini Agent & Googlebook Startup Settings',
             onPressed: _openSettingsDialog,

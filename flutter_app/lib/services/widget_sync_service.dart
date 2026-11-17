@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/models.dart';
+import 'local_engine.dart';
 
 /// Bridges Flutter with the native Android / Chromebook Launcher AppWidget.
 /// Strictly persists ONLY the last 10 guests input and listens for widget tap deep-links.
@@ -24,10 +25,13 @@ class WidgetSyncService {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'openGuestMatches') {
         dispatchGuestSelection(call.arguments?.toString() ?? '');
+      } else if (call.method == 'runScheduledDailySearch') {
+        final slot = call.arguments?.toString() ?? 'Scheduled Daily Search';
+        await LocalScoutEngine.runSearchForAllGuests(slotLabel: slot);
       }
     });
 
-    // Check if the app was cold-launched from tapping a guest in the Launcher Widget
+    // Check if the app was cold-launched from tapping a guest in the Launcher Widget or Notification
     _channel.invokeMethod<String>('getInitialLaunchGuestId').then((guestId) {
       if (guestId != null && guestId.isNotEmpty) {
         dispatchGuestSelection(guestId);

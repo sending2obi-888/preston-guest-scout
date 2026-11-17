@@ -39,6 +39,8 @@ db.exec(`
     vehicle_targets_json TEXT DEFAULT '[]',
     client_notes_json TEXT DEFAULT '[]',
     deleted_note_ids_json TEXT DEFAULT '[]',
+    initial_search_completed INTEGER DEFAULT 0,
+    seen_match_vins_json TEXT DEFAULT '[]',
     active INTEGER DEFAULT 1,
     last_searched_at TEXT,
     last_search_summary TEXT DEFAULT '',
@@ -80,6 +82,20 @@ db.exec(`
     UNIQUE(guest_id, vin)
   );
 
+  CREATE TABLE IF NOT EXISTS match_notifications (
+    id TEXT PRIMARY KEY,
+    guest_id TEXT NOT NULL REFERENCES guests(id) ON DELETE CASCADE,
+    guest_name TEXT NOT NULL,
+    vin TEXT NOT NULL,
+    vehicle_model TEXT NOT NULL,
+    message TEXT NOT NULL,
+    location TEXT DEFAULT '',
+    price REAL,
+    created_at TEXT NOT NULL,
+    read INTEGER DEFAULT 0,
+    UNIQUE(guest_id, vin)
+  );
+
   CREATE TABLE IF NOT EXISTS search_runs (
     id TEXT PRIMARY KEY,
     guest_id TEXT,
@@ -101,6 +117,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_matches_guest_id ON matches(guest_id, match_score DESC, found_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON match_notifications(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_runs_slot_key ON search_runs(slot_key);
 `);
 
@@ -110,6 +127,8 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN vehicle_targets_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN client_notes_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN deleted_note_ids_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE guests ADD COLUMN initial_search_completed INTEGER DEFAULT 0`,
+  `ALTER TABLE guests ADD COLUMN seen_match_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
 ]) {
@@ -119,6 +138,13 @@ for (const ddl of [
     // Column already exists
   }
 }
+
+// Backfill initial_search_completed for existing guests that already completed a search
+try {
+  db.exec(
+    `UPDATE guests SET initial_search_completed = 1 WHERE last_searched_at IS NOT NULL AND initial_search_completed = 0`
+  );
+} catch {}
 
 const defaultSettings = {
   timezone: 'America/New_York',
@@ -255,6 +281,14 @@ export function mapGuestRow(row) {
     .filter((n) => !deletedSet.has(n.id))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
+  let seenMatchVins = [];
+  try {
+    seenMatchVins = JSON.parse(row.seen_match_vins_json || '[]');
+    if (!Array.isArray(seenMatchVins)) seenMatchVins = [];
+  } catch {
+    seenMatchVins = [];
+  }
+
   const matchStats = db
     .prepare(
       'SELECT COUNT(*) AS count, MIN(price) AS lowest_price FROM matches WHERE guest_id = ?'
@@ -281,6 +315,8 @@ export function mapGuestRow(row) {
     vehicleTargets: normalizedTargets,
     clientNotes,
     deletedNoteIds: [...deletedSet],
+    initialSearchCompleted: Boolean(row.initial_search_completed || row.last_searched_at),
+    seenMatchVins: [...new Set(seenMatchVins.map(String).filter(Boolean))],
     active: Boolean(row.active),
     lastSearchedAt: row.last_searched_at,
     lastSearchSummary: row.last_search_summary || '',
@@ -288,6 +324,51 @@ export function mapGuestRow(row) {
     updatedAt: row.updated_at || row.last_searched_at || row.created_at,
     matchCount: Number(matchStats?.count || 0),
     lowestMatchPrice: matchStats?.lowest_price ?? null,
+  };
+}
+
+export function extractVehicleModelLabel({ make = '', model = '', title = '' } = {}) {
+  const cleanMake = String(make || '').trim();
+  const cleanModel = String(model || '').trim();
+  if (cleanMake && cleanModel) {
+    if (cleanModel.toLowerCase().startsWith(cleanMake.toLowerCase())) {
+      return cleanModel;
+    }
+    return `${cleanMake} ${cleanModel}`;
+  }
+  if (cleanModel) return cleanModel;
+  const cleanTitle = String(title || '').trim();
+  if (cleanTitle) {
+    const stripped = cleanTitle
+      .replace(/^(?:new|used|pre-owned|certified(?:\s+pre-owned)?|cpo)\s+/i, '')
+      .replace(/^\d{4}\s+/, '')
+      .trim();
+    if (stripped) return stripped;
+    return cleanTitle;
+  }
+  if (cleanMake) return cleanMake;
+  return 'Vehicle';
+}
+
+export function formatMatchNotificationMessage(clientName, vehicle = {}) {
+  const cleanClient = String(clientName || 'Client').trim() || 'Client';
+  const modelLabel = extractVehicleModelLabel(vehicle);
+  return `${cleanClient} - Match Found - ${modelLabel}`;
+}
+
+export function mapNotificationRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    guestId: row.guest_id,
+    guestName: row.guest_name,
+    vin: row.vin,
+    vehicleModel: row.vehicle_model,
+    message: row.message,
+    location: row.location || '',
+    price: row.price ?? null,
+    createdAt: row.created_at,
+    read: Boolean(row.read),
   };
 }
 
@@ -339,3 +420,4 @@ export function mapMatchRow(row) {
     targetLabel: row.target_label || '',
   };
 }
+

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
+import 'match_notification_service.dart';
 import 'widget_sync_service.dart';
 
 /// Self-contained on-device engine for the Android / Googlebook APK.
@@ -70,6 +71,7 @@ class LocalScoutEngine {
 
   static List<Map<String, dynamic>> _guests = [];
   static List<Map<String, dynamic>> _matches = [];
+  static List<Map<String, dynamic>> _notifications = [];
   static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
@@ -95,6 +97,9 @@ class LocalScoutEngine {
         _matches = (decoded['matches'] as List<dynamic>? ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
+        _notifications = (decoded['notifications'] as List<dynamic>? ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
         if (decoded['deletedGuestIds'] is Map) {
           _deletedGuestIds = (decoded['deletedGuestIds'] as Map).map(
             (k, v) => MapEntry(k.toString(), v.toString()),
@@ -106,6 +111,9 @@ class LocalScoutEngine {
             ...Map<String, dynamic>.from(decoded['settings'] as Map),
           };
         }
+        MatchNotificationService.instance.hydratePersistedNotifications(
+          _notifications.map(MatchAlertNotification.fromJson).toList(),
+        );
       } else {
         await _seedInitialGuests();
       }
@@ -114,17 +122,6 @@ class LocalScoutEngine {
         await _seedInitialGuests();
       }
     }
-
-    // Listen for native 7:30 AM / 2:00 PM AlarmManager triggers from Kotlin
-    _channel.setMethodCallHandler((call) async {
-      if (call.method == 'openGuestMatches') {
-        WidgetSyncService.dispatchGuestSelection(
-            call.arguments?.toString() ?? '');
-      } else if (call.method == 'runScheduledDailySearch') {
-        final slot = call.arguments?.toString() ?? 'Scheduled Daily Search';
-        await runSearchForAllGuests(slotLabel: slot);
-      }
-    });
 
     _startOnDeviceScheduler();
     await _syncWidget();
@@ -306,6 +303,16 @@ class LocalScoutEngine {
           .compareTo((a['createdAt'] ?? '').toString()),
     );
 
+    final seenVinSet = <String>{
+      ...((raw['seenMatchVins'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty) ??
+          const <String>[]),
+    };
+    final lastSearchedRaw = (raw['lastSearchedAt']?.toString() ?? '').trim();
+    final initialDone =
+        raw['initialSearchCompleted'] == true || lastSearchedRaw.isNotEmpty;
+
     final primary = normalizedTargets.first;
 
     return <String, dynamic>{
@@ -325,6 +332,8 @@ class LocalScoutEngine {
       'vehicleTargets': normalizedTargets,
       'clientNotes': normalizedNotes,
       'deletedNoteIds': deletedNoteSet.toList(),
+      'initialSearchCompleted': initialDone,
+      'seenMatchVins': seenVinSet.toList(),
     };
   }
 
@@ -340,6 +349,7 @@ class LocalScoutEngine {
       final payload = jsonEncode({
         'guests': _guests,
         'matches': _matches,
+        'notifications': _notifications,
         'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
@@ -452,7 +462,12 @@ class LocalScoutEngine {
       },
     ];
     await _persist();
-    unawaited(runSearchForAllGuests(slotLabel: 'Initial Googlebook Sync'));
+    unawaited(
+      runSearchForAllGuests(
+        slotLabel: 'Initial Googlebook Sync',
+        isInitialSearch: true,
+      ),
+    );
   }
 
   static void _startOnDeviceScheduler() {
@@ -576,6 +591,7 @@ class LocalScoutEngine {
     String exteriorColor = '',
     List<String> features = const [],
     String notes = '',
+    @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
   }) async {
     await ensureInitialized();
     final id = 'guest-${DateTime.now().microsecondsSinceEpoch}';
@@ -608,8 +624,12 @@ class LocalScoutEngine {
     await _persist();
     onDataMutatedForCloudSave?.call();
 
-    final searchRes =
-        await runSearchForSingleGuest(id, slotLabel: 'Initial Intake Search');
+    final searchRes = await runSearchForSingleGuest(
+      id,
+      slotLabel: 'Initial Intake Search',
+      isInitialSearch: true,
+      mockCandidatesOverride: mockCandidatesOverride,
+    );
     return (
       guest: searchRes.guest,
       matchesFound: searchRes.matches.length,
@@ -643,8 +663,38 @@ class LocalScoutEngine {
     _deletedGuestIds[guestId] = DateTime.now().toUtc().toIso8601String();
     _guests.removeWhere((g) => g['id']?.toString() == guestId);
     _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
+    _notifications.removeWhere((n) => n['guestId']?.toString() == guestId);
+    MatchNotificationService.instance.hydratePersistedNotifications(
+      _notifications.map(MatchAlertNotification.fromJson).toList(),
+    );
     await _persist();
     onDataMutatedForCloudSave?.call();
+  }
+
+  static Future<List<MatchAlertNotification>> getNotifications() async {
+    await ensureInitialized();
+    final list = _notifications.map(MatchAlertNotification.fromJson).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return list;
+  }
+
+  static Future<void> markAllNotificationsRead() async {
+    await ensureInitialized();
+    for (var i = 0; i < _notifications.length; i++) {
+      _notifications[i] = <String, dynamic>{
+        ..._notifications[i],
+        'read': true,
+      };
+    }
+    MatchNotificationService.instance.markAllReadLocally();
+    await _persist();
+  }
+
+  static Future<void> clearNotifications() async {
+    await ensureInitialized();
+    _notifications = [];
+    MatchNotificationService.instance.clearAllLocally();
+    await _persist();
   }
 
   static Future<Map<String, dynamic>> getSettings() async {
@@ -685,6 +735,7 @@ class LocalScoutEngine {
 
   static Future<void> runSearchForAllGuests({
     String slotLabel = 'Scheduled Search',
+    bool isInitialSearch = false,
   }) async {
     if (_isRunningBatch) return;
     _isRunningBatch = true;
@@ -694,7 +745,11 @@ class LocalScoutEngine {
         final id = g['id']?.toString() ?? '';
         if (id.isEmpty) continue;
         try {
-          await runSearchForSingleGuest(id, slotLabel: slotLabel);
+          await runSearchForSingleGuest(
+            id,
+            slotLabel: slotLabel,
+            isInitialSearch: isInitialSearch,
+          );
         } catch (_) {}
       }
     } finally {
@@ -749,6 +804,7 @@ class LocalScoutEngine {
     String exteriorColor = '',
     List<String> features = const [],
     String notes = '',
+    @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
   }) async {
     await ensureInitialized();
     final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
@@ -830,6 +886,8 @@ class LocalScoutEngine {
       guestId,
       slotLabel: 'Added Vehicle Search (${newTargetModel.label})',
       onlyTargetId: newTargetId,
+      isInitialSearch: true,
+      mockCandidatesOverride: mockCandidatesOverride,
     );
   }
 
@@ -952,10 +1010,20 @@ class LocalScoutEngine {
     String guestId, {
     String slotLabel = 'On-Demand Gemini Search',
     String? onlyTargetId,
+    bool isInitialSearch = false,
+    @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
   }) async {
     await ensureInitialized();
     final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
     if (idx == -1) throw Exception('Guest not found');
+
+    // Determine BEFORE updating lastSearchedAt whether this client already completed their initial search.
+    // Notifications are ONLY emitted for new VIN matches discovered AFTER the initial search!
+    final hadCompletedInitialSearch = !isInitialSearch &&
+        ((_guests[idx]['initialSearchCompleted'] == true) ||
+            ((_guests[idx]['lastSearchedAt']?.toString() ?? '')
+                .trim()
+                .isNotEmpty));
 
     // Ensure normalized specs across all vehicleTargets are persisted
     _guests[idx] = _normalizeGuestMap(_guests[idx]);
@@ -980,7 +1048,8 @@ class LocalScoutEngine {
 
     for (final target in targetsToRun) {
       final specGuest = _buildSingleTargetGuestSpec(guest, target);
-      final candidates = await _fetchPrestonCandidates(specGuest);
+      final candidates = mockCandidatesOverride ??
+          await _fetchPrestonCandidates(specGuest);
       final eval = await _evaluateCandidates(specGuest, candidates);
       totalCandidatesScanned += candidates.length;
       targetSummaries.add('${target.label}: ${eval.matches.length} match(es)');
@@ -1013,7 +1082,20 @@ class LocalScoutEngine {
       }
     }
 
-    if (totalCandidatesScanned > 0) {
+    final seenSet = <String>{
+      ...existingByVin.keys,
+      ...((_guests[idx]['seenMatchVins'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty) ??
+          const <String>[]),
+    };
+    final existingNotifKeys = <String>{
+      for (final n in _notifications)
+        '${n['guestId']?.toString() ?? ''}::${n['vin']?.toString() ?? ''}',
+    };
+    final createdAlerts = <MatchAlertNotification>[];
+
+    if (totalCandidatesScanned > 0 || mockCandidatesOverride != null) {
       if (onlyTargetId != null) {
         // Keep matches belonging to the guest's other vehicle targets; replace onlyTargetId's matches & duplicate VINs
         _matches.removeWhere((m) {
@@ -1033,6 +1115,9 @@ class LocalScoutEngine {
         final vin = v['vin']?.toString() ?? '';
         if (vin.isEmpty) continue;
         seq++;
+
+        final isBrandNewVin = !seenSet.contains(vin);
+        seenSet.add(vin);
 
         final prev = existingByVin[vin];
         _matches.add({
@@ -1068,6 +1153,42 @@ class LocalScoutEngine {
           'targetId': item['targetId'] ?? '',
           'targetLabel': item['targetLabel'] ?? '',
         });
+
+        // Fire OS notification ONLY when a brand-new VIN is discovered AFTER initial search
+        final notifKey = '$guestId::$vin';
+        if (isBrandNewVin &&
+            hadCompletedInitialSearch &&
+            existingNotifKeys.add(notifKey)) {
+          final makeStr = v['make']?.toString() ?? '';
+          final modelStr = v['model']?.toString() ?? '';
+          final titleStr = v['title']?.toString() ?? '';
+          final modelLabel = MatchAlertNotification.extractVehicleModelLabel(
+            make: makeStr,
+            model: modelStr,
+            title: titleStr,
+          );
+          final message = MatchAlertNotification.formatMessage(
+            clientName: guest.name,
+            make: makeStr,
+            model: modelStr,
+            title: titleStr,
+          );
+          final alert = MatchAlertNotification(
+            id: 'notif-${DateTime.now().microsecondsSinceEpoch}-$seq-$vin',
+            guestId: guestId,
+            guestName: guest.name,
+            vin: vin,
+            vehicleModel: modelLabel,
+            message: message,
+            location:
+                v['location']?.toString() ?? 'Preston Automotive Group',
+            price: (v['price'] as num?)?.toDouble(),
+            createdAt: nowIso,
+            read: false,
+          );
+          _notifications.insert(0, alert.toJson());
+          createdAlerts.add(alert);
+        }
       }
     }
 
@@ -1081,11 +1202,17 @@ class LocalScoutEngine {
 
     _guests[idx] = {
       ..._guests[idx],
+      'initialSearchCompleted': true,
+      'seenMatchVins': seenSet.toList(),
       'lastSearchedAt': nowIso,
       'lastSearchSummary': summaryText,
       'updatedAt': nowIso,
     };
     await _persist();
+    if (createdAlerts.isNotEmpty) {
+      await MatchNotificationService.instance
+          .dispatchNewNotifications(createdAlerts);
+    }
     if (!_isRunningBatch) {
       onDataMutatedForCloudSave?.call();
     }
@@ -2022,11 +2149,27 @@ class LocalScoutEngine {
                 .toString()
                 .compareTo((a['createdAt'] ?? '').toString()));
 
+          final mergedSeenVins = <String>{
+            ...((existing['seenMatchVins'] as List<dynamic>?)
+                    ?.map((e) => e.toString().trim())
+                    .where((s) => s.isNotEmpty) ??
+                const <String>[]),
+            ...((rg['seenMatchVins'] as List<dynamic>?)
+                    ?.map((e) => e.toString().trim())
+                    .where((s) => s.isNotEmpty) ??
+                const <String>[]),
+          };
+          final mergedInitialDone =
+              (existing['initialSearchCompleted'] == true) ||
+                  (rg['initialSearchCompleted'] == true);
+
           if (rgStamp.compareTo(localStamp) > 0) {
             _guests[existingIdx] = _normalizeGuestMap(<String, dynamic>{
               ...rg,
               'clientNotes': mergedNotesList,
               'deletedNoteIds': mergedDelSet.toList(),
+              'initialSearchCompleted': mergedInitialDone,
+              'seenMatchVins': mergedSeenVins.toList(),
             });
             localChanged = true;
           } else {
@@ -2034,12 +2177,19 @@ class LocalScoutEngine {
                 (existing['clientNotes'] as List<dynamic>? ?? []).length;
             final prevDelLen =
                 (existing['deletedNoteIds'] as List<dynamic>? ?? []).length;
+            final prevSeenLen =
+                (existing['seenMatchVins'] as List<dynamic>? ?? []).length;
             if (mergedNotesList.length != prevNotesLen ||
-                mergedDelSet.length != prevDelLen) {
+                mergedDelSet.length != prevDelLen ||
+                mergedSeenVins.length != prevSeenLen ||
+                mergedInitialDone !=
+                    (existing['initialSearchCompleted'] == true)) {
               _guests[existingIdx] = _normalizeGuestMap(<String, dynamic>{
                 ...existing,
                 'clientNotes': mergedNotesList,
                 'deletedNoteIds': mergedDelSet.toList(),
+                'initialSearchCompleted': mergedInitialDone,
+                'seenMatchVins': mergedSeenVins.toList(),
               });
               localChanged = true;
             }
@@ -2112,6 +2262,31 @@ class LocalScoutEngine {
       }
     }
 
+    // Ensure all synced match VINs are recorded in each guest's seenMatchVins
+    for (var i = 0; i < _guests.length; i++) {
+      final gid = _guests[i]['id']?.toString() ?? '';
+      if (gid.isEmpty) continue;
+      final seenSet = <String>{
+        ...((_guests[i]['seenMatchVins'] as List<dynamic>?)
+                ?.map((e) => e.toString().trim())
+                .where((s) => s.isNotEmpty) ??
+            const <String>[]),
+      };
+      final prevLen = seenSet.length;
+      for (final m in _matches) {
+        if (m['guestId']?.toString() == gid) {
+          final v = (m['vin']?.toString() ?? '').trim();
+          if (v.isNotEmpty) seenSet.add(v);
+        }
+      }
+      if (seenSet.length != prevLen) {
+        _guests[i] = <String, dynamic>{
+          ..._guests[i],
+          'seenMatchVins': seenSet.toList(),
+        };
+      }
+    }
+
     // 4. Sync shared settings (Gemini API key if empty locally, model, timezone, OAuth client ID)
     final remoteSettings = remote['settings'];
     if (remoteSettings is Map) {
@@ -2161,7 +2336,9 @@ class LocalScoutEngine {
     _initialized = false;
     _guests = [];
     _matches = [];
+    _notifications = [];
     _deletedGuestIds = {};
+    MatchNotificationService.instance.resetForTest();
   }
 
   @visibleForTesting

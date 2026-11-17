@@ -135,6 +135,58 @@
           try { fn(); } catch (_) {}
         }
       });
+
+      // Browser / OS Notification helpers for New Match Alerts ("Client Name - Match Found - Model")
+      window.prestonNotificationClickCallbacks = [];
+      window.prestonRegisterNotificationClickListener = function (cb) {
+        window.prestonNotificationClickCallbacks.push(cb);
+      };
+
+      window.prestonRequestNotificationPermission = function () {
+        return new Promise(function (resolve) {
+          if (!('Notification' in window)) {
+            resolve('unsupported');
+            return;
+          }
+          if (window.Notification.permission === 'granted' || window.Notification.permission === 'denied') {
+            resolve(window.Notification.permission);
+            return;
+          }
+          try {
+            window.Notification.requestPermission().then(function (perm) {
+              resolve(perm || 'default');
+            }).catch(function () {
+              resolve('default');
+            });
+          } catch (_) {
+            resolve('default');
+          }
+        });
+      };
+
+      window.prestonShowBrowserNotification = function (title, body, tag, guestId) {
+        try {
+          if (!('Notification' in window)) return false;
+          if (window.Notification.permission !== 'granted') return false;
+          const n = new window.Notification(title, {
+            body: body || title,
+            tag: tag || undefined,
+            icon: 'icons/Icon-192.png'
+          });
+          n.onclick = function () {
+            try { window.focus(); } catch (_) {}
+            try { n.close(); } catch (_) {}
+            if (guestId) {
+              for (const fn of window.prestonNotificationClickCallbacks) {
+                try { fn(guestId); } catch (_) {}
+              }
+            }
+          };
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
     })();
   </script>
 </head>

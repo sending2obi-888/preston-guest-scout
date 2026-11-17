@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
 import 'local_engine.dart';
+import 'match_notification_service.dart';
 import 'widget_sync_service.dart';
 
 class ApiService {
@@ -228,6 +229,7 @@ class ApiService {
     }
     final data = jsonDecode(res.body) as Map<String, dynamic>;
     final result = data['result'] as Map<String, dynamic>?;
+    await fetchNotifications();
     return (
       guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
       matches: (data['matches'] as List<dynamic>? ?? [])
@@ -251,6 +253,7 @@ class ApiService {
     if (res.statusCode != 200) {
       throw Exception('Batch search failed (${res.statusCode})');
     }
+    await fetchNotifications();
   }
 
   static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
@@ -463,4 +466,58 @@ class ApiService {
       throw Exception('Failed to save settings');
     }
   }
+
+  static Future<List<MatchAlertNotification>> fetchNotifications() async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.getNotifications();
+    }
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/notifications'),
+        headers: _headers(),
+      );
+      if (res.statusCode != 200) {
+        return MatchNotificationService.instance.notifications;
+      }
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final list = (data['notifications'] as List<dynamic>? ?? [])
+          .map(
+              (e) => MatchAlertNotification.fromJson(e as Map<String, dynamic>))
+          .toList();
+      await MatchNotificationService.instance.syncFromServerList(list);
+      return list;
+    } catch (_) {
+      return MatchNotificationService.instance.notifications;
+    }
+  }
+
+  static Future<void> markAllNotificationsRead() async {
+    if (_useLocalOnDeviceEngine) {
+      await LocalScoutEngine.markAllNotificationsRead();
+      return;
+    }
+    MatchNotificationService.instance.markAllReadLocally();
+    try {
+      await http.post(
+        Uri.parse('$baseUrl/api/notifications/mark-read'),
+        headers: _headers(jsonBody: true),
+        body: jsonEncode(<String, dynamic>{}),
+      );
+    } catch (_) {}
+  }
+
+  static Future<void> clearNotifications() async {
+    if (_useLocalOnDeviceEngine) {
+      await LocalScoutEngine.clearNotifications();
+      return;
+    }
+    MatchNotificationService.instance.clearAllLocally();
+    try {
+      await http.delete(
+        Uri.parse('$baseUrl/api/notifications'),
+        headers: _headers(),
+      );
+    } catch (_) {}
+  }
 }
+
