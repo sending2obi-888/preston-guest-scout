@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
+import 'calendar_service.dart';
 import 'match_notification_service.dart';
 import 'widget_sync_service.dart';
 
@@ -72,6 +73,7 @@ class LocalScoutEngine {
   static List<Map<String, dynamic>> _guests = [];
   static List<Map<String, dynamic>> _matches = [];
   static List<Map<String, dynamic>> _notifications = [];
+  static List<Map<String, dynamic>> _calendarEvents = [];
   static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
@@ -80,6 +82,8 @@ class LocalScoutEngine {
     'googleOAuthClientId': '',
     'googleOAuthClientSecret': '',
     'driveSyncFileId': '',
+    'calendarPermissionGranted': false,
+    'calendarPromptDismissed': false,
     'completedSlots': <String>[],
   };
 
@@ -91,13 +95,36 @@ class LocalScoutEngine {
       final raw = await _channel.invokeMethod<String>('readLocalStore');
       if (raw != null && raw.trim().isNotEmpty) {
         final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        final hadSchedKey = (decoded['guests'] as List<dynamic>? ?? []).any(
+          (g) => g is Map && g.containsKey('scheduledCallVins'),
+        );
         _guests = (decoded['guests'] as List<dynamic>? ?? [])
             .map((e) => _normalizeGuestMap(Map<String, dynamic>.from(e as Map)))
             .toList();
         _matches = (decoded['matches'] as List<dynamic>? ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
+        if (!hadSchedKey && _matches.isNotEmpty) {
+          for (var i = 0; i < _guests.length; i++) {
+            final gid = _guests[i]['id']?.toString() ?? '';
+            final vins = _matches
+                .where((m) => m['guestId']?.toString() == gid)
+                .map((m) => m['vin']?.toString() ?? '')
+                .where((v) => v.isNotEmpty)
+                .toSet()
+                .toList();
+            if (vins.isNotEmpty) {
+              _guests[i] = <String, dynamic>{
+                ..._guests[i],
+                'scheduledCallVins': vins,
+              };
+            }
+          }
+        }
         _notifications = (decoded['notifications'] as List<dynamic>? ?? [])
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        _calendarEvents = (decoded['calendarEvents'] as List<dynamic>? ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
         if (decoded['deletedGuestIds'] is Map) {
@@ -113,6 +140,11 @@ class LocalScoutEngine {
         }
         MatchNotificationService.instance.hydratePersistedNotifications(
           _notifications.map(MatchAlertNotification.fromJson).toList(),
+        );
+        CalendarService.instance.hydratePersistedState(
+          events: _calendarEvents.map(CalendarCallEvent.fromJson).toList(),
+          permissionGranted: _settings['calendarPermissionGranted'] == true,
+          promptDismissed: _settings['calendarPromptDismissed'] == true,
         );
       } else {
         await _seedInitialGuests();
@@ -309,6 +341,12 @@ class LocalScoutEngine {
               .where((s) => s.isNotEmpty) ??
           const <String>[]),
     };
+    final scheduledCallSet = <String>{
+      ...((raw['scheduledCallVins'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty) ??
+          const <String>[]),
+    };
     final lastSearchedRaw = (raw['lastSearchedAt']?.toString() ?? '').trim();
     final initialDone =
         raw['initialSearchCompleted'] == true || lastSearchedRaw.isNotEmpty;
@@ -334,6 +372,7 @@ class LocalScoutEngine {
       'deletedNoteIds': deletedNoteSet.toList(),
       'initialSearchCompleted': initialDone,
       'seenMatchVins': seenVinSet.toList(),
+      'scheduledCallVins': scheduledCallSet.toList(),
     };
   }
 
@@ -350,6 +389,7 @@ class LocalScoutEngine {
         'guests': _guests,
         'matches': _matches,
         'notifications': _notifications,
+        'calendarEvents': _calendarEvents,
         'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
@@ -466,6 +506,7 @@ class LocalScoutEngine {
       runSearchForAllGuests(
         slotLabel: 'Initial Googlebook Sync',
         isInitialSearch: true,
+        isSeedSearch: true,
       ),
     );
   }
@@ -664,8 +705,14 @@ class LocalScoutEngine {
     _guests.removeWhere((g) => g['id']?.toString() == guestId);
     _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
     _notifications.removeWhere((n) => n['guestId']?.toString() == guestId);
+    _calendarEvents.removeWhere((e) => e['guestId']?.toString() == guestId);
     MatchNotificationService.instance.hydratePersistedNotifications(
       _notifications.map(MatchAlertNotification.fromJson).toList(),
+    );
+    CalendarService.instance.hydratePersistedState(
+      events: _calendarEvents.map(CalendarCallEvent.fromJson).toList(),
+      permissionGranted: _settings['calendarPermissionGranted'] == true,
+      promptDismissed: _settings['calendarPromptDismissed'] == true,
     );
     await _persist();
     onDataMutatedForCloudSave?.call();
@@ -694,6 +741,35 @@ class LocalScoutEngine {
     await ensureInitialized();
     _notifications = [];
     MatchNotificationService.instance.clearAllLocally();
+    await _persist();
+  }
+
+  static Future<List<CalendarCallEvent>> getCalendarEvents() async {
+    await ensureInitialized();
+    final list = _calendarEvents.map(CalendarCallEvent.fromJson).toList()
+      ..sort((a, b) => b.startAt.compareTo(a.startAt));
+    return list;
+  }
+
+  static Future<void> saveCalendarPermissionState({
+    required bool permissionGranted,
+    required bool promptDismissed,
+  }) async {
+    await ensureInitialized();
+    _settings['calendarPermissionGranted'] = permissionGranted;
+    _settings['calendarPromptDismissed'] = promptDismissed;
+    CalendarService.instance.hydratePersistedState(
+      events: _calendarEvents.map(CalendarCallEvent.fromJson).toList(),
+      permissionGranted: permissionGranted,
+      promptDismissed: promptDismissed,
+    );
+    await _persist();
+  }
+
+  static Future<void> clearCalendarEvents() async {
+    await ensureInitialized();
+    _calendarEvents = [];
+    CalendarService.instance.clearEventsLocally();
     await _persist();
   }
 
@@ -736,6 +812,7 @@ class LocalScoutEngine {
   static Future<void> runSearchForAllGuests({
     String slotLabel = 'Scheduled Search',
     bool isInitialSearch = false,
+    bool isSeedSearch = false,
   }) async {
     if (_isRunningBatch) return;
     _isRunningBatch = true;
@@ -749,6 +826,7 @@ class LocalScoutEngine {
             id,
             slotLabel: slotLabel,
             isInitialSearch: isInitialSearch,
+            isSeedSearch: isSeedSearch,
           );
         } catch (_) {}
       }
@@ -1011,6 +1089,7 @@ class LocalScoutEngine {
     String slotLabel = 'On-Demand Gemini Search',
     String? onlyTargetId,
     bool isInitialSearch = false,
+    bool isSeedSearch = false,
     @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
   }) async {
     await ensureInitialized();
@@ -1089,11 +1168,19 @@ class LocalScoutEngine {
               .where((s) => s.isNotEmpty) ??
           const <String>[]),
     };
+    final scheduledCallSet = <String>{
+      ...((_guests[idx]['scheduledCallVins'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty) ??
+          const <String>[]),
+    };
     final existingNotifKeys = <String>{
       for (final n in _notifications)
         '${n['guestId']?.toString() ?? ''}::${n['vin']?.toString() ?? ''}',
     };
     final createdAlerts = <MatchAlertNotification>[];
+    final vehiclesNeedingCallEvent = <Map<String, dynamic>>[];
+    final calPermGranted = CalendarService.instance.permissionGranted;
 
     if (totalCandidatesScanned > 0 || mockCandidatesOverride != null) {
       if (onlyTargetId != null) {
@@ -1118,6 +1205,12 @@ class LocalScoutEngine {
 
         final isBrandNewVin = !seenSet.contains(vin);
         seenSet.add(vin);
+
+        final needsCallEvent = !scheduledCallSet.contains(vin);
+        scheduledCallSet.add(vin);
+        if (!isSeedSearch && calPermGranted && needsCallEvent) {
+          vehiclesNeedingCallEvent.add(Map<String, dynamic>.from(v));
+        }
 
         final prev = existingByVin[vin];
         _matches.add({
@@ -1204,10 +1297,46 @@ class LocalScoutEngine {
       ..._guests[idx],
       'initialSearchCompleted': true,
       'seenMatchVins': seenSet.toList(),
+      'scheduledCallVins': scheduledCallSet.toList(),
       'lastSearchedAt': nowIso,
       'lastSearchSummary': summaryText,
       'updatedAt': nowIso,
     };
+
+    if (!isSeedSearch &&
+        calPermGranted &&
+        vehiclesNeedingCallEvent.isNotEmpty) {
+      final freshGuest = _hydrateGuest(_guests[idx]);
+      final todayEventDate =
+          CalendarCallEvent.computeSameDaySlot(DateTime.now()).eventDate;
+      final alreadyHasTodayEvent = CalendarService.instance.events.any(
+        (e) => e.guestId == guestId && e.eventDate == todayEventDate,
+      );
+
+      final callSheetVehicles = <Map<String, dynamic>>[
+        ...vehiclesNeedingCallEvent,
+      ];
+      if (alreadyHasTodayEvent) {
+        final includedVins = <String>{
+          for (final v in callSheetVehicles) v['vin']?.toString() ?? '',
+        };
+        for (final m in _matches) {
+          if (m['guestId']?.toString() != guestId) continue;
+          final mVin = m['vin']?.toString() ?? '';
+          if (mVin.isEmpty || !includedVins.add(mVin)) continue;
+          callSheetVehicles.add(Map<String, dynamic>.from(m));
+        }
+      }
+
+      await CalendarService.instance.scheduleSameDayCallForGuest(
+        guest: freshGuest,
+        matchedVehicles: callSheetVehicles,
+        timeZone: _settings['timezone']?.toString() ?? 'America/New_York',
+      );
+      _calendarEvents =
+          CalendarService.instance.events.map((e) => e.toJson()).toList();
+    }
+
     await _persist();
     if (createdAlerts.isNotEmpty) {
       await MatchNotificationService.instance
@@ -2159,6 +2288,16 @@ class LocalScoutEngine {
                     .where((s) => s.isNotEmpty) ??
                 const <String>[]),
           };
+          final mergedScheduledVins = <String>{
+            ...((existing['scheduledCallVins'] as List<dynamic>?)
+                    ?.map((e) => e.toString().trim())
+                    .where((s) => s.isNotEmpty) ??
+                const <String>[]),
+            ...((rg['scheduledCallVins'] as List<dynamic>?)
+                    ?.map((e) => e.toString().trim())
+                    .where((s) => s.isNotEmpty) ??
+                const <String>[]),
+          };
           final mergedInitialDone =
               (existing['initialSearchCompleted'] == true) ||
                   (rg['initialSearchCompleted'] == true);
@@ -2170,6 +2309,7 @@ class LocalScoutEngine {
               'deletedNoteIds': mergedDelSet.toList(),
               'initialSearchCompleted': mergedInitialDone,
               'seenMatchVins': mergedSeenVins.toList(),
+              'scheduledCallVins': mergedScheduledVins.toList(),
             });
             localChanged = true;
           } else {
@@ -2179,9 +2319,12 @@ class LocalScoutEngine {
                 (existing['deletedNoteIds'] as List<dynamic>? ?? []).length;
             final prevSeenLen =
                 (existing['seenMatchVins'] as List<dynamic>? ?? []).length;
+            final prevSchedLen =
+                (existing['scheduledCallVins'] as List<dynamic>? ?? []).length;
             if (mergedNotesList.length != prevNotesLen ||
                 mergedDelSet.length != prevDelLen ||
                 mergedSeenVins.length != prevSeenLen ||
+                mergedScheduledVins.length != prevSchedLen ||
                 mergedInitialDone !=
                     (existing['initialSearchCompleted'] == true)) {
               _guests[existingIdx] = _normalizeGuestMap(<String, dynamic>{
@@ -2190,6 +2333,7 @@ class LocalScoutEngine {
                 'deletedNoteIds': mergedDelSet.toList(),
                 'initialSearchCompleted': mergedInitialDone,
                 'seenMatchVins': mergedSeenVins.toList(),
+                'scheduledCallVins': mergedScheduledVins.toList(),
               });
               localChanged = true;
             }
@@ -2262,7 +2406,7 @@ class LocalScoutEngine {
       }
     }
 
-    // Ensure all synced match VINs are recorded in each guest's seenMatchVins
+    // Ensure all synced match VINs are recorded in each guest's seenMatchVins and scheduledCallVins
     for (var i = 0; i < _guests.length; i++) {
       final gid = _guests[i]['id']?.toString() ?? '';
       if (gid.isEmpty) continue;
@@ -2272,17 +2416,28 @@ class LocalScoutEngine {
                 .where((s) => s.isNotEmpty) ??
             const <String>[]),
       };
-      final prevLen = seenSet.length;
+      final schedSet = <String>{
+        ...((_guests[i]['scheduledCallVins'] as List<dynamic>?)
+                ?.map((e) => e.toString().trim())
+                .where((s) => s.isNotEmpty) ??
+            const <String>[]),
+      };
+      final prevSeenLen = seenSet.length;
+      final prevSchedLen = schedSet.length;
       for (final m in _matches) {
         if (m['guestId']?.toString() == gid) {
           final v = (m['vin']?.toString() ?? '').trim();
-          if (v.isNotEmpty) seenSet.add(v);
+          if (v.isNotEmpty) {
+            seenSet.add(v);
+            schedSet.add(v);
+          }
         }
       }
-      if (seenSet.length != prevLen) {
+      if (seenSet.length != prevSeenLen || schedSet.length != prevSchedLen) {
         _guests[i] = <String, dynamic>{
           ..._guests[i],
           'seenMatchVins': seenSet.toList(),
+          'scheduledCallVins': schedSet.toList(),
         };
       }
     }
@@ -2337,8 +2492,12 @@ class LocalScoutEngine {
     _guests = [];
     _matches = [];
     _notifications = [];
+    _calendarEvents = [];
     _deletedGuestIds = {};
+    _settings['calendarPermissionGranted'] = false;
+    _settings['calendarPromptDismissed'] = false;
     MatchNotificationService.instance.resetForTest();
+    CalendarService.instance.resetForTest();
   }
 
   @visibleForTesting

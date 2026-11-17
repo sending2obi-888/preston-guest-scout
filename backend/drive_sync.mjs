@@ -140,19 +140,19 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     const allDeletedRows = db.prepare('SELECT id, deleted_at FROM deleted_guests').all();
     const localDeletedMap = new Map(allDeletedRows.map((r) => [r.id, r.deleted_at]));
 
-    // 2. Merge remote guests (including conflict-free union merge of dated clientNotes & seenMatchVins)
+    // 2. Merge remote guests (including conflict-free union merge of dated clientNotes, seenMatchVins, & scheduledCallVins)
     const upsertGuestStmt = db.prepare(`
       INSERT INTO guests (
         id, name, phone, email, condition, min_year, max_year, make, model, trim,
         max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
         vehicle_targets_json, client_notes_json, deleted_note_ids_json,
-        initial_search_completed, seen_match_vins_json,
+        initial_search_completed, seen_match_vins_json, scheduled_call_vins_json,
         active, last_searched_at, last_search_summary, created_at, updated_at
       ) VALUES (
         @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
         @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
         @vehicle_targets_json, @client_notes_json, @deleted_note_ids_json,
-        @initial_search_completed, @seen_match_vins_json,
+        @initial_search_completed, @seen_match_vins_json, @scheduled_call_vins_json,
         @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -179,6 +179,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         deleted_note_ids_json = excluded.deleted_note_ids_json,
         initial_search_completed = MAX(guests.initial_search_completed, excluded.initial_search_completed),
         seen_match_vins_json = excluded.seen_match_vins_json,
+        scheduled_call_vins_json = excluded.scheduled_call_vins_json,
         active = excluded.active,
         last_searched_at = COALESCE(excluded.last_searched_at, guests.last_searched_at),
         last_search_summary = CASE
@@ -189,7 +190,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     `);
 
     const updateOnlyNotesStmt = db.prepare(
-      'UPDATE guests SET client_notes_json = ?, deleted_note_ids_json = ?, initial_search_completed = MAX(initial_search_completed, ?), seen_match_vins_json = ?, updated_at = ? WHERE id = ?'
+      'UPDATE guests SET client_notes_json = ?, deleted_note_ids_json = ?, initial_search_completed = MAX(initial_search_completed, ?), seen_match_vins_json = ?, scheduled_call_vins_json = ?, updated_at = ? WHERE id = ?'
     );
 
     const mergeClientNotes = (localNotesArr, remoteNotesArr, localDelArr, remoteDelArr) => {
@@ -224,7 +225,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
 
       const existing = db
         .prepare(
-          'SELECT updated_at, last_searched_at, created_at, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json FROM guests WHERE id = ?'
+          'SELECT updated_at, last_searched_at, created_at, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json, scheduled_call_vins_json FROM guests WHERE id = ?'
         )
         .get(rg.id);
       const localStamp = existing
@@ -234,6 +235,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       let localNotes = [];
       let localDelNotes = [];
       let localSeenVins = [];
+      let localSchedVins = [];
       if (existing) {
         try {
           localNotes = JSON.parse(existing.client_notes_json || '[]');
@@ -244,12 +246,21 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         try {
           localSeenVins = JSON.parse(existing.seen_match_vins_json || '[]');
         } catch {}
+        try {
+          localSchedVins = JSON.parse(existing.scheduled_call_vins_json || '[]');
+        } catch {}
       }
 
       const mergedSeenVins = [
         ...new Set([
           ...(Array.isArray(localSeenVins) ? localSeenVins.map(String) : []),
           ...(Array.isArray(rg.seenMatchVins) ? rg.seenMatchVins.map(String) : []),
+        ].filter(Boolean)),
+      ];
+      const mergedSchedVins = [
+        ...new Set([
+          ...(Array.isArray(localSchedVins) ? localSchedVins.map(String) : []),
+          ...(Array.isArray(rg.scheduledCallVins) ? rg.scheduledCallVins.map(String) : []),
         ].filter(Boolean)),
       ];
       const mergedInitialDone =
@@ -291,6 +302,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           deleted_note_ids_json: JSON.stringify(mergedNotes.deletedNoteIds),
           initial_search_completed: mergedInitialDone,
           seen_match_vins_json: JSON.stringify(mergedSeenVins),
+          scheduled_call_vins_json: JSON.stringify(mergedSchedVins),
           active: rg.active === false ? 0 : 1,
           last_searched_at: rg.lastSearchedAt || null,
           last_search_summary: String(rg.lastSearchSummary || ''),
@@ -302,13 +314,15 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         mergedNotes.notes.length !== (Array.isArray(localNotes) ? localNotes.length : 0) ||
         mergedNotes.deletedNoteIds.length !==
           (Array.isArray(localDelNotes) ? localDelNotes.length : 0) ||
-        mergedSeenVins.length !== (Array.isArray(localSeenVins) ? localSeenVins.length : 0)
+        mergedSeenVins.length !== (Array.isArray(localSeenVins) ? localSeenVins.length : 0) ||
+        mergedSchedVins.length !== (Array.isArray(localSchedVins) ? localSchedVins.length : 0)
       ) {
         updateOnlyNotesStmt.run(
           JSON.stringify(mergedNotes.notes),
           JSON.stringify(mergedNotes.deletedNoteIds),
           mergedInitialDone,
           JSON.stringify(mergedSeenVins),
+          JSON.stringify(mergedSchedVins),
           localStamp > rgStamp ? localStamp : rgStamp,
           String(rg.id)
         );

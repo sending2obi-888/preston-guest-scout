@@ -32,6 +32,9 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
    - **Silent Initial Search**: Initial intake searches (and the initial search when adding a new vehicle target to an existing client) record baseline matched VINs silently without spamming notifications.
    - **Automatic OS & Browser Notifications on New Matches**: Whenever a **new** matching vehicle (new VIN) is discovered on any subsequent search (`7:30 AM` daily scan, `2:00 PM` daily scan, or manual `Search Now`), a system notification is posted to the Android / Googlebook notification shade, Web browser `Notification` API, ChromeOS extension notification tray, and in-app Notification Center with the exact text:
      `"Client Name - Match Found - <Model of vehicle>"` (tapping opens that client's `GuestMatchesScreen`).
+8. **Calendar Permissions & Automatic Same-Day `"Call Guest"` Calendar Events**
+   - **Startup Calendar Permission Prompt**: Requests `READ_CALENDAR` & `WRITE_CALENDAR` runtime permissions on Android / Googlebook startup (`MainActivity`), includes Google Calendar `calendar.events` OAuth scope during Google SSO, and presents a Material Design 3 **Allow Calendar Access** prompt (`CalendarPermissionPromptDialog`) plus an AppBar **Same-Day Guest Call Calendar** dialog (`CalendarEventsDialog`).
+   - **Automatic Same-Day Call Event When a Match Is Found**: Whenever a matching vehicle is found for a guest while Calendar Permission is granted, the app automatically schedules a **same-day** calendar event (`"Call <Guest Name> — Match Found: <Model>"`) with the guest's phone number, email, latest client note, matched vehicle price, Preston dealership location, listing URL, and a 15-minute popup reminder — stepping past busy calendar slots on that exact same day (`--send-updates none`, zero unsolicited customer invites, deduplicated per guest per day).
 
 ---
 

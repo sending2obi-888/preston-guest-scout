@@ -5,9 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:preston_guest_scout/models/models.dart';
 import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
+import 'package:preston_guest_scout/services/calendar_service.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
+import 'package:preston_guest_scout/widgets/calendar_events_dialog.dart';
 import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
 
 void main() {
@@ -834,6 +836,381 @@ void main() {
     await tester.pumpAndSettle();
     expect(tappedGuestId, created.guest.id);
 
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(notifChannel, null);
+    LocalScoutEngine.resetForTest();
+  });
+
+  test(
+      'CalendarCallEvent.computeSameDaySlot schedules strictly on the same calendar day across morning, afternoon, and late night',
+      () {
+    // 1. 7:30 AM morning scan -> 10:00 AM - 10:30 AM same day
+    final morning =
+        CalendarCallEvent.computeSameDaySlot(DateTime(2026, 11, 17, 7, 30));
+    expect(morning.eventDate, '2026-11-17');
+    expect(morning.startLocal, DateTime(2026, 11, 17, 10, 0));
+    expect(morning.endLocal, DateTime(2026, 11, 17, 10, 30));
+
+    // 2. 2:00 PM afternoon scan -> 2:30 PM - 3:00 PM same day
+    final afternoon =
+        CalendarCallEvent.computeSameDaySlot(DateTime(2026, 11, 17, 14, 0));
+    expect(afternoon.eventDate, '2026-11-17');
+    expect(afternoon.startLocal, DateTime(2026, 11, 17, 14, 30));
+    expect(afternoon.endLocal, DateTime(2026, 11, 17, 15, 0));
+
+    // 3. 11:50 PM late night -> clamped before 23:58 on the exact same calendar day
+    final lateNight =
+        CalendarCallEvent.computeSameDaySlot(DateTime(2026, 11, 17, 23, 50));
+    expect(lateNight.eventDate, '2026-11-17');
+    expect(lateNight.startLocal.year, 2026);
+    expect(lateNight.startLocal.month, 11);
+    expect(lateNight.startLocal.day, 17);
+    expect(lateNight.endLocal.day, 17);
+    expect(lateNight.endLocal.hour, 23);
+    expect(lateNight.endLocal.minute, lessThanOrEqualTo(58));
+    expect(lateNight.endLocal.isAfter(lateNight.startLocal), isTrue);
+
+    expect(
+      CalendarCallEvent.buildCallTitle(
+        clientName: 'Rhonda Vanvorst',
+        matchedVehicles: const [
+          {'make': 'Lincoln', 'model': 'Nautilus'},
+        ],
+      ),
+      'Call Rhonda Vanvorst — Match Found: Lincoln Nautilus',
+    );
+    expect(
+      CalendarCallEvent.buildCallTitle(
+        clientName: 'Rhonda Vanvorst',
+        matchedVehicles: const [
+          {'make': 'Lincoln', 'model': 'Nautilus'},
+          {'make': 'Lincoln', 'model': 'Corsair'},
+        ],
+      ),
+      'Call Rhonda Vanvorst — 2 Vehicle Matches Found (Lincoln Nautilus)',
+    );
+  });
+
+  testWidgets(
+      'App asks for calendar permission and automatically creates a same-day Call Guest calendar event when a match is found',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    const notifChannel = MethodChannel('com.prestonmotor.scout/notifications');
+    const calChannel = MethodChannel('com.prestonmotor.scout/calendar');
+
+    String persistedStore =
+        '{"guests":[],"matches":[],"notifications":[],"calendarEvents":[]}';
+    final dispatchedOsNotifications = <Map<String, dynamic>>[];
+    final createdDeviceCalendarEvents = <Map<String, dynamic>>[];
+    int permissionRequestsCount = 0;
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      notifChannel,
+      (call) async {
+        if (call.method == 'requestNotificationPermission' ||
+            call.method == 'areNotificationsEnabled') {
+          return true;
+        }
+        if (call.method == 'showMatchNotification') {
+          dispatchedOsNotifications
+              .add(Map<String, dynamic>.from(call.arguments as Map));
+          return true;
+        }
+        return null;
+      },
+    );
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      calChannel,
+      (call) async {
+        if (call.method == 'hasCalendarPermission') {
+          return permissionRequestsCount > 0;
+        }
+        if (call.method == 'requestCalendarPermission') {
+          permissionRequestsCount++;
+          return true;
+        }
+        if (call.method == 'createSameDayCallEvent') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          createdDeviceCalendarEvents.add(args);
+          return <String, dynamic>{
+            'created': true,
+            'eventId': 'android-cal-${createdDeviceCalendarEvents.length}',
+            'provider': 'android_calendar_provider',
+            'startEpochMs': args['startEpochMs'],
+            'endEpochMs': args['endEpochMs'],
+          };
+        }
+        return null;
+      },
+    );
+
+    // 1. Startup asks for calendar permission automatically
+    await CalendarService.instance.initialize();
+    expect(permissionRequestsCount, 1);
+    expect(CalendarService.instance.permissionGranted, isTrue);
+
+    // 2. Creating a guest whose search finds a match automatically creates a SAME-DAY call event
+    // while keeping initial-search OS notifications at 0!
+    final now = DateTime.now();
+    final todayStr =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Jordan Blake',
+      phone: '(302) 555-0199',
+      make: 'Ford',
+      model: 'Bronco',
+      maxPrice: 58000,
+      mockCandidatesOverride: [
+        {
+          'vin': '1FMDE5BH0SLA10001',
+          'title': '2025 Ford Bronco Big Bend 4WD',
+          'year': 2025,
+          'make': 'Ford',
+          'model': 'Bronco',
+          'trim': 'Big Bend',
+          'condition': 'New',
+          'price': 45990.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'mileage': 8,
+          'drivetrain': '4WD',
+          'highlights': ['4WD', 'Apple CarPlay'],
+        },
+      ],
+    );
+
+    expect(created.matchesFound, 1);
+    expect(dispatchedOsNotifications, isEmpty);
+    expect(createdDeviceCalendarEvents.length, 1);
+    expect(
+      createdDeviceCalendarEvents.first['title'],
+      'Call Jordan Blake — Match Found: Ford Bronco',
+    );
+    expect(
+      createdDeviceCalendarEvents.first['description'].toString(),
+      contains('(302) 555-0199'),
+    );
+    expect(
+      createdDeviceCalendarEvents.first['description'].toString(),
+      contains('Boulevard Ford of Millsboro'),
+    );
+
+    final startDt = DateTime.fromMillisecondsSinceEpoch(
+      createdDeviceCalendarEvents.first['startEpochMs'] as int,
+    );
+    final endDt = DateTime.fromMillisecondsSinceEpoch(
+      createdDeviceCalendarEvents.first['endEpochMs'] as int,
+    );
+    expect(startDt.year, now.year);
+    expect(startDt.month, now.month);
+    expect(startDt.day, now.day);
+    expect(endDt.day, now.day);
+
+    expect(CalendarService.instance.events.length, 1);
+    expect(CalendarService.instance.events.first.eventDate, todayStr);
+
+    // 3. Subsequent search finding a new VIN on the same day updates today's call sheet
+    // (without creating a duplicate calendar event) AND fires the OS notification!
+    await LocalScoutEngine.runSearchForSingleGuest(
+      created.guest.id,
+      slotLabel: '2:00 PM Daily Search',
+      mockCandidatesOverride: [
+        {
+          'vin': '1FMDE5BH0SLA10001',
+          'title': '2025 Ford Bronco Big Bend 4WD',
+          'year': 2025,
+          'make': 'Ford',
+          'model': 'Bronco',
+          'trim': 'Big Bend',
+          'condition': 'New',
+          'price': 45990.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'mileage': 8,
+          'drivetrain': '4WD',
+          'highlights': ['4WD', 'Apple CarPlay'],
+        },
+        {
+          'vin': '1FMDE5BH9SLA20002',
+          'title': '2026 Ford Bronco Outer Banks 4WD',
+          'year': 2026,
+          'make': 'Ford',
+          'model': 'Bronco',
+          'trim': 'Outer Banks',
+          'condition': 'New',
+          'price': 51400.0,
+          'location': 'Preston Ford of Hurlock',
+          'mileage': 4,
+          'drivetrain': '4WD',
+          'highlights': ['Leather Seats'],
+        },
+      ],
+    );
+
+    expect(CalendarService.instance.events.length, 1);
+    expect(createdDeviceCalendarEvents.length, 1);
+    expect(
+      CalendarService.instance.events.first.title,
+      'Call Jordan Blake — 2 Vehicle Matches Found (Ford Bronco)',
+    );
+    expect(dispatchedOsNotifications.length, 1);
+    expect(
+      dispatchedOsNotifications.first['title'],
+      'Jordan Blake - Match Found - Ford Bronco',
+    );
+
+    await tester.pump(const Duration(seconds: 1));
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(notifChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(calChannel, null);
+    LocalScoutEngine.resetForTest();
+  });
+
+  testWidgets(
+      'CalendarPermissionPromptDialog requests calendar access and CalendarEventsDialog displays scheduled same-day guest calls',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    const calChannel = MethodChannel('com.prestonmotor.scout/calendar');
+
+    int explicitPromptRequests = 0;
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') {
+          return '{"guests":[],"matches":[],"notifications":[],"calendarEvents":[]}';
+        }
+        return true;
+      },
+    );
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      calChannel,
+      (call) async {
+        if (call.method == 'hasCalendarPermission') return false;
+        if (call.method == 'requestCalendarPermission') {
+          explicitPromptRequests++;
+          return true;
+        }
+        return null;
+      },
+    );
+
+    String? selectedGuestId;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FilledButton(
+                    onPressed: () {
+                      showDialog<bool>(
+                        context: context,
+                        builder: (_) => const CalendarPermissionPromptDialog(),
+                      );
+                    },
+                    child: const Text('Ask Calendar'),
+                  ),
+                  FilledButton(
+                    onPressed: () {
+                      showDialog<void>(
+                        context: context,
+                        builder: (_) => CalendarEventsDialog(
+                          onSelectGuest: (gid) => selectedGuestId = gid,
+                        ),
+                      );
+                    },
+                    child: const Text('Open Calendar Log'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Ask Calendar'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Allow Calendar Access?'), findsOneWidget);
+    expect(find.text('Allow Calendar Access'), findsOneWidget);
+
+    await tester.tap(find.text('Allow Calendar Access'));
+    await tester.pumpAndSettle();
+
+    expect(explicitPromptRequests, 1);
+    expect(CalendarService.instance.permissionGranted, isTrue);
+
+    // Seed a scheduled same-day call event and verify CalendarEventsDialog displays & navigates
+    CalendarService.instance.hydratePersistedState(
+      permissionGranted: true,
+      promptDismissed: true,
+      events: const [
+        CalendarCallEvent(
+          id: 'cal-test-1',
+          guestId: 'guest-jordan',
+          guestName: 'Jordan Blake',
+          guestPhone: '(302) 555-0199',
+          eventDate: '2026-11-17',
+          startAt: '2026-11-17T14:30:00',
+          endAt: '2026-11-17T15:00:00',
+          title: 'Call Jordan Blake — Match Found: Ford Bronco',
+          location: 'Boulevard Ford of Millsboro',
+          vehicleSummary: 'Ford Bronco',
+          provider: 'android_calendar_provider',
+          createdAt: '2026-11-17T14:00:00Z',
+        ),
+      ],
+    );
+
+    await tester.tap(find.text('Open Calendar Log'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Same-Day Guest Call Calendar'), findsOneWidget);
+    expect(
+      find.text('Call Jordan Blake — Match Found: Ford Bronco'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('(302) 555-0199'), findsOneWidget);
+    expect(find.textContaining('Boulevard Ford of Millsboro'), findsOneWidget);
+
+    await tester.tap(find.text('Call Jordan Blake — Match Found: Ford Bronco'));
+    await tester.pumpAndSettle();
+    expect(selectedGuestId, 'guest-jordan');
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(calChannel, null);
     LocalScoutEngine.resetForTest();
   });
 }

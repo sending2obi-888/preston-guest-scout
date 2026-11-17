@@ -11,6 +11,7 @@ import {
 import { searchPrestonInventory } from './preston_scraper.mjs';
 import { evaluateInventoryWithGeminiAgent } from './gemini_agent.mjs';
 import { scheduleAutoSaveToGoogleDrive } from './drive_sync.mjs';
+import { scheduleSameDayGuestCallEvent } from './calendar_sync.mjs';
 
 let isRunningBatch = false;
 
@@ -187,6 +188,7 @@ function persistEvaluatedMatchesAndNotifications({
   nowIso,
   onlyTargetId = null,
   isInitialSearch = false,
+  isSeedSearch = false,
 }) {
   const allTargets = guest.vehicleTargets || [];
   const validTargetIds = new Set(allTargets.map((t) => t.id));
@@ -195,12 +197,15 @@ function persistEvaluatedMatchesAndNotifications({
     .all(guest.id);
   const existingVins = new Set(existingRows.map((r) => String(r.vin || '')).filter(Boolean));
   const seenVins = new Set([...(guest.seenMatchVins || []), ...existingVins]);
+  const scheduledCallVins = new Set(guest.scheduledCallVins || []);
+  const calendarPermissionGranted = getSetting('calendar_permission_granted') === '1';
 
   const hadCompletedInitialSearch =
     !isInitialSearch &&
     (Boolean(rawGuest.initial_search_completed) || Boolean(rawGuest.last_searched_at));
 
   const createdNotifications = [];
+  const vehiclesNeedingCallEvent = [];
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -229,6 +234,12 @@ function persistEvaluatedMatchesAndNotifications({
 
       const isBrandNewMatch = !seenVins.has(vin);
       seenVins.add(vin);
+
+      const needsCallEvent = !scheduledCallVins.has(vin);
+      scheduledCallVins.add(vin);
+      if (!isSeedSearch && calendarPermissionGranted && needsCallEvent) {
+        vehiclesNeedingCallEvent.push(v);
+      }
 
       upsertMatchStmt.run({
         id: crypto.randomUUID(),
@@ -289,17 +300,26 @@ function persistEvaluatedMatchesAndNotifications({
       }
     }
 
-    // Cap seen_match_vins_json at 2,500 entries per guest while keeping latest matches
+    // Cap seen_match_vins_json and scheduled_call_vins_json at 2,500 entries per guest
     const cappedSeen = [...seenVins].slice(-2500);
+    const cappedSched = [...scheduledCallVins].slice(-2500);
     db.prepare(
       `UPDATE guests
        SET initial_search_completed = 1,
            seen_match_vins_json = ?,
+           scheduled_call_vins_json = ?,
            last_searched_at = ?,
            last_search_summary = ?,
            updated_at = ?
        WHERE id = ?`
-    ).run(JSON.stringify(cappedSeen), nowIso, evalRes.summary, nowIso, guest.id);
+    ).run(
+      JSON.stringify(cappedSeen),
+      JSON.stringify(cappedSched),
+      nowIso,
+      evalRes.summary,
+      nowIso,
+      guest.id
+    );
 
     db.exec('COMMIT');
   } catch (txErr) {
@@ -309,13 +329,18 @@ function persistEvaluatedMatchesAndNotifications({
     throw txErr;
   }
 
-  return createdNotifications;
+  return { createdNotifications, vehiclesNeedingCallEvent };
 }
 
 export async function runSearchForGuest(
   guestId,
   slotLabel = 'Manual Gemini Search',
-  { onlyTargetId = null, isInitialSearch = false } = {}
+  {
+    onlyTargetId = null,
+    isInitialSearch = false,
+    isSeedSearch = false,
+    calendarAccessToken = '',
+  } = {}
 ) {
   const rawGuest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
   if (!rawGuest) {
@@ -333,6 +358,7 @@ export async function runSearchForGuest(
       candidatesScanned: 0,
       matchesFound: 0,
       newNotifications: [],
+      calendarEvent: null,
       mode: 'smart-matcher',
       summary: 'No vehicle criteria specified.',
     };
@@ -350,15 +376,34 @@ export async function runSearchForGuest(
     const evalRes = await evaluateTargetsForGuest(guest, targetsToRun);
     const nowIso = new Date().toISOString();
 
-    const newNotifications = persistEvaluatedMatchesAndNotifications({
-      rawGuest,
-      guest,
-      evalRes,
-      slotLabel,
-      nowIso,
-      onlyTargetId,
-      isInitialSearch,
-    });
+    const { createdNotifications, vehiclesNeedingCallEvent } =
+      persistEvaluatedMatchesAndNotifications({
+        rawGuest,
+        guest,
+        evalRes,
+        slotLabel,
+        nowIso,
+        onlyTargetId,
+        isInitialSearch,
+        isSeedSearch,
+      });
+
+    let calendarEvent = null;
+    if (!isSeedSearch && vehiclesNeedingCallEvent.length > 0) {
+      try {
+        const freshGuest = mapGuestRow(
+          db.prepare('SELECT * FROM guests WHERE id = ?').get(guest.id)
+        );
+        const calRes = await scheduleSameDayGuestCallEvent({
+          guest: freshGuest,
+          matchedVehicles: vehiclesNeedingCallEvent,
+          accessToken: calendarAccessToken,
+        });
+        calendarEvent = calRes.event || null;
+      } catch (calErr) {
+        console.error('[Scheduler] Calendar event error:', calErr.message);
+      }
+    }
 
     db.prepare(
       `UPDATE search_runs
@@ -378,7 +423,8 @@ export async function runSearchForGuest(
       guestId: guest.id,
       candidatesScanned: evalRes.candidatesScanned,
       matchesFound: evalRes.matches.length,
-      newNotifications,
+      newNotifications: createdNotifications,
+      calendarEvent,
       mode: evalRes.mode,
       summary: evalRes.summary,
     };
@@ -394,10 +440,15 @@ export async function runSearchForGuest(
 export async function runSearchForAllActiveGuests(
   slotLabel = 'Scheduled Search',
   slotKey = null,
-  { isInitialSearch = false } = {}
+  { isInitialSearch = false, isSeedSearch = false, calendarAccessToken = '' } = {}
 ) {
   if (isRunningBatch) {
-    return { skipped: true, reason: 'Batch already running', newNotifications: [] };
+    return {
+      skipped: true,
+      reason: 'Batch already running',
+      newNotifications: [],
+      newCalendarEvents: [],
+    };
   }
   isRunningBatch = true;
   const startedAt = new Date().toISOString();
@@ -416,6 +467,7 @@ export async function runSearchForAllActiveGuests(
   let totalMatches = 0;
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
   const allNewNotifications = [];
+  const allNewCalendarEvents = [];
 
   try {
     for (const row of activeRows) {
@@ -427,16 +479,39 @@ export async function runSearchForAllActiveGuests(
         totalCandidates += evalRes.candidatesScanned;
         totalMatches += evalRes.matches.length;
 
-        const created = persistEvaluatedMatchesAndNotifications({
-          rawGuest: row,
-          guest,
-          evalRes,
-          slotLabel,
-          nowIso,
-          onlyTargetId: null,
-          isInitialSearch,
-        });
-        allNewNotifications.push(...created);
+        const { createdNotifications, vehiclesNeedingCallEvent } =
+          persistEvaluatedMatchesAndNotifications({
+            rawGuest: row,
+            guest,
+            evalRes,
+            slotLabel,
+            nowIso,
+            onlyTargetId: null,
+            isInitialSearch,
+            isSeedSearch,
+          });
+        allNewNotifications.push(...createdNotifications);
+
+        if (!isSeedSearch && vehiclesNeedingCallEvent.length > 0) {
+          try {
+            const freshGuest = mapGuestRow(
+              db.prepare('SELECT * FROM guests WHERE id = ?').get(guest.id)
+            );
+            const calRes = await scheduleSameDayGuestCallEvent({
+              guest: freshGuest,
+              matchedVehicles: vehiclesNeedingCallEvent,
+              accessToken: calendarAccessToken,
+            });
+            if (calRes.event) {
+              allNewCalendarEvents.push(calRes.event);
+            }
+          } catch (calErr) {
+            console.error(
+              `[Scheduler] Calendar event error for ${guest.name}:`,
+              calErr.message
+            );
+          }
+        }
       } catch (guestErr) {
         console.error(`[Scheduler] Error searching for ${guest.name}:`, guestErr.message);
       }
@@ -455,6 +530,7 @@ export async function runSearchForAllActiveGuests(
       candidatesScanned: totalCandidates,
       matchesFound: totalMatches,
       newNotifications: allNewNotifications,
+      newCalendarEvents: allNewCalendarEvents,
       mode: modeUsed,
     };
   } finally {

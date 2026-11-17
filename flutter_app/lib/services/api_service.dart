@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
+import 'calendar_service.dart';
 import 'local_engine.dart';
 import 'match_notification_service.dart';
 import 'widget_sync_service.dart';
@@ -184,6 +185,7 @@ class ApiService {
     final searchRes = data['searchResult'] as Map<String, dynamic>?;
 
     await fetchLauncherWidgetGuests();
+    await fetchCalendarStatus();
 
     return (
       guest: createdGuest,
@@ -230,6 +232,7 @@ class ApiService {
     final data = jsonDecode(res.body) as Map<String, dynamic>;
     final result = data['result'] as Map<String, dynamic>?;
     await fetchNotifications();
+    await fetchCalendarStatus();
     return (
       guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
       matches: (data['matches'] as List<dynamic>? ?? [])
@@ -254,6 +257,7 @@ class ApiService {
       throw Exception('Batch search failed (${res.statusCode})');
     }
     await fetchNotifications();
+    await fetchCalendarStatus();
   }
 
   static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
@@ -318,6 +322,7 @@ class ApiService {
     final data = jsonDecode(res.body) as Map<String, dynamic>;
     final result = data['result'] as Map<String, dynamic>?;
     await fetchLauncherWidgetGuests();
+    await fetchCalendarStatus();
 
     return (
       guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
@@ -418,6 +423,7 @@ class ApiService {
       throw Exception('Delete failed (${res.statusCode})');
     }
     await fetchLauncherWidgetGuests();
+    await fetchCalendarStatus();
   }
 
   static Future<Map<String, dynamic>> fetchSettings() async {
@@ -515,6 +521,72 @@ class ApiService {
     try {
       await http.delete(
         Uri.parse('$baseUrl/api/notifications'),
+        headers: _headers(),
+      );
+    } catch (_) {}
+  }
+
+  static Future<List<CalendarCallEvent>> fetchCalendarStatus() async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.getCalendarEvents();
+    }
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/calendar/status'),
+        headers: _headers(),
+      );
+      if (res.statusCode != 200) {
+        return CalendarService.instance.events;
+      }
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      CalendarService.instance.syncFromServerStatus(data);
+      return CalendarService.instance.events;
+    } catch (_) {
+      return CalendarService.instance.events;
+    }
+  }
+
+  static Future<bool> setCalendarPermission(
+    bool granted, {
+    bool? dismissed,
+    String accessToken = '',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      await LocalScoutEngine.saveCalendarPermissionState(
+        permissionGranted: granted,
+        promptDismissed: dismissed ?? (granted ? true : false),
+      );
+      return granted;
+    }
+    try {
+      final payload = <String, dynamic>{
+        'granted': granted,
+        'dismissed': ?dismissed,
+        if (accessToken.trim().isNotEmpty) 'accessToken': accessToken.trim(),
+      };
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/calendar/permission'),
+        headers: _headers(jsonBody: true),
+        body: jsonEncode(payload),
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        CalendarService.instance.syncFromServerStatus(data);
+        return CalendarService.instance.permissionGranted;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  static Future<void> clearCalendarEvents() async {
+    if (_useLocalOnDeviceEngine) {
+      await LocalScoutEngine.clearCalendarEvents();
+      return;
+    }
+    CalendarService.instance.clearEventsLocally();
+    try {
+      await http.delete(
+        Uri.parse('$baseUrl/api/calendar/events'),
         headers: _headers(),
       );
     } catch (_) {}

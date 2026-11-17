@@ -144,6 +144,7 @@ class GuestProfile {
   final List<GuestNote> clientNotes;
   final bool initialSearchCompleted;
   final List<String> seenMatchVins;
+  final List<String> scheduledCallVins;
   final bool active;
   final String? lastSearchedAt;
   final String lastSearchSummary;
@@ -172,6 +173,7 @@ class GuestProfile {
     this.clientNotes = const [],
     this.initialSearchCompleted = false,
     this.seenMatchVins = const [],
+    this.scheduledCallVins = const [],
     this.active = true,
     this.lastSearchedAt,
     this.lastSearchSummary = '',
@@ -266,6 +268,13 @@ class GuestProfile {
             .toList() ??
         const <String>[];
 
+    final scheduledVins = (json['scheduledCallVins'] as List<dynamic>?)
+            ?.map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)
+            .toSet()
+            .toList() ??
+        const <String>[];
+
     final lastSearchedStr = json['lastSearchedAt']?.toString();
     final hasCompletedInitial = json['initialSearchCompleted'] == true ||
         (lastSearchedStr != null && lastSearchedStr.isNotEmpty);
@@ -293,6 +302,7 @@ class GuestProfile {
       clientNotes: parsedNotes,
       initialSearchCompleted: hasCompletedInitial,
       seenMatchVins: seenVins,
+      scheduledCallVins: scheduledVins,
       active: json['active'] != false,
       lastSearchedAt: lastSearchedStr,
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
@@ -675,6 +685,208 @@ class MatchAlertNotification {
       price: price,
       createdAt: createdAt,
       read: read ?? this.read,
+    );
+  }
+}
+
+class CalendarCallEvent {
+  final String id;
+  final String guestId;
+  final String guestName;
+  final String guestPhone;
+  final String eventDate;
+  final String startAt;
+  final String endAt;
+  final String title;
+  final String description;
+  final String location;
+  final String vehicleSummary;
+  final String externalEventId;
+  final String calendarLink;
+  final String provider;
+  final String createdAt;
+
+  const CalendarCallEvent({
+    required this.id,
+    required this.guestId,
+    required this.guestName,
+    this.guestPhone = '',
+    required this.eventDate,
+    required this.startAt,
+    required this.endAt,
+    required this.title,
+    this.description = '',
+    this.location = '',
+    this.vehicleSummary = '',
+    this.externalEventId = '',
+    this.calendarLink = '',
+    this.provider = 'local',
+    required this.createdAt,
+  });
+
+  /// Computes a same-day `"Call Guest"` slot strictly on [now]'s calendar day:
+  /// - Early morning (`< 9:30 AM`, e.g. `7:30 AM` scan): `10:00 AM – 10:30 AM` today
+  /// - Business hours (`9:30 AM – 5:00 PM`, e.g. `2:00 PM` scan): `now + 30 min` rounded up to 15 min
+  /// - Evening (`5:00 PM – 11:15 PM`): `now + 15 min` rounded up to 5 min
+  /// - Late night (`11:15 PM – 11:59 PM`): clamped strictly before `23:58` on the same day
+  static ({String eventDate, DateTime startLocal, DateTime endLocal})
+      computeSameDaySlot(DateTime now) {
+    final local = now.toLocal();
+    final dateStr =
+        '${local.year.toString().padLeft(4, '0')}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
+    final nowMin = local.hour * 60 + local.minute;
+
+    int startMin;
+    int durationMin = 30;
+    if (nowMin < 9 * 60 + 30) {
+      startMin = 10 * 60; // 10:00 AM same day
+    } else if (nowMin <= 17 * 60) {
+      final plus30 = nowMin + 30;
+      startMin = ((plus30 + 14) ~/ 15) * 15;
+    } else if (nowMin <= 23 * 60 + 15) {
+      final plus15 = nowMin + 15;
+      startMin = ((plus15 + 4) ~/ 5) * 5;
+    } else {
+      startMin = nowMin + 1 <= 23 * 60 + 45 ? nowMin + 1 : 23 * 60 + 45;
+      final remaining = (23 * 60 + 58) - startMin;
+      durationMin = remaining >= 10 ? remaining : 10;
+    }
+
+    final startLocal = DateTime(
+      local.year,
+      local.month,
+      local.day,
+      startMin ~/ 60,
+      startMin % 60,
+    );
+    final rawEnd = startLocal.add(Duration(minutes: durationMin));
+    final maxSameDayEnd = DateTime(local.year, local.month, local.day, 23, 58);
+    final endLocal =
+        rawEnd.isAfter(maxSameDayEnd) ? maxSameDayEnd : rawEnd;
+
+    return (
+      eventDate: dateStr,
+      startLocal: startLocal,
+      endLocal: endLocal,
+    );
+  }
+
+  static String buildCallTitle({
+    required String clientName,
+    required List<Map<String, dynamic>> matchedVehicles,
+  }) {
+    final cleanName =
+        clientName.trim().isNotEmpty ? clientName.trim() : 'Client';
+    final first =
+        matchedVehicles.isNotEmpty ? matchedVehicles.first : const <String, dynamic>{};
+    final primaryModel = MatchAlertNotification.extractVehicleModelLabel(
+      make: first['make']?.toString() ?? '',
+      model: first['model']?.toString() ?? '',
+      title: first['title']?.toString() ?? '',
+    );
+    if (matchedVehicles.length > 1) {
+      return 'Call $cleanName — ${matchedVehicles.length} Vehicle Matches Found ($primaryModel)';
+    }
+    return 'Call $cleanName — Match Found: $primaryModel';
+  }
+
+  static String buildCallDescription({
+    required GuestProfile guest,
+    required List<Map<String, dynamic>> matchedVehicles,
+  }) {
+    final lines = <String>[
+      'Same-day follow-up call scheduled automatically by Preston Motor Guest Scout.',
+      '',
+      'Client: ${guest.name}',
+      if (guest.phone.trim().isNotEmpty) 'Phone: ${guest.phone.trim()}',
+      if (guest.email.trim().isNotEmpty) 'Email: ${guest.email.trim()}',
+      if (guest.latestClientNote != null)
+        'Latest Client Note: ${guest.latestClientNote!.text}',
+      '',
+      'Matched Vehicle(s) Found Today (${matchedVehicles.length}):',
+    ];
+    for (final v in matchedVehicles.take(8)) {
+      final p = (v['price'] as num?)?.toDouble();
+      final priceStr =
+          p != null && p > 0 ? '\$${p.toStringAsFixed(0)}' : 'Call for Price';
+      final loc = (v['location']?.toString() ?? '').trim().isNotEmpty
+          ? v['location'].toString().trim()
+          : 'Preston Automotive Group';
+      final titleStr = (v['title']?.toString() ?? '').trim().isNotEmpty
+          ? v['title'].toString().trim()
+          : MatchAlertNotification.extractVehicleModelLabel(
+              make: v['make']?.toString() ?? '',
+              model: v['model']?.toString() ?? '',
+            );
+      lines.add('• $titleStr — $priceStr at $loc');
+      final url = (v['listingUrl']?.toString() ?? '').trim();
+      if (url.isNotEmpty) {
+        lines.add('  $url');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  factory CalendarCallEvent.fromJson(Map<String, dynamic> json) {
+    return CalendarCallEvent(
+      id: json['id']?.toString() ?? '',
+      guestId: json['guestId']?.toString() ?? '',
+      guestName: json['guestName']?.toString() ?? 'Client',
+      guestPhone: json['guestPhone']?.toString() ?? '',
+      eventDate: json['eventDate']?.toString() ?? '',
+      startAt: json['startAt']?.toString() ?? '',
+      endAt: json['endAt']?.toString() ?? '',
+      title: json['title']?.toString() ?? 'Call Guest — Vehicle Match Found',
+      description: json['description']?.toString() ?? '',
+      location: json['location']?.toString() ?? '',
+      vehicleSummary: json['vehicleSummary']?.toString() ?? '',
+      externalEventId: json['externalEventId']?.toString() ?? '',
+      calendarLink: json['calendarLink']?.toString() ?? '',
+      provider: json['provider']?.toString() ?? 'local',
+      createdAt: json['createdAt']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'guestId': guestId,
+        'guestName': guestName,
+        'guestPhone': guestPhone,
+        'eventDate': eventDate,
+        'startAt': startAt,
+        'endAt': endAt,
+        'title': title,
+        'description': description,
+        'location': location,
+        'vehicleSummary': vehicleSummary,
+        'externalEventId': externalEventId,
+        'calendarLink': calendarLink,
+        'provider': provider,
+        'createdAt': createdAt,
+      };
+
+  CalendarCallEvent copyWith({
+    String? title,
+    String? description,
+    String? location,
+    String? vehicleSummary,
+  }) {
+    return CalendarCallEvent(
+      id: id,
+      guestId: guestId,
+      guestName: guestName,
+      guestPhone: guestPhone,
+      eventDate: eventDate,
+      startAt: startAt,
+      endAt: endAt,
+      title: title ?? this.title,
+      description: description ?? this.description,
+      location: location ?? this.location,
+      vehicleSummary: vehicleSummary ?? this.vehicleSummary,
+      externalEventId: externalEventId,
+      calendarLink: calendarLink,
+      provider: provider,
+      createdAt: createdAt,
     );
   }
 }

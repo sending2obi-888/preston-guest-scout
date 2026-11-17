@@ -51,7 +51,7 @@
           }
 
           const scope = (driveScope || 'https://www.googleapis.com/auth/drive.file') +
-            ' openid email profile';
+            ' https://www.googleapis.com/auth/calendar.events openid email profile';
 
           try {
             const tokenClient = window.google.accounts.oauth2.initTokenClient({

@@ -7,10 +7,12 @@ import 'screens/guest_matches_screen.dart';
 import 'screens/home_intake_screen.dart';
 import 'screens/match_detail_screen.dart';
 import 'services/api_service.dart';
+import 'services/calendar_service.dart';
 import 'services/google_drive_sync_service.dart';
 import 'services/match_notification_service.dart';
 import 'services/widget_sync_service.dart';
 import 'theme/app_theme.dart';
+import 'widgets/calendar_events_dialog.dart';
 import 'widgets/google_account_sync_dialog.dart';
 import 'widgets/launcher_widget_sheet.dart';
 import 'widgets/match_notifications_dialog.dart';
@@ -71,6 +73,7 @@ class _PrestonGuestScoutAppState extends State<PrestonGuestScoutApp> {
         onTapNotification: _navigateToGuestMatches,
       ),
     );
+    unawaited(CalendarService.instance.initialize());
 
     // Handle initial Web URL deep-link from ChromeOS Extension Widget or Notification (e.g. ?guestId=... or #/guest/...)
     if (kIsWeb) {
@@ -127,6 +130,7 @@ class _MainShellScreenState extends State<MainShellScreen>
   SystemStatus _status = const SystemStatus();
   List<GuestProfile> _guests = [];
   bool _loadingGuests = true;
+  bool _didPromptCalendar = false;
   Timer? _pollTimer;
 
   @override
@@ -136,6 +140,8 @@ class _MainShellScreenState extends State<MainShellScreen>
     GoogleDriveSyncService.instance.addCloudMergeListener(_handleCloudMerged);
     MatchNotificationService.instance.onForegroundBanner =
         _showNewMatchSnackBar;
+    CalendarService.instance.onCalendarEventCreated =
+        _showCalendarEventSnackBar;
 
     // Load local/cached data immediately and query Google Drive on app open
     _initializeAndQueryDriveOnOpen();
@@ -154,6 +160,10 @@ class _MainShellScreenState extends State<MainShellScreen>
     if (MatchNotificationService.instance.onForegroundBanner ==
         _showNewMatchSnackBar) {
       MatchNotificationService.instance.onForegroundBanner = null;
+    }
+    if (CalendarService.instance.onCalendarEventCreated ==
+        _showCalendarEventSnackBar) {
+      CalendarService.instance.onCalendarEventCreated = null;
     }
     _pollTimer?.cancel();
     super.dispose();
@@ -194,6 +204,38 @@ class _MainShellScreenState extends State<MainShellScreen>
     );
   }
 
+  void _showCalendarEventSnackBar(CalendarCallEvent event) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 7),
+        content: Row(
+          children: [
+            const Icon(
+              Icons.event_available_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Same-day call scheduled: ${event.title}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+        action: SnackBarAction(
+          label: 'Open',
+          onPressed: _openCalendarEventsDialog,
+        ),
+      ),
+    );
+  }
+
   /// Automatically queries Google Drive every time the app is opened or foregrounded
   /// on any device so search requirements and matches are always up to date.
   @override
@@ -209,7 +251,19 @@ class _MainShellScreenState extends State<MainShellScreen>
   }
 
   Future<void> _initializeAndQueryDriveOnOpen() async {
+    await CalendarService.instance.initialize();
     await _refreshAll();
+    if (mounted &&
+        !_didPromptCalendar &&
+        CalendarService.instance.shouldShowPermissionDialog) {
+      _didPromptCalendar = true;
+      unawaited(
+        showDialog<bool>(
+          context: context,
+          builder: (_) => const CalendarPermissionPromptDialog(),
+        ),
+      );
+    }
     await _queryDriveAndRefresh();
   }
 
@@ -229,6 +283,7 @@ class _MainShellScreenState extends State<MainShellScreen>
         ApiService.fetchStatus(),
         ApiService.fetchAllGuests(),
         ApiService.fetchNotifications(),
+        ApiService.fetchCalendarStatus(),
       ]);
       if (!mounted) return;
       setState(() {
@@ -273,6 +328,15 @@ class _MainShellScreenState extends State<MainShellScreen>
     showDialog(
       context: context,
       builder: (_) => LauncherWidgetDialog(
+        onSelectGuest: _openGuestMatches,
+      ),
+    );
+  }
+
+  void _openCalendarEventsDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => CalendarEventsDialog(
         onSelectGuest: _openGuestMatches,
       ),
     );
@@ -413,6 +477,31 @@ class _MainShellScreenState extends State<MainShellScreen>
                   ),
           ),
           const SizedBox(width: 4),
+          // Same-Day Guest Call Calendar Button & Permission Status
+          ListenableBuilder(
+            listenable: CalendarService.instance,
+            builder: (context, _) {
+              final cal = CalendarService.instance;
+              final count = cal.events.length;
+              return IconButton(
+                tooltip: cal.permissionGranted
+                    ? (count > 0
+                        ? 'Same-Day Guest Call Calendar ($count scheduled)'
+                        : 'Same-Day Guest Call Calendar (Permission Active)')
+                    : 'Allow Calendar Access for Automatic Same-Day Guest Calls',
+                onPressed: _openCalendarEventsDialog,
+                icon: Badge(
+                  isLabelVisible: count > 0,
+                  label: Text('$count'),
+                  child: Icon(
+                    cal.permissionGranted
+                        ? Icons.event_available_rounded
+                        : Icons.calendar_today_outlined,
+                  ),
+                ),
+              );
+            },
+          ),
           // New Match Notifications Bell (Post-Initial-Search Alerts)
           ListenableBuilder(
             listenable: MatchNotificationService.instance,

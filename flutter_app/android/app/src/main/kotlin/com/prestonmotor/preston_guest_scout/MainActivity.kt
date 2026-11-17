@@ -2,6 +2,7 @@
 
 package com.prestonmotor.preston_guest_scout
 
+import android.Manifest
 import android.accounts.Account
 import android.accounts.AccountManager
 import android.app.Activity
@@ -12,17 +13,20 @@ import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.CalendarContract
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
 import io.flutter.embedding.android.FlutterActivity
@@ -30,12 +34,15 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.security.MessageDigest
+import java.util.Calendar
+import java.util.TimeZone
 
 class MainActivity : FlutterActivity() {
     companion object {
         const val CHANNEL = "com.prestonmotor.scout/launcher_widget"
         const val AUTH_CHANNEL = "com.prestonmotor.scout/google_auth"
         const val NOTIF_CHANNEL = "com.prestonmotor.scout/notifications"
+        const val CALENDAR_CHANNEL = "com.prestonmotor.scout/calendar"
         const val MATCH_ALERT_CHANNEL_ID = "preston_match_alerts"
         const val PREFS_NAME = "preston_scout_widget_prefs"
         const val KEY_RECENT_TEN_JSON = "recent_ten_guests_json"
@@ -47,18 +54,22 @@ class MainActivity : FlutterActivity() {
         private const val REQ_GOOGLE_SIGN_IN = 9001
         private const val REQ_GOOGLE_CONSENT = 9002
         private const val REQ_CHOOSE_GOOGLE_ACCOUNT = 9003
-        private const val REQ_POST_NOTIFICATIONS = 9004
+        private const val REQ_RUNTIME_PERMISSIONS = 9004
+        private const val REQ_CALENDAR_PERMISSIONS = 9005
         private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+        private const val DEFAULT_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
     }
 
     private var methodChannel: MethodChannel? = null
     private var authChannel: MethodChannel? = null
     private var notifChannel: MethodChannel? = null
+    private var calendarChannel: MethodChannel? = null
     private var pendingLaunchGuestId: String? = null
     private var pendingScheduledSlot: String? = null
     private var pendingOAuthRedirectUri: String? = null
 
     private var pendingSignInResult: MethodChannel.Result? = null
+    private var pendingCalendarPermResult: MethodChannel.Result? = null
     private var pendingDriveScope: String = DEFAULT_DRIVE_SCOPE
     private var pendingConsentEmail: String? = null
     private var pendingConsentDisplayName: String? = null
@@ -67,7 +78,7 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ensureNotificationChannelCreated()
-        requestPostNotificationsPermissionIfNeeded()
+        requestStartupRuntimePermissions()
         DailySearchAlarmReceiver.scheduleTwiceDailyAlarms(this)
         handleIncomingIntent(intent, isColdStart = true)
     }
@@ -88,15 +99,261 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun requestStartupRuntimePermissions() {
+        val missing = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            val notifPerm = "android.permission.POST_NOTIFICATIONS"
+            if (checkSelfPermission(notifPerm) != PackageManager.PERMISSION_GRANTED) {
+                missing.add(notifPerm)
+            }
+        }
+        if (checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.READ_CALENDAR)
+        }
+        if (checkSelfPermission(Manifest.permission.WRITE_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.WRITE_CALENDAR)
+        }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQ_RUNTIME_PERMISSIONS)
+        }
+    }
+
     private fun requestPostNotificationsPermissionIfNeeded(): Boolean {
         if (Build.VERSION.SDK_INT >= 33) {
             val perm = "android.permission.POST_NOTIFICATIONS"
             if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(arrayOf(perm), REQ_POST_NOTIFICATIONS)
+                requestPermissions(arrayOf(perm), REQ_RUNTIME_PERMISSIONS)
                 return false
             }
         }
         return true
+    }
+
+    private fun hasCalendarPermissions(): Boolean {
+        return checkSelfPermission(Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestCalendarPermissionsInteractive(callbackResult: MethodChannel.Result) {
+        if (hasCalendarPermissions()) {
+            callbackResult.success(true)
+            return
+        }
+        pendingCalendarPermResult?.success(hasCalendarPermissions())
+        pendingCalendarPermResult = callbackResult
+        requestPermissions(
+            arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR),
+            REQ_CALENDAR_PERMISSIONS
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        val granted = hasCalendarPermissions()
+        if (requestCode == REQ_CALENDAR_PERMISSIONS || requestCode == REQ_RUNTIME_PERMISSIONS) {
+            calendarChannel?.invokeMethod("onCalendarPermissionChanged", granted)
+        }
+        if (requestCode == REQ_CALENDAR_PERMISSIONS) {
+            val cb = pendingCalendarPermResult
+            pendingCalendarPermResult = null
+            cb?.success(granted)
+        }
+    }
+
+    private fun findWritablePrimaryCalendarId(): Long? {
+        if (!hasCalendarPermissions()) return null
+        val projection = arrayOf(
+            CalendarContract.Calendars._ID,
+            CalendarContract.Calendars.IS_PRIMARY,
+            CalendarContract.Calendars.VISIBLE,
+            CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL
+        )
+        val selection =
+            "${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} >= ? AND ${CalendarContract.Calendars.VISIBLE} = 1"
+        val selectionArgs = arrayOf(CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR.toString())
+        val sortOrder = "${CalendarContract.Calendars.IS_PRIMARY} DESC, ${CalendarContract.Calendars._ID} ASC"
+
+        try {
+            contentResolver.query(
+                CalendarContract.Calendars.CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                sortOrder
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getLong(0)
+                }
+            }
+            contentResolver.query(
+                CalendarContract.Calendars.CONTENT_URI,
+                projection,
+                "${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} >= ?",
+                selectionArgs,
+                sortOrder
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    return cursor.getLong(0)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    private fun adjustSameDaySlotForConflicts(
+        calendarId: Long,
+        desiredStartMs: Long,
+        desiredEndMs: Long,
+        timeZoneId: String
+    ): Pair<Long, Long> {
+        val durationMs = (desiredEndMs - desiredStartMs).coerceAtLeast(10 * 60_000L)
+        val tz = try {
+            TimeZone.getTimeZone(timeZoneId)
+        } catch (_: Exception) {
+            TimeZone.getDefault()
+        }
+        val dayStartCal = Calendar.getInstance(tz).apply {
+            timeInMillis = desiredStartMs
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val dayEndCal = Calendar.getInstance(tz).apply {
+            timeInMillis = desiredStartMs
+            set(Calendar.HOUR_OF_DAY, 23)
+            set(Calendar.MINUTE, 58)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val maxEndMs = dayEndCal.timeInMillis
+
+        val busy = mutableListOf<Pair<Long, Long>>()
+        try {
+            val builder = CalendarContract.Instances.CONTENT_URI.buildUpon()
+            ContentUris.appendId(builder, dayStartCal.timeInMillis)
+            ContentUris.appendId(builder, maxEndMs)
+            contentResolver.query(
+                builder.build(),
+                arrayOf(
+                    CalendarContract.Instances.BEGIN,
+                    CalendarContract.Instances.END,
+                    CalendarContract.Instances.CALENDAR_ID
+                ),
+                "${CalendarContract.Instances.CALENDAR_ID} = ?",
+                arrayOf(calendarId.toString()),
+                "${CalendarContract.Instances.BEGIN} ASC"
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val b = cursor.getLong(0)
+                    val e = cursor.getLong(1)
+                    if (e > b) busy.add(Pair(b, e))
+                }
+            }
+        } catch (_: Exception) {
+            return Pair(desiredStartMs, desiredEndMs.coerceAtMost(maxEndMs))
+        }
+
+        if (busy.isEmpty()) {
+            return Pair(desiredStartMs, desiredEndMs.coerceAtMost(maxEndMs))
+        }
+
+        var candidateStart = desiredStartMs
+        val stepMs = 15 * 60_000L
+        while (candidateStart + durationMs <= maxEndMs) {
+            val candidateEnd = candidateStart + durationMs
+            val overlaps = busy.any { (b, e) -> candidateStart < e && candidateEnd > b }
+            if (!overlaps) {
+                return Pair(candidateStart, candidateEnd)
+            }
+            candidateStart += stepMs
+        }
+
+        return Pair(desiredStartMs, desiredEndMs.coerceAtMost(maxEndMs))
+    }
+
+    private fun insertSameDayCallEvent(
+        title: String,
+        description: String,
+        location: String,
+        startEpochMs: Long,
+        endEpochMs: Long,
+        timeZoneId: String
+    ): HashMap<String, Any?> {
+        if (!hasCalendarPermissions()) {
+            return hashMapOf(
+                "created" to false,
+                "reason" to "CALENDAR_PERMISSION_DENIED"
+            )
+        }
+        val calId = findWritablePrimaryCalendarId()
+            ?: return hashMapOf(
+                "created" to false,
+                "reason" to "NO_WRITABLE_CALENDAR"
+            )
+
+        val resolvedTz = if (timeZoneId.isNotBlank()) timeZoneId else TimeZone.getDefault().id
+        val (adjStartMs, adjEndMs) = adjustSameDaySlotForConflicts(
+            calendarId = calId,
+            desiredStartMs = startEpochMs,
+            desiredEndMs = endEpochMs,
+            timeZoneId = resolvedTz
+        )
+
+        return try {
+            val values = ContentValues().apply {
+                put(CalendarContract.Events.CALENDAR_ID, calId)
+                put(CalendarContract.Events.TITLE, title)
+                put(CalendarContract.Events.DESCRIPTION, description)
+                put(CalendarContract.Events.EVENT_LOCATION, location)
+                put(CalendarContract.Events.DTSTART, adjStartMs)
+                put(CalendarContract.Events.DTEND, adjEndMs)
+                put(CalendarContract.Events.EVENT_TIMEZONE, resolvedTz)
+                put(CalendarContract.Events.HAS_ALARM, 1)
+                put(
+                    CalendarContract.Events.AVAILABILITY,
+                    CalendarContract.Events.AVAILABILITY_BUSY
+                )
+            }
+            val eventUri = contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
+            val eventId = eventUri?.lastPathSegment?.toLongOrNull()
+            if (eventId != null) {
+                try {
+                    val reminderValues = ContentValues().apply {
+                        put(CalendarContract.Reminders.EVENT_ID, eventId)
+                        put(CalendarContract.Reminders.MINUTES, 15)
+                        put(
+                            CalendarContract.Reminders.METHOD,
+                            CalendarContract.Reminders.METHOD_ALERT
+                        )
+                    }
+                    contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, reminderValues)
+                } catch (_: Exception) {
+                }
+                hashMapOf(
+                    "created" to true,
+                    "eventId" to eventId.toString(),
+                    "startEpochMs" to adjStartMs,
+                    "endEpochMs" to adjEndMs,
+                    "provider" to "android_calendar_provider"
+                )
+            } else {
+                hashMapOf(
+                    "created" to false,
+                    "reason" to "INSERT_RETURNED_NULL"
+                )
+            }
+        } catch (e: Exception) {
+            hashMapOf(
+                "created" to false,
+                "reason" to (e.localizedMessage ?: "INSERT_EXCEPTION")
+            )
+        }
     }
 
     private fun postMatchSystemNotification(
@@ -213,7 +470,7 @@ class MainActivity : FlutterActivity() {
         val builder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
             .requestEmail()
             .requestProfile()
-            .requestScopes(Scope(driveScope))
+            .requestScopes(Scope(driveScope), Scope(DEFAULT_CALENDAR_SCOPE))
         return GoogleSignIn.getClient(this, builder.build())
     }
 
@@ -310,7 +567,7 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 val oauthScope =
-                    "oauth2:$driveScope https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+                    "oauth2:$driveScope $DEFAULT_CALENDAR_SCOPE https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
                 val token = GoogleAuthUtil.getToken(applicationContext, androidAccount, oauthScope)
                 saveSelectedEmail(cleanEmail)
                 val resolvedName = if (!displayName.isNullOrBlank()) displayName else cleanEmail
@@ -592,6 +849,7 @@ class MainActivity : FlutterActivity() {
 
         // 3. Post-Initial-Search Match System Notification Channel
         val nChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, NOTIF_CHANNEL)
+        notifChannel = nChannel
         nChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "requestNotificationPermission" -> {
@@ -617,6 +875,41 @@ class MainActivity : FlutterActivity() {
                         body = body
                     )
                     result.success(ok)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // 4. Calendar Permissions & Same-Day "Call Guest" Event Channel
+        val cChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CALENDAR_CHANNEL)
+        calendarChannel = cChannel
+        cChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestCalendarPermission" -> {
+                    requestCalendarPermissionsInteractive(result)
+                }
+                "hasCalendarPermission" -> {
+                    result.success(hasCalendarPermissions())
+                }
+                "createSameDayCallEvent" -> {
+                    val title = call.argument<String>("title") ?: "Call Guest — Vehicle Match Found"
+                    val description = call.argument<String>("description") ?: ""
+                    val location = call.argument<String>("location") ?: "Preston Automotive Group"
+                    val nowMs = System.currentTimeMillis()
+                    val startEpochMs = call.argument<Number>("startEpochMs")?.toLong()
+                        ?: (nowMs + 30 * 60_000L)
+                    val endEpochMs = call.argument<Number>("endEpochMs")?.toLong()
+                        ?: (startEpochMs + 30 * 60_000L)
+                    val timeZoneId = call.argument<String>("timeZone") ?: TimeZone.getDefault().id
+                    val resMap = insertSameDayCallEvent(
+                        title = title,
+                        description = description,
+                        location = location,
+                        startEpochMs = startEpochMs,
+                        endEpochMs = endEpochMs,
+                        timeZoneId = timeZoneId
+                    )
+                    result.success(resMap)
                 }
                 else -> result.notImplemented()
             }

@@ -26,6 +26,7 @@ import {
   runSearchForAllActiveGuests,
   startTwiceDailyScheduler,
 } from './scheduler.mjs';
+import { getCalendarStatus } from './calendar_sync.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_BUILD_DIR = path.resolve(__dirname, '../flutter_app/build/web');
@@ -213,9 +214,10 @@ async function seedInitialGuestsIfEmpty() {
   }
 
   // Kick off live prestonmotor.com initial search in background so startup is instant
-  runSearchForAllActiveGuests('Initial Seed Search', null, { isInitialSearch: true }).catch((err) =>
-    console.error('[Seed] Initial live search error:', err.message)
-  );
+  runSearchForAllActiveGuests('Initial Seed Search', null, {
+    isInitialSearch: true,
+    isSeedSearch: true,
+  }).catch((err) => console.error('[Seed] Initial live search error:', err.message));
 }
 
 const server = http.createServer(async (req, res) => {
@@ -260,6 +262,9 @@ const server = http.createServer(async (req, res) => {
         mergeRemoteSnapshotIntoLocal(body.clientSnapshot);
       }
       const token = bearerToken || (body.accessToken || '').trim();
+      if (token) {
+        setSetting('calendar_oauth_access_token', token);
+      }
       const syncRes = await queryAndSyncWithGoogleDrive({
         bearerToken: token,
         pushAfterMerge: body.pushAfterMerge !== false,
@@ -402,6 +407,8 @@ const server = http.createServer(async (req, res) => {
         try {
           searchResult = await runSearchForGuest(id, 'Initial Intake Search', {
             isInitialSearch: true,
+            isSeedSearch: false,
+            calendarAccessToken: bearerToken,
           });
         } catch (err) {
           searchResult = { error: err.message };
@@ -438,9 +445,46 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Calendar Permissions & Same-Day "Call Guest" Event endpoints
+    if (pathname === '/api/calendar/status' && req.method === 'GET') {
+      const status = await getCalendarStatus();
+      return sendJson(res, 200, { ok: true, ...status });
+    }
+
+    if (pathname === '/api/calendar/permission' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (typeof body.granted === 'boolean') {
+        setSetting('calendar_permission_granted', body.granted ? '1' : '0');
+        if (body.granted) {
+          setSetting('calendar_prompt_dismissed', '1');
+        }
+      }
+      if (typeof body.dismissed === 'boolean') {
+        setSetting('calendar_prompt_dismissed', body.dismissed ? '1' : '0');
+      }
+      const token = bearerToken || (body.accessToken || '').trim();
+      if (token) {
+        setSetting('calendar_oauth_access_token', token);
+      }
+      if (typeof body.providerMode === 'string') {
+        setSetting('calendar_provider_mode', body.providerMode.trim());
+      }
+      const status = await getCalendarStatus();
+      return sendJson(res, 200, { ok: true, ...status });
+    }
+
+    if (pathname === '/api/calendar/events' && req.method === 'DELETE') {
+      db.prepare('DELETE FROM calendar_call_events').run();
+      return sendJson(res, 200, { ok: true });
+    }
+
     // Trigger batch search across all active guests
     if (pathname === '/api/search-all' && req.method === 'POST') {
-      const result = await runSearchForAllActiveGuests('Manual All-Guests Search');
+      const result = await runSearchForAllActiveGuests(
+        'Manual All-Guests Search',
+        null,
+        { calendarAccessToken: bearerToken }
+      );
       scheduleAutoSaveToGoogleDrive(bearerToken);
       return sendJson(res, 200, { ok: true, ...result });
     }
@@ -508,7 +552,9 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (subResource === 'search' && !subId && req.method === 'POST') {
-        const result = await runSearchForGuest(guestId, 'On-Demand Gemini Search');
+        const result = await runSearchForGuest(guestId, 'On-Demand Gemini Search', {
+          calendarAccessToken: bearerToken,
+        });
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
         const matchRows = db
           .prepare(
@@ -581,7 +627,12 @@ const server = http.createServer(async (req, res) => {
           result = await runSearchForGuest(
             guestId,
             `Added Vehicle Search (${formatVehicleTargetLabel(newTarget)})`,
-            { onlyTargetId: newTarget.id, isInitialSearch: true }
+            {
+              onlyTargetId: newTarget.id,
+              isInitialSearch: true,
+              isSeedSearch: false,
+              calendarAccessToken: bearerToken,
+            }
           );
         }
 

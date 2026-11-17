@@ -96,6 +96,25 @@ db.exec(`
     UNIQUE(guest_id, vin)
   );
 
+  CREATE TABLE IF NOT EXISTS calendar_call_events (
+    id TEXT PRIMARY KEY,
+    guest_id TEXT NOT NULL REFERENCES guests(id) ON DELETE CASCADE,
+    guest_name TEXT NOT NULL,
+    guest_phone TEXT DEFAULT '',
+    event_date TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    location TEXT DEFAULT '',
+    vehicle_summary TEXT DEFAULT '',
+    external_event_id TEXT DEFAULT '',
+    calendar_link TEXT DEFAULT '',
+    provider TEXT DEFAULT 'local',
+    created_at TEXT NOT NULL,
+    UNIQUE(guest_id, event_date)
+  );
+
   CREATE TABLE IF NOT EXISTS search_runs (
     id TEXT PRIMARY KEY,
     guest_id TEXT,
@@ -118,6 +137,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_matches_guest_id ON matches(guest_id, match_score DESC, found_at DESC);
   CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON match_notifications(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_calendar_events_start_at ON calendar_call_events(start_at DESC);
   CREATE INDEX IF NOT EXISTS idx_runs_slot_key ON search_runs(slot_key);
 `);
 
@@ -129,6 +149,7 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN deleted_note_ids_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN initial_search_completed INTEGER DEFAULT 0`,
   `ALTER TABLE guests ADD COLUMN seen_match_vins_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE guests ADD COLUMN scheduled_call_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
 ]) {
@@ -146,12 +167,35 @@ try {
   );
 } catch {}
 
+// Backfill scheduled_call_vins_json for already-seeded existing matches so old seed rows don't retroactively schedule
+try {
+  const existingGuests = db
+    .prepare(`SELECT id, scheduled_call_vins_json FROM guests WHERE last_searched_at IS NOT NULL`)
+    .all();
+  const getVinsStmt = db.prepare(`SELECT vin FROM matches WHERE guest_id = ?`);
+  const updateSchedStmt = db.prepare(`UPDATE guests SET scheduled_call_vins_json = ? WHERE id = ?`);
+  for (const g of existingGuests) {
+    let parsed = [];
+    try {
+      parsed = JSON.parse(g.scheduled_call_vins_json || '[]');
+    } catch {}
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const vins = getVinsStmt.all(g.id).map((r) => r.vin).filter(Boolean);
+      if (vins.length > 0) {
+        updateSchedStmt.run(JSON.stringify(vins), g.id);
+      }
+    }
+  }
+} catch {}
+
 const defaultSettings = {
   timezone: 'America/New_York',
   morning_slot: '07:30',
   afternoon_slot: '14:00',
   gemini_model: 'gemini-2.5-flash',
   gemini_api_key: process.env.GEMINI_API_KEY || '',
+  calendar_permission_granted: '0',
+  calendar_prompt_dismissed: '0',
 };
 
 const insertDefault = db.prepare(
@@ -289,6 +333,14 @@ export function mapGuestRow(row) {
     seenMatchVins = [];
   }
 
+  let scheduledCallVins = [];
+  try {
+    scheduledCallVins = JSON.parse(row.scheduled_call_vins_json || '[]');
+    if (!Array.isArray(scheduledCallVins)) scheduledCallVins = [];
+  } catch {
+    scheduledCallVins = [];
+  }
+
   const matchStats = db
     .prepare(
       'SELECT COUNT(*) AS count, MIN(price) AS lowest_price FROM matches WHERE guest_id = ?'
@@ -317,6 +369,7 @@ export function mapGuestRow(row) {
     deletedNoteIds: [...deletedSet],
     initialSearchCompleted: Boolean(row.initial_search_completed || row.last_searched_at),
     seenMatchVins: [...new Set(seenMatchVins.map(String).filter(Boolean))],
+    scheduledCallVins: [...new Set(scheduledCallVins.map(String).filter(Boolean))],
     active: Boolean(row.active),
     lastSearchedAt: row.last_searched_at,
     lastSearchSummary: row.last_search_summary || '',
@@ -369,6 +422,27 @@ export function mapNotificationRow(row) {
     price: row.price ?? null,
     createdAt: row.created_at,
     read: Boolean(row.read),
+  };
+}
+
+export function mapCalendarEventRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    guestId: row.guest_id,
+    guestName: row.guest_name,
+    guestPhone: row.guest_phone || '',
+    eventDate: row.event_date,
+    startAt: row.start_at,
+    endAt: row.end_at,
+    title: row.title,
+    description: row.description || '',
+    location: row.location || '',
+    vehicleSummary: row.vehicle_summary || '',
+    externalEventId: row.external_event_id || '',
+    calendarLink: row.calendar_link || '',
+    provider: row.provider || 'local',
+    createdAt: row.created_at,
   };
 }
 
