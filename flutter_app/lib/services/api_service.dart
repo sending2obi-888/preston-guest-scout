@@ -591,5 +591,93 @@ class ApiService {
       );
     } catch (_) {}
   }
-}
 
+  static Future<List<BackupEntry>> fetchBackups() async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.getBackups();
+    }
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/backups'),
+      headers: _headers(),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Failed to load backups (${res.statusCode})');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (data['backups'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => BackupEntry.fromJson(Map<String, dynamic>.from(e)))
+        .take(5)
+        .toList();
+  }
+
+  static Future<List<BackupEntry>> createManualBackup({
+    String label = 'Manual Backup',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.createManualBackup(label: label);
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/backups'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{'label': label}),
+    );
+    if (res.statusCode != 201 && res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to create backup');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (data['backups'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => BackupEntry.fromJson(Map<String, dynamic>.from(e)))
+        .take(5)
+        .toList();
+  }
+
+  static Future<BackupConflictPreview> inspectBackupConflicts(
+    String backupId,
+  ) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.inspectBackupConflicts(backupId);
+    }
+    final res = await http.get(
+      Uri.parse(
+        '$baseUrl/api/backups/${Uri.encodeComponent(backupId)}/check-conflicts',
+      ),
+      headers: _headers(),
+    );
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to inspect backup conflicts');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return BackupConflictPreview.fromJson(data);
+  }
+
+  static Future<BackupRestoreResult> restoreBackup(
+    String backupId, {
+    BackupConflictResolution? resolution,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.restoreBackup(backupId, resolution: resolution);
+    }
+    final res = await http.post(
+      Uri.parse(
+        '$baseUrl/api/backups/${Uri.encodeComponent(backupId)}/restore',
+      ),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{
+        'resolution': resolution?.wireValue,
+      }),
+    );
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to restore backup');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    await fetchLauncherWidgetGuests();
+    return BackupRestoreResult.fromJson(
+      Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
+    );
+  }
+}

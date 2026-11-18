@@ -901,3 +901,197 @@ class CalendarCallEvent {
   }
 }
 
+enum BackupConflictResolution {
+  overwrite,
+  duplicate;
+
+  String get wireValue => name;
+
+  static BackupConflictResolution? fromWire(String? raw) {
+    final lower = (raw ?? '').trim().toLowerCase();
+    if (lower == 'overwrite') return BackupConflictResolution.overwrite;
+    if (lower == 'duplicate') return BackupConflictResolution.duplicate;
+    return null;
+  }
+}
+
+class BackupGuestPreview {
+  final String id;
+  final String name;
+  final String phone;
+  final String email;
+  final String targetSummary;
+  final int noteCount;
+  final int matchCount;
+
+  const BackupGuestPreview({
+    required this.id,
+    required this.name,
+    this.phone = '',
+    this.email = '',
+    this.targetSummary = '',
+    this.noteCount = 0,
+    this.matchCount = 0,
+  });
+
+  factory BackupGuestPreview.fromJson(Map<String, dynamic> json) {
+    return BackupGuestPreview(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Guest',
+      phone: json['phone']?.toString() ?? '',
+      email: json['email']?.toString() ?? '',
+      targetSummary: json['targetSummary']?.toString() ?? '',
+      noteCount: (json['noteCount'] as num?)?.toInt() ?? 0,
+      matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'phone': phone,
+        'email': email,
+        'targetSummary': targetSummary,
+        'noteCount': noteCount,
+        'matchCount': matchCount,
+      };
+}
+
+class BackupEntry {
+  final String id;
+  final String createdAt;
+  final String label;
+  final String deviceLabel;
+  final int guestCount;
+  final int matchCount;
+  final List<BackupGuestPreview> guestsPreview;
+
+  const BackupEntry({
+    required this.id,
+    required this.createdAt,
+    required this.label,
+    this.deviceLabel = '',
+    this.guestCount = 0,
+    this.matchCount = 0,
+    this.guestsPreview = const [],
+  });
+
+  factory BackupEntry.fromJson(Map<String, dynamic> json) {
+    return BackupEntry(
+      id: json['id']?.toString() ?? '',
+      createdAt: json['createdAt']?.toString() ?? '',
+      label: json['label']?.toString() ?? 'Data Backup',
+      deviceLabel: json['deviceLabel']?.toString() ?? '',
+      guestCount: (json['guestCount'] as num?)?.toInt() ?? 0,
+      matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
+      guestsPreview: (json['guestsPreview'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((e) => BackupGuestPreview.fromJson(Map<String, dynamic>.from(e)))
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'createdAt': createdAt,
+        'label': label,
+        'deviceLabel': deviceLabel,
+        'guestCount': guestCount,
+        'matchCount': matchCount,
+        'guestsPreview': guestsPreview.map((g) => g.toJson()).toList(),
+      };
+}
+
+class BackupConflictPreview {
+  final BackupEntry backup;
+  final bool hasConflicts;
+  final List<String> conflictingGuestNames;
+  final List<String> modifiedConflictNames;
+  final List<String> nonConflictingGuestNames;
+
+  const BackupConflictPreview({
+    required this.backup,
+    required this.hasConflicts,
+    this.conflictingGuestNames = const [],
+    this.modifiedConflictNames = const [],
+    this.nonConflictingGuestNames = const [],
+  });
+
+  factory BackupConflictPreview.fromJson(Map<String, dynamic> json) {
+    return BackupConflictPreview(
+      backup: BackupEntry.fromJson(
+        Map<String, dynamic>.from(json['backup'] as Map? ?? const {}),
+      ),
+      hasConflicts: json['hasConflicts'] == true,
+      conflictingGuestNames:
+          (json['conflictingGuestNames'] as List<dynamic>? ?? [])
+              .map((e) => e.toString())
+              .where((s) => s.isNotEmpty)
+              .toList(),
+      modifiedConflictNames:
+          (json['modifiedConflictNames'] as List<dynamic>? ?? [])
+              .map((e) => e.toString())
+              .where((s) => s.isNotEmpty)
+              .toList(),
+      nonConflictingGuestNames:
+          (json['nonConflictingGuestNames'] as List<dynamic>? ?? [])
+              .map((e) => e.toString())
+              .where((s) => s.isNotEmpty)
+              .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'backup': backup.toJson(),
+        'hasConflicts': hasConflicts,
+        'conflictingGuestNames': conflictingGuestNames,
+        'modifiedConflictNames': modifiedConflictNames,
+        'nonConflictingGuestNames': nonConflictingGuestNames,
+      };
+}
+
+class BackupRestoreResult {
+  final String backupId;
+  final String resolution;
+  final int restoredGuests;
+  final int overwrittenGuests;
+  final int duplicatedGuests;
+  final int totalGuests;
+  final int totalMatches;
+  final String summary;
+
+  const BackupRestoreResult({
+    required this.backupId,
+    required this.resolution,
+    this.restoredGuests = 0,
+    this.overwrittenGuests = 0,
+    this.duplicatedGuests = 0,
+    this.totalGuests = 0,
+    this.totalMatches = 0,
+    this.summary = '',
+  });
+
+  factory BackupRestoreResult.fromJson(Map<String, dynamic> json) {
+    return BackupRestoreResult(
+      backupId: json['backupId']?.toString() ?? '',
+      resolution: json['resolution']?.toString() ?? 'none',
+      restoredGuests: (json['restoredGuests'] as num?)?.toInt() ?? 0,
+      overwrittenGuests: (json['overwrittenGuests'] as num?)?.toInt() ?? 0,
+      duplicatedGuests: (json['duplicatedGuests'] as num?)?.toInt() ?? 0,
+      totalGuests: (json['totalGuests'] as num?)?.toInt() ?? 0,
+      totalMatches: (json['totalMatches'] as num?)?.toInt() ?? 0,
+      summary: json['summary']?.toString() ?? 'Backup loaded.',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'backupId': backupId,
+        'resolution': resolution,
+        'restoredGuests': restoredGuests,
+        'overwrittenGuests': overwrittenGuests,
+        'duplicatedGuests': duplicatedGuests,
+        'totalGuests': totalGuests,
+        'totalMatches': totalMatches,
+        'summary': summary,
+      };
+}

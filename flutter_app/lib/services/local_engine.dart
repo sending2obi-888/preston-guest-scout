@@ -70,10 +70,13 @@ class LocalScoutEngine {
   /// so GoogleDriveSyncService saves the latest search state to Google Drive.
   static void Function()? onDataMutatedForCloudSave;
 
+  static const int maxBackups = 5;
+
   static List<Map<String, dynamic>> _guests = [];
   static List<Map<String, dynamic>> _matches = [];
   static List<Map<String, dynamic>> _notifications = [];
   static List<Map<String, dynamic>> _calendarEvents = [];
+  static List<Map<String, dynamic>> _backups = [];
   static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
@@ -127,6 +130,11 @@ class LocalScoutEngine {
         _calendarEvents = (decoded['calendarEvents'] as List<dynamic>? ?? [])
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
+        _backups = (decoded['backups'] as List<dynamic>? ?? [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .take(maxBackups)
+            .toList();
         if (decoded['deletedGuestIds'] is Map) {
           _deletedGuestIds = (decoded['deletedGuestIds'] as Map).map(
             (k, v) => MapEntry(k.toString(), v.toString()),
@@ -137,6 +145,12 @@ class LocalScoutEngine {
             ..._settings,
             ...Map<String, dynamic>.from(decoded['settings'] as Map),
           };
+        }
+        if (_guests.isNotEmpty && _backups.isEmpty) {
+          _recordBackupSnapshotSync(
+            label: 'Initial Data Backup',
+            force: true,
+          );
         }
         MatchNotificationService.instance.hydratePersistedNotifications(
           _notifications.map(MatchAlertNotification.fromJson).toList(),
@@ -179,6 +193,13 @@ class LocalScoutEngine {
       _calendarEvents = (decoded['calendarEvents'] as List<dynamic>? ?? [])
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
+      if (decoded['backups'] is List) {
+        _backups = (decoded['backups'] as List<dynamic>)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .take(maxBackups)
+            .toList();
+      }
       MatchNotificationService.instance.hydratePersistedNotifications(
         _notifications.map(MatchAlertNotification.fromJson).toList(),
       );
@@ -421,6 +442,7 @@ class LocalScoutEngine {
         'matches': _matches,
         'notifications': _notifications,
         'calendarEvents': _calendarEvents,
+        'backups': _backups,
         'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
@@ -702,6 +724,8 @@ class LocalScoutEngine {
       isInitialSearch: true,
       mockCandidatesOverride: mockCandidatesOverride,
     );
+    _recordBackupSnapshotSync(label: 'Auto-Backup • Added $name');
+    await _persist();
     return (
       guest: searchRes.guest,
       matchesFound: searchRes.matches.length,
@@ -732,6 +756,14 @@ class LocalScoutEngine {
 
   static Future<void> deleteGuest(String guestId) async {
     await ensureInitialized();
+    final existingIdx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (existingIdx != -1) {
+      final deletedName =
+          (_guests[existingIdx]['name']?.toString() ?? 'Guest').trim();
+      _recordBackupSnapshotSync(
+        label: 'Auto-Backup • Before Deleting $deletedName',
+      );
+    }
     _deletedGuestIds[guestId] = DateTime.now().toUtc().toIso8601String();
     _guests.removeWhere((g) => g['id']?.toString() == guestId);
     _matches.removeWhere((m) => m['guestId']?.toString() == guestId);
@@ -991,13 +1023,18 @@ class LocalScoutEngine {
     await _persist();
     onDataMutatedForCloudSave?.call();
 
-    return runSearchForSingleGuest(
+    final res = await runSearchForSingleGuest(
       guestId,
       slotLabel: 'Added Vehicle Search (${newTargetModel.label})',
       onlyTargetId: newTargetId,
       isInitialSearch: true,
       mockCandidatesOverride: mockCandidatesOverride,
     );
+    _recordBackupSnapshotSync(
+      label: 'Auto-Backup • Added Vehicle (${currentHydrated.name})',
+    );
+    await _persist();
+    return res;
   }
 
   static Future<({GuestProfile guest, List<VehicleMatch> matches})>
@@ -1034,6 +1071,10 @@ class LocalScoutEngine {
       'vehicleTargets': remaining,
       'updatedAt': nowIso,
     });
+    _recordBackupSnapshotSync(
+      label:
+          'Auto-Backup • Removed Vehicle (${_guests[idx]['name'] ?? 'Guest'})',
+    );
     await _persist();
     onDataMutatedForCloudSave?.call();
 
@@ -1072,6 +1113,9 @@ class LocalScoutEngine {
       'clientNotes': existingNotes,
       'updatedAt': nowIso,
     });
+    _recordBackupSnapshotSync(
+      label: 'Auto-Backup • Added Note (${_guests[idx]['name'] ?? 'Guest'})',
+    );
     await _persist();
     onDataMutatedForCloudSave?.call();
     return _hydrateGuest(_guests[idx]);
@@ -1105,6 +1149,9 @@ class LocalScoutEngine {
       'deletedNoteIds': deletedNoteIds,
       'updatedAt': nowIso,
     });
+    _recordBackupSnapshotSync(
+      label: 'Auto-Backup • Removed Note (${_guests[idx]['name'] ?? 'Guest'})',
+    );
     await _persist();
     onDataMutatedForCloudSave?.call();
     return _hydrateGuest(_guests[idx]);
@@ -2185,6 +2232,7 @@ class LocalScoutEngine {
       'guests': _guests,
       'deletedGuestIds': Map<String, String>.from(_deletedGuestIds),
       'matches': compactMatches,
+      'backups': _backups.take(maxBackups).toList(),
       'settings': <String, dynamic>{
         'geminiModel': _settings['geminiModel']?.toString() ?? 'gemini-2.5-flash',
         'timezone': _settings['timezone']?.toString() ?? 'America/New_York',
@@ -2597,10 +2645,544 @@ class LocalScoutEngine {
       }
     }
 
+    // 5. Merge remote rolling backups (strictly keep last 5 newest)
+    final remoteBackups = remote['backups'];
+    if (remoteBackups is List && remoteBackups.isNotEmpty) {
+      final byId = <String, Map<String, dynamic>>{
+        for (final b in _backups)
+          if ((b['id']?.toString() ?? '').isNotEmpty) b['id'].toString(): b,
+      };
+      for (final item in remoteBackups) {
+        if (item is! Map) continue;
+        final rb = Map<String, dynamic>.from(item);
+        final bid = rb['id']?.toString() ?? '';
+        final bCreated = rb['createdAt']?.toString() ?? '';
+        if (bid.isEmpty || bCreated.isEmpty) continue;
+        if (!byId.containsKey(bid)) {
+          byId[bid] = rb;
+          localChanged = true;
+        }
+      }
+      final mergedList = byId.values.toList()
+        ..sort(
+          (a, b) => (b['createdAt'] ?? '')
+              .toString()
+              .compareTo((a['createdAt'] ?? '').toString()),
+        );
+      _backups = mergedList.take(maxBackups).toList();
+    }
+
     return (
       totalGuests: _guests.length,
       totalMatches: _matches.length,
       localChanged: localChanged,
+    );
+  }
+
+  // --- Last 5 Backups, Conflict Detection, & Overwrite / Duplicate Restore ---
+
+  static String _computeBackupSignature(
+    List<Map<String, dynamic>> guests,
+    List<Map<String, dynamic>> matches,
+  ) {
+    final gParts = [...guests]
+        .map((g) {
+          final norm = _normalizeGuestMap(g);
+          final targets = (norm['vehicleTargets'] as List<dynamic>? ?? [])
+              .whereType<Map>()
+              .map(
+                (t) =>
+                    '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
+              )
+              .join(';;');
+          final notes = (norm['clientNotes'] as List<dynamic>? ?? [])
+              .whereType<Map>()
+              .map((n) => '${n['id']}:${n['text']}')
+              .join(';;');
+          return '${norm['id']}|${norm['name']}|${norm['phone']}|${norm['email']}|$targets|$notes';
+        })
+        .toList()
+      ..sort();
+
+    final mParts = [...matches]
+        .map((m) => '${m['guestId']}::${m['vin']}::${m['price']}')
+        .toList()
+      ..sort();
+
+    return '${gParts.join('###')}@@@${mParts.join('###')}';
+  }
+
+  static String _buildGuestComparableSignature(
+    Map<String, dynamic> rawGuest,
+    int matchCount,
+  ) {
+    final g = _normalizeGuestMap(rawGuest);
+    final targets = (g['vehicleTargets'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map(
+          (t) =>
+              '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
+        )
+        .join(';;');
+    final notes = (g['clientNotes'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((n) => (n['text']?.toString() ?? '').trim())
+        .join(';;');
+    return '${(g['name'] ?? '').toString().trim()}|${(g['phone'] ?? '').toString().trim()}|${(g['email'] ?? '').toString().trim()}|$targets|$notes|$matchCount';
+  }
+
+  static Map<String, dynamic>? _recordBackupSnapshotSync({
+    required String label,
+    String deviceLabel = 'Android / Googlebook',
+    bool force = false,
+  }) {
+    final copiedGuests = _guests
+        .map(
+          (g) => jsonDecode(jsonEncode(_normalizeGuestMap(g)))
+              as Map<String, dynamic>,
+        )
+        .toList();
+    final copiedMatches = _matches.map((m) {
+      final cloned = jsonDecode(jsonEncode(m)) as Map<String, dynamic>;
+      final hl = (cloned['allHighlights'] as List<dynamic>? ?? [])
+          .take(8)
+          .map((e) => e.toString())
+          .toList();
+      cloned['allHighlights'] = hl;
+      return cloned;
+    }).toList();
+
+    final signature = _computeBackupSignature(copiedGuests, copiedMatches);
+    if (!force &&
+        _backups.isNotEmpty &&
+        _backups.first['signature']?.toString() == signature) {
+      return null;
+    }
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final backupMap = <String, dynamic>{
+      'id':
+          'backup-${DateTime.now().microsecondsSinceEpoch}-${_backups.length + 1}',
+      'label': label.trim().isNotEmpty ? label.trim() : 'Data Backup',
+      'deviceLabel': deviceLabel,
+      'signature': signature,
+      'createdAt': nowIso,
+      'guests': copiedGuests,
+      'matches': copiedMatches,
+    };
+
+    _backups.insert(0, backupMap);
+    if (_backups.length > maxBackups) {
+      _backups = _backups.take(maxBackups).toList();
+    }
+    return backupMap;
+  }
+
+  static BackupEntry _hydrateBackupEntry(Map<String, dynamic> rawBackup) {
+    final bGuests = (rawBackup['guests'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => _normalizeGuestMap(Map<String, dynamic>.from(e)))
+        .toList();
+    final bMatches = (rawBackup['matches'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+
+    final matchCountsByGuest = <String, int>{};
+    for (final m in bMatches) {
+      final gid = m['guestId']?.toString() ?? '';
+      if (gid.isNotEmpty) {
+        matchCountsByGuest[gid] = (matchCountsByGuest[gid] ?? 0) + 1;
+      }
+    }
+
+    final previews = bGuests.map((g) {
+      final gid = g['id']?.toString() ?? '';
+      final profile = GuestProfile.fromJson({
+        ...g,
+        'matchCount': matchCountsByGuest[gid] ?? 0,
+      });
+      return BackupGuestPreview(
+        id: profile.id,
+        name: profile.name,
+        phone: profile.phone,
+        email: profile.email,
+        targetSummary: profile.targetVehicleLabel,
+        noteCount: profile.clientNotes.length,
+        matchCount: matchCountsByGuest[gid] ?? 0,
+      );
+    }).toList();
+
+    return BackupEntry(
+      id: rawBackup['id']?.toString() ?? '',
+      createdAt: rawBackup['createdAt']?.toString() ?? '',
+      label: rawBackup['label']?.toString() ?? 'Data Backup',
+      deviceLabel: rawBackup['deviceLabel']?.toString() ?? '',
+      guestCount: bGuests.length,
+      matchCount: bMatches.length,
+      guestsPreview: previews,
+    );
+  }
+
+  static Map<String, dynamic>? _findMatchingCurrentGuestMap(
+    Map<String, dynamic> backupGuest,
+    List<Map<String, dynamic>> currentGuests,
+  ) {
+    final bgId = (backupGuest['id']?.toString() ?? '').trim();
+    final bgNameLower =
+        (backupGuest['name']?.toString() ?? '').trim().toLowerCase();
+    if (bgId.isNotEmpty) {
+      for (final cg in currentGuests) {
+        if ((cg['id']?.toString() ?? '').trim() == bgId) return cg;
+      }
+    }
+    if (bgNameLower.isNotEmpty) {
+      for (final cg in currentGuests) {
+        if ((cg['name']?.toString() ?? '').trim().toLowerCase() ==
+            bgNameLower) {
+          return cg;
+        }
+      }
+    }
+    return null;
+  }
+
+  static String _makeUniqueDuplicateName(
+    String baseName,
+    Set<String> takenLowerNames,
+  ) {
+    final clean = baseName.trim().isNotEmpty ? baseName.trim() : 'Guest';
+    final first = '$clean (Copy)';
+    if (takenLowerNames.add(first.toLowerCase())) {
+      return first;
+    }
+    int idx = 2;
+    while (idx < 1000) {
+      final candidate = '$clean (Copy $idx)';
+      if (takenLowerNames.add(candidate.toLowerCase())) {
+        return candidate;
+      }
+      idx++;
+    }
+    return '$clean (${DateTime.now().millisecondsSinceEpoch})';
+  }
+
+  static Future<List<BackupEntry>> getBackups() async {
+    await ensureInitialized();
+    if (_guests.isNotEmpty && _backups.isEmpty) {
+      _recordBackupSnapshotSync(
+        label: 'Initial Data Backup',
+        force: true,
+      );
+      await _persist();
+    }
+    final sorted = [..._backups]
+      ..sort(
+        (a, b) => (b['createdAt'] ?? '')
+            .toString()
+            .compareTo((a['createdAt'] ?? '').toString()),
+      );
+    return sorted.take(maxBackups).map(_hydrateBackupEntry).toList();
+  }
+
+  static Future<List<BackupEntry>> createManualBackup({
+    String label = 'Manual Backup',
+  }) async {
+    await ensureInitialized();
+    _recordBackupSnapshotSync(
+      label: label.trim().isNotEmpty ? label.trim() : 'Manual Backup',
+      force: true,
+    );
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+    return getBackups();
+  }
+
+  static Future<BackupConflictPreview> inspectBackupConflicts(
+    String backupId,
+  ) async {
+    await ensureInitialized();
+    final rawBackup = _backups.firstWhere(
+      (b) => b['id']?.toString() == backupId,
+      orElse: () => throw Exception('Selected backup was not found.'),
+    );
+
+    final bGuests = (rawBackup['guests'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => _normalizeGuestMap(Map<String, dynamic>.from(e)))
+        .toList();
+    final bMatches = (rawBackup['matches'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+
+    final bMatchCount = <String, int>{};
+    for (final m in bMatches) {
+      final gid = m['guestId']?.toString() ?? '';
+      if (gid.isNotEmpty) bMatchCount[gid] = (bMatchCount[gid] ?? 0) + 1;
+    }
+
+    final cMatchCount = <String, int>{};
+    for (final m in _matches) {
+      final gid = m['guestId']?.toString() ?? '';
+      if (gid.isNotEmpty) cMatchCount[gid] = (cMatchCount[gid] ?? 0) + 1;
+    }
+
+    final conflictingNames = <String>[];
+    final modifiedNames = <String>[];
+    final nonConflictingNames = <String>[];
+
+    for (final bg in bGuests) {
+      final name = (bg['name']?.toString() ?? '').trim();
+      if (name.isEmpty) continue;
+      final existing = _findMatchingCurrentGuestMap(bg, _guests);
+      if (existing != null) {
+        conflictingNames.add(name);
+        final bgSig = _buildGuestComparableSignature(
+          bg,
+          bMatchCount[bg['id']?.toString() ?? ''] ?? 0,
+        );
+        final cgSig = _buildGuestComparableSignature(
+          existing,
+          cMatchCount[existing['id']?.toString() ?? ''] ?? 0,
+        );
+        if (bgSig != cgSig) {
+          modifiedNames.add(name);
+        }
+      } else {
+        nonConflictingNames.add(name);
+      }
+    }
+
+    return BackupConflictPreview(
+      backup: _hydrateBackupEntry(rawBackup),
+      hasConflicts: conflictingNames.isNotEmpty,
+      conflictingGuestNames: conflictingNames,
+      modifiedConflictNames: modifiedNames,
+      nonConflictingGuestNames: nonConflictingNames,
+    );
+  }
+
+  static Future<BackupRestoreResult> restoreBackup(
+    String backupId, {
+    BackupConflictResolution? resolution,
+  }) async {
+    await ensureInitialized();
+    final targetBackup = _backups.firstWhere(
+      (b) => b['id']?.toString() == backupId,
+      orElse: () => throw Exception('Selected backup was not found.'),
+    );
+
+    final bGuests = (targetBackup['guests'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map(
+          (e) => _normalizeGuestMap(
+            jsonDecode(jsonEncode(e)) as Map<String, dynamic>,
+          ),
+        )
+        .toList();
+    final bMatches = (targetBackup['matches'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => jsonDecode(jsonEncode(e)) as Map<String, dynamic>)
+        .toList();
+
+    final preRestoreGuests = [..._guests];
+    final hasAnyConflict = bGuests.any(
+      (bg) => _findMatchingCurrentGuestMap(bg, preRestoreGuests) != null,
+    );
+
+    if (hasAnyConflict && resolution == null) {
+      throw Exception(
+        'Conflicting guest entries exist. Please choose Overwrite or Duplicate.',
+      );
+    }
+
+    // Preserve pre-restore state in backup history if it differs from newest backup
+    if (_guests.isNotEmpty) {
+      _recordBackupSnapshotSync(
+        label: 'Auto-Backup • Pre-Restore Snapshot',
+        force: false,
+      );
+    }
+
+    final matchesByGuestId = <String, List<Map<String, dynamic>>>{};
+    for (final m in bMatches) {
+      final gid = m['guestId']?.toString() ?? '';
+      if (gid.isEmpty) continue;
+      matchesByGuestId.putIfAbsent(gid, () => []).add(m);
+    }
+
+    final takenLowerNames = <String>{
+      for (final cg in _guests)
+        if ((cg['name']?.toString() ?? '').trim().isNotEmpty)
+          cg['name'].toString().trim().toLowerCase(),
+    };
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    int restoredCount = 0;
+    int overwrittenCount = 0;
+    int duplicatedCount = 0;
+    int seq = 0;
+
+    for (final bg in bGuests) {
+      final rawName = (bg['name']?.toString() ?? '').trim();
+      if (rawName.isEmpty) continue;
+      seq++;
+
+      final origId =
+          (bg['id']?.toString() ?? '').trim().isNotEmpty
+              ? bg['id'].toString().trim()
+              : 'guest-restored-${DateTime.now().microsecondsSinceEpoch}-$seq';
+      final guestMatches = matchesByGuestId[origId] ?? const [];
+      final existing = _findMatchingCurrentGuestMap(bg, preRestoreGuests);
+
+      String targetGuestId = origId;
+      String targetName = rawName;
+      String createdAtToUse = (bg['createdAt']?.toString() ?? nowIso).trim();
+      if (createdAtToUse.isEmpty) createdAtToUse = nowIso;
+      final targetIdRemap = <String, String>{};
+      final isDuplicate =
+          existing != null && resolution == BackupConflictResolution.duplicate;
+
+      if (existing == null) {
+        restoredCount++;
+        takenLowerNames.add(targetName.toLowerCase());
+        _deletedGuestIds.remove(targetGuestId);
+      } else if (resolution == BackupConflictResolution.overwrite) {
+        overwrittenCount++;
+        targetGuestId = existing['id']?.toString() ?? origId;
+        _deletedGuestIds.remove(targetGuestId);
+        _deletedGuestIds.remove(origId);
+        _guests.removeWhere(
+          (g) =>
+              g['id']?.toString() == targetGuestId ||
+              g['id']?.toString() == origId,
+        );
+        _matches.removeWhere(
+          (m) =>
+              m['guestId']?.toString() == targetGuestId ||
+              m['guestId']?.toString() == origId,
+        );
+      } else {
+        duplicatedCount++;
+        targetGuestId =
+            'guest-dup-${DateTime.now().microsecondsSinceEpoch}-$seq';
+        targetName = _makeUniqueDuplicateName(rawName, takenLowerNames);
+        createdAtToUse = nowIso;
+      }
+
+      final rawTargets = (bg['vehicleTargets'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final remappedTargets = <Map<String, dynamic>>[];
+      for (var i = 0; i < rawTargets.length; i++) {
+        final oldTid =
+            (rawTargets[i]['id']?.toString() ?? '$origId-vt-${i + 1}');
+        final newTid = isDuplicate ? '$targetGuestId-vt-${i + 1}' : oldTid;
+        targetIdRemap[oldTid] = newTid;
+        remappedTargets.add(<String, dynamic>{
+          ...rawTargets[i],
+          'id': newTid,
+        });
+      }
+
+      final remappedNotes = <Map<String, dynamic>>[];
+      final rawNotes = (bg['clientNotes'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      for (var i = 0; i < rawNotes.length; i++) {
+        remappedNotes.add(<String, dynamic>{
+          ...rawNotes[i],
+          'id': isDuplicate
+              ? '$targetGuestId-note-${i + 1}'
+              : (rawNotes[i]['id']?.toString() ??
+                    '$targetGuestId-note-${i + 1}'),
+        });
+      }
+
+      final matchVins = guestMatches
+          .map((m) => (m['vin']?.toString() ?? '').trim())
+          .where((v) => v.isNotEmpty)
+          .toSet();
+      final seenVins = <String>{
+        ...((bg['seenMatchVins'] as List<dynamic>? ?? [])
+            .map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)),
+        ...matchVins,
+      }.toList();
+      final schedVins = <String>{
+        ...((bg['scheduledCallVins'] as List<dynamic>? ?? [])
+            .map((e) => e.toString().trim())
+            .where((s) => s.isNotEmpty)),
+        ...matchVins,
+      }.toList();
+
+      final normalizedRestored = _normalizeGuestMap(<String, dynamic>{
+        ...bg,
+        'id': targetGuestId,
+        'name': targetName,
+        'vehicleTargets': remappedTargets,
+        'clientNotes': remappedNotes,
+        if (isDuplicate) 'deletedNoteIds': <String>[],
+        'initialSearchCompleted':
+            (bg['initialSearchCompleted'] == true) ||
+            ((bg['lastSearchedAt']?.toString() ?? '').isNotEmpty) ||
+            matchVins.isNotEmpty,
+        'seenMatchVins': seenVins,
+        'scheduledCallVins': schedVins,
+        'createdAt': createdAtToUse,
+        'updatedAt': nowIso,
+      });
+
+      _guests.insert(0, normalizedRestored);
+
+      int mSeq = 0;
+      for (final m in guestMatches) {
+        final vin = (m['vin']?.toString() ?? '').trim();
+        if (vin.isEmpty) continue;
+        mSeq++;
+        final oldTid = m['targetId']?.toString() ?? '';
+        final mappedTid = targetIdRemap[oldTid] ?? oldTid;
+        _matches.add(<String, dynamic>{
+          ...m,
+          'id': isDuplicate
+              ? 'match-dup-${DateTime.now().microsecondsSinceEpoch}-$seq-$mSeq'
+              : (m['id']?.toString() ??
+                    'match-${DateTime.now().microsecondsSinceEpoch}-$seq-$mSeq'),
+          'guestId': targetGuestId,
+          'targetId': mappedTid,
+          'lastSeenAt': nowIso,
+        });
+      }
+    }
+
+    _guests.sort(
+      (a, b) => (b['createdAt'] ?? '')
+          .toString()
+          .compareTo((a['createdAt'] ?? '').toString()),
+    );
+
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+
+    final parts = <String>[];
+    if (overwrittenCount > 0) parts.add('$overwrittenCount overwritten');
+    if (duplicatedCount > 0) parts.add('$duplicatedCount duplicated');
+    if (restoredCount > 0) parts.add('$restoredCount restored');
+    final detail = parts.isNotEmpty ? parts.join(', ') : '0 changes';
+
+    return BackupRestoreResult(
+      backupId: backupId,
+      resolution: hasAnyConflict ? resolution!.wireValue : 'none',
+      restoredGuests: restoredCount,
+      overwrittenGuests: overwrittenCount,
+      duplicatedGuests: duplicatedCount,
+      totalGuests: _guests.length,
+      totalMatches: _matches.length,
+      summary:
+          'Backup loaded ($detail) • ${_guests.length} active guest(s), ${_matches.length} match(es).',
     );
   }
 
@@ -2619,6 +3201,7 @@ class LocalScoutEngine {
     _matches = [];
     _notifications = [];
     _calendarEvents = [];
+    _backups = [];
     _deletedGuestIds = {};
     _settings['calendarPermissionGranted'] = false;
     _settings['calendarPromptDismissed'] = false;
@@ -2679,4 +3262,5 @@ class LocalScoutEngine {
     return _buildCloudSnapshotSync(deviceLabel: 'TestMergedDevice');
   }
 }
+
 

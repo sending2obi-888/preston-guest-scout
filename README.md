@@ -36,6 +36,10 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
 8. **Calendar Permissions & Automatic Same-Day `"Call Guest"` Calendar Events**
    - **Startup Calendar Permission Prompt**: Requests `READ_CALENDAR` & `WRITE_CALENDAR` runtime permissions on Android / Googlebook startup (`MainActivity`), includes Google Calendar `calendar.events` OAuth scope during Google SSO, and presents a Material Design 3 **Allow Calendar Access** prompt (`CalendarPermissionPromptDialog`) plus an AppBar **Same-Day Guest Call Calendar** dialog (`CalendarEventsDialog`).
    - **Automatic Same-Day Call Event When a Match Is Found**: Whenever a matching vehicle is found for a guest while Calendar Permission is granted, the app automatically schedules a **same-day** calendar event (`"Call <Guest Name> — Match Found: <Model>"`) with the guest's phone number, email, latest client note, matched vehicle price, Preston dealership location, listing URL, and a 15-minute popup reminder — stepping past busy calendar slots on that exact same day (`--send-updates none`, zero unsolicited customer invites, deduplicated per guest per day).
+9. **Last 5 Backups & Conflict Resolution (`Overwrite` or `Duplicate`) in Settings**
+   - **Rolling Last 5 Backups**: Automatically captures point-in-time backups on guest, vehicle target, client note, and pre-delete changes (plus on-demand **Back Up Now** in Settings), retaining the **5 most recent backups** locally and across Google Drive sync.
+   - **Inspect & Load Backups in Settings**: Open **Settings** (`SettingsAndChromebookDialog`) to view the last 5 backups, expand **View Backup** to inspect every included guest, target vehicle, note count, and match count, and tap **Load Backup** to restore data.
+   - **Overwrite vs. Duplicate Conflict Prompt**: Whenever a selected backup contains entries that conflict with current guests, `BackupConflictResolutionDialog` lets the user choose **Overwrite Entries** (replaces matching guests, vehicles, notes, and matches with the backup) or **Duplicate Entries** (keeps existing entries and imports conflicting backup guests as separate `(Copy)` entries).
 
 ---
 

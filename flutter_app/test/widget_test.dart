@@ -11,6 +11,7 @@ import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
 import 'package:preston_guest_scout/widgets/calendar_events_dialog.dart';
 import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
+import 'package:preston_guest_scout/widgets/settings_and_chromebook_dialog.dart';
 
 void main() {
   test('GuestProfile targetVehicleLabel formats year range, make, model, and trim', () {
@@ -1291,8 +1292,234 @@ void main() {
         .setMockMethodCallHandler(calChannel, null);
     LocalScoutEngine.resetForTest();
   });
+
+  testWidgets(
+      'LocalScoutEngine retains strictly the last 5 backups and supports Overwrite vs Duplicate conflict resolution',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = '{"guests":[],"matches":[],"notifications":[],"backups":[]}';
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final mockInv = <Map<String, dynamic>>[
+      {
+        'vin': '1FT8W2BA0TED90001',
+        'title': '2026 Ford F-250 XL SuperCab 4WD',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-250',
+        'trim': 'XL',
+        'condition': 'New',
+        'price': 54990.0,
+        'location': 'Preston Ford of Hurlock',
+        'mileage': 8,
+        'drivetrain': '4WD',
+        'highlights': ['Tow Hitch'],
+      },
+    ];
+
+    final createdA = await LocalScoutEngine.createGuest(
+      name: 'Taylor Morgan',
+      phone: '302-555-0188',
+      make: 'Ford',
+      model: 'F-250',
+      maxPrice: 60000,
+      mockCandidatesOverride: mockInv,
+    );
+    await LocalScoutEngine.addGuestNote(
+      guestId: createdA.guest.id,
+      text: 'Original note from backup #1',
+    );
+
+    final createdB = await LocalScoutEngine.createGuest(
+      name: 'Casey Rivera',
+      make: 'Ford',
+      model: 'F-250',
+      maxPrice: 60000,
+      mockCandidatesOverride: mockInv,
+    );
+
+    // Create 6 manual backups to verify strict cap of 5 newest backups
+    for (var i = 1; i <= 6; i++) {
+      await LocalScoutEngine.createManualBackup(label: 'Checkpoint #$i');
+    }
+
+    final backups = await LocalScoutEngine.getBackups();
+    expect(backups.length, 5);
+    expect(backups.first.label, 'Checkpoint #6');
+    expect(backups.last.label, 'Checkpoint #2');
+
+    final checkpointId = backups.first.id;
+
+    // Modify Taylor Morgan's notes AND delete Casey Rivera
+    await LocalScoutEngine.addGuestNote(
+      guestId: createdA.guest.id,
+      text: 'Edited note after backup',
+    );
+    await LocalScoutEngine.deleteGuest(createdB.guest.id);
+
+    // Inspect conflicts for Checkpoint #6: Taylor Morgan conflicts (and differs), Casey Rivera is non-conflicting
+    final conflictPreview =
+        await LocalScoutEngine.inspectBackupConflicts(checkpointId);
+    expect(conflictPreview.hasConflicts, isTrue);
+    expect(conflictPreview.conflictingGuestNames, contains('Taylor Morgan'));
+    expect(conflictPreview.modifiedConflictNames, contains('Taylor Morgan'));
+    expect(conflictPreview.nonConflictingGuestNames, contains('Casey Rivera'));
+
+    // 1. Restore with OVERWRITE: Taylor Morgan reverts to 1 note ("Original note from backup #1"), Casey Rivera is restored
+    final overwriteRes = await LocalScoutEngine.restoreBackup(
+      checkpointId,
+      resolution: BackupConflictResolution.overwrite,
+    );
+    expect(overwriteRes.overwrittenGuests, 1);
+    expect(overwriteRes.restoredGuests, 1);
+    expect(overwriteRes.duplicatedGuests, 0);
+
+    final afterOverwrite = await LocalScoutEngine.getAllGuests();
+    expect(afterOverwrite.length, 2);
+    final taylorAfterOverwrite =
+        afterOverwrite.firstWhere((g) => g.name == 'Taylor Morgan');
+    expect(taylorAfterOverwrite.clientNotes.length, 1);
+    expect(
+      taylorAfterOverwrite.latestClientNote?.text,
+      'Original note from backup #1',
+    );
+
+    // 2. Restore Checkpoint #6 again with DUPLICATE: both Taylor Morgan and Casey Rivera now conflict -> creates "(Copy)" entries!
+    final duplicateRes = await LocalScoutEngine.restoreBackup(
+      checkpointId,
+      resolution: BackupConflictResolution.duplicate,
+    );
+    expect(duplicateRes.duplicatedGuests, 2);
+    expect(duplicateRes.overwrittenGuests, 0);
+
+    final afterDuplicate = await LocalScoutEngine.getAllGuests();
+    expect(afterDuplicate.length, 4);
+    expect(
+      afterDuplicate.map((g) => g.name),
+      containsAll([
+        'Taylor Morgan',
+        'Taylor Morgan (Copy)',
+        'Casey Rivera',
+        'Casey Rivera (Copy)',
+      ]),
+    );
+    final taylorCopy =
+        afterDuplicate.firstWhere((g) => g.name == 'Taylor Morgan (Copy)');
+    expect(taylorCopy.matchCount, 1);
+    expect(taylorCopy.clientNotes.length, 1);
+
+    await tester.pump(const Duration(seconds: 1));
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    LocalScoutEngine.resetForTest();
+  });
+
+  testWidgets(
+      'SettingsAndChromebookDialog displays last 5 backups, expands backup details, and prompts Overwrite or Duplicate on conflict',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = '{"guests":[],"matches":[],"notifications":[],"backups":[]}';
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    await LocalScoutEngine.createGuest(
+      name: 'Morgan Steele',
+      make: 'Ford',
+      model: 'Bronco',
+      maxPrice: 50000,
+      mockCandidatesOverride: [
+        {
+          'vin': '1FMDE5BH0SLA55555',
+          'title': '2026 Ford Bronco Big Bend 4WD',
+          'year': 2026,
+          'make': 'Ford',
+          'model': 'Bronco',
+          'trim': 'Big Bend',
+          'condition': 'New',
+          'price': 43990.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'mileage': 6,
+          'drivetrain': '4WD',
+          'highlights': ['4WD'],
+        },
+      ],
+    );
+    await LocalScoutEngine.createManualBackup(label: 'Morning Backup');
+
+    int onSavedCalls = 0;
+    await tester.binding.setSurfaceSize(const Size(1024, 900));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SettingsAndChromebookDialog(
+            onSaved: () => onSavedCalls++,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Last 5 Backups'), findsOneWidget);
+    expect(find.text('Morning Backup'), findsOneWidget);
+
+    // Expand backup details via "View Backup"
+    await tester.tap(find.text('View Backup').first);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Morgan Steele —'), findsOneWidget);
+
+    // Tap "Load Backup" -> conflicts with existing Morgan Steele -> shows Overwrite / Duplicate dialog
+    await tester.tap(find.text('Load Backup').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Conflicting Data Detected'), findsOneWidget);
+    expect(find.text('Overwrite Entries'), findsOneWidget);
+    expect(find.text('Duplicate Entries'), findsOneWidget);
+
+    // Choose "Duplicate Entries"
+    await tester.tap(find.text('Duplicate Entries'));
+    await tester.pumpAndSettle();
+
+    expect(onSavedCalls, 1);
+    final guests = await LocalScoutEngine.getAllGuests();
+    expect(guests.length, 2);
+    expect(
+      guests.map((g) => g.name),
+      containsAll(['Morgan Steele', 'Morgan Steele (Copy)']),
+    );
+
+    await tester.pump(const Duration(seconds: 1));
+    await tester.binding.setSurfaceSize(null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    LocalScoutEngine.resetForTest();
+  });
 }
-
-
-
-

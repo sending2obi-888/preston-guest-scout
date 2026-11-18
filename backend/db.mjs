@@ -134,11 +134,23 @@ db.exec(`
     deleted_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS backups (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    device_label TEXT DEFAULT '',
+    signature TEXT DEFAULT '',
+    guest_count INTEGER DEFAULT 0,
+    match_count INTEGER DEFAULT 0,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_matches_guest_id ON matches(guest_id, match_score DESC, found_at DESC);
   CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON match_notifications(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_calendar_events_start_at ON calendar_call_events(start_at DESC);
   CREATE INDEX IF NOT EXISTS idx_runs_slot_key ON search_runs(slot_key);
+  CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at DESC);
 `);
 
 // Safe migrations for existing databases

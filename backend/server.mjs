@@ -27,6 +27,13 @@ import {
   startTwiceDailyScheduler,
 } from './scheduler.mjs';
 import { getCalendarStatus } from './calendar_sync.mjs';
+import {
+  ensureInitialServerBackup,
+  listServerBackups,
+  recordServerBackup,
+  inspectServerBackupConflicts,
+  restoreServerBackup,
+} from './backups.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_BUILD_DIR = path.resolve(__dirname, '../flutter_app/build/web');
@@ -316,6 +323,63 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // Backups endpoints (Last 5 rolling backups + conflict detection + Overwrite/Duplicate restore)
+    if (pathname === '/api/backups' && req.method === 'GET') {
+      const backups = listServerBackups();
+      return sendJson(res, 200, { ok: true, backups });
+    }
+
+    if (pathname === '/api/backups' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const created = recordServerBackup({
+        label: String(body.label || 'Manual Backup').trim() || 'Manual Backup',
+        deviceLabel: String(body.deviceLabel || 'Preston Guest Scout Web'),
+        force: true,
+      });
+      scheduleAutoSaveToGoogleDrive(bearerToken);
+      return sendJson(res, 201, {
+        ok: true,
+        backup: created,
+        backups: listServerBackups(),
+      });
+    }
+
+    const backupRouteMatch = pathname.match(/^\/api\/backups\/([^/]+)\/([^/]+)$/);
+    if (backupRouteMatch) {
+      const backupId = decodeURIComponent(backupRouteMatch[1]);
+      const action = backupRouteMatch[2];
+
+      if (action === 'check-conflicts' && req.method === 'GET') {
+        const preview = inspectServerBackupConflicts(backupId);
+        return sendJson(res, 200, { ok: true, ...preview });
+      }
+
+      if (action === 'restore' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        try {
+          const result = restoreServerBackup(backupId, {
+            resolution: body.resolution || null,
+          });
+          scheduleAutoSaveToGoogleDrive(bearerToken);
+          return sendJson(res, 200, {
+            ok: true,
+            result,
+            backups: listServerBackups(),
+          });
+        } catch (err) {
+          if (err.code === 'CONFLICT_RESOLUTION_REQUIRED') {
+            const preview = inspectServerBackupConflicts(backupId);
+            return sendJson(res, 409, {
+              error: err.message,
+              code: err.code,
+              ...preview,
+            });
+          }
+          throw err;
+        }
+      }
+    }
+
     // Launcher Widget endpoint: strictly returns ONLY the last 10 guests input
     if (pathname === '/api/widget/recent-guests' && req.method === 'GET') {
       const rows = db
@@ -415,6 +479,9 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      recordServerBackup({
+        label: `Auto-Backup • Added ${name}`,
+      });
       scheduleAutoSaveToGoogleDrive(bearerToken);
 
       const created = mapGuestRow(
@@ -513,6 +580,12 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!subResource && req.method === 'DELETE') {
+        const preRow = db.prepare('SELECT name FROM guests WHERE id = ?').get(guestId);
+        if (preRow?.name) {
+          recordServerBackup({
+            label: `Auto-Backup • Before Deleting ${preRow.name}`,
+          });
+        }
         const deletedIso = new Date().toISOString();
         db.prepare(
           `INSERT INTO deleted_guests (id, deleted_at) VALUES (?, ?)
@@ -636,6 +709,9 @@ const server = http.createServer(async (req, res) => {
           );
         }
 
+        recordServerBackup({
+          label: `Auto-Backup • Added Vehicle (${currentGuest.name})`,
+        });
         scheduleAutoSaveToGoogleDrive(bearerToken);
 
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -704,6 +780,9 @@ const server = http.createServer(async (req, res) => {
           guestId
         );
 
+        recordServerBackup({
+          label: `Auto-Backup • Removed Vehicle (${currentGuest.name})`,
+        });
         scheduleAutoSaveToGoogleDrive(bearerToken);
 
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -744,6 +823,9 @@ const server = http.createServer(async (req, res) => {
           'UPDATE guests SET client_notes_json = ?, updated_at = ? WHERE id = ?'
         ).run(JSON.stringify(updatedNotes), nowIso, guestId);
 
+        recordServerBackup({
+          label: `Auto-Backup • Added Note (${currentGuest.name})`,
+        });
         scheduleAutoSaveToGoogleDrive(bearerToken);
 
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -777,6 +859,9 @@ const server = http.createServer(async (req, res) => {
           guestId
         );
 
+        recordServerBackup({
+          label: `Auto-Backup • Removed Note (${currentGuest.name})`,
+        });
         scheduleAutoSaveToGoogleDrive(bearerToken);
 
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -879,6 +964,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 await seedInitialGuestsIfEmpty();
+ensureInitialServerBackup();
 queryAndSyncWithGoogleDrive({
   pushAfterMerge: true,
   deviceLabel: 'Preston Guest Scout Server Startup',

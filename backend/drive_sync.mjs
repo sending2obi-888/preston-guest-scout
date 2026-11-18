@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { db, getSetting, setSetting, mapGuestRow, mapMatchRow } from './db.mjs';
+import {
+  exportServerBackupsForDrive,
+  mergeRemoteBackupsIntoLocal,
+} from './backups.mjs';
 
 const execFileAsync = promisify(execFile);
 export const DRIVE_SYNC_FILENAME = 'preston_guest_scout_cloud_sync.json';
@@ -89,6 +93,7 @@ export function exportLocalSnapshot(deviceLabel = 'Preston Guest Scout Server') 
     guests,
     deletedGuestIds,
     matches,
+    backups: exportServerBackupsForDrive(),
     settings: {
       geminiModel: getSetting('gemini_model') || 'gemini-2.5-flash',
       timezone: getSetting('timezone') || 'America/New_York',
@@ -453,6 +458,12 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       db.exec('ROLLBACK');
     } catch {}
     throw err;
+  }
+
+  if (Array.isArray(remote.backups) && remote.backups.length > 0) {
+    try {
+      mergeRemoteBackupsIntoLocal(remote.backups);
+    } catch {}
   }
 
   const totalGuests = db.prepare('SELECT COUNT(*) AS c FROM guests').get()?.c || 0;
