@@ -159,6 +159,37 @@ class LocalScoutEngine {
     await _syncWidget();
   }
 
+  /// Reloads the persisted on-device store when the Android app resumes from background
+  /// so matches and notifications discovered by NativeBackgroundMatchScanner appear immediately.
+  static Future<void> reloadFromDiskOnResume() async {
+    if (kIsWeb || !_initialized || _isRunningBatch) return;
+    try {
+      final raw = await _channel.invokeMethod<String>('readLocalStore');
+      if (raw == null || raw.trim().isEmpty) return;
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      _guests = (decoded['guests'] as List<dynamic>? ?? [])
+          .map((e) => _normalizeGuestMap(Map<String, dynamic>.from(e as Map)))
+          .toList();
+      _matches = (decoded['matches'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      _notifications = (decoded['notifications'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      _calendarEvents = (decoded['calendarEvents'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      MatchNotificationService.instance.hydratePersistedNotifications(
+        _notifications.map(MatchAlertNotification.fromJson).toList(),
+      );
+      CalendarService.instance.hydratePersistedState(
+        events: _calendarEvents.map(CalendarCallEvent.fromJson).toList(),
+        permissionGranted: _settings['calendarPermissionGranted'] == true,
+        promptDismissed: _settings['calendarPromptDismissed'] == true,
+      );
+    } catch (_) {}
+  }
+
   /// Normalizes structured vehicle criteria AND extracts fallback specs (Make, Max Price
   /// such as "$60K" or shorthand "60" -> 60000, Condition, Drivetrain) from free-form notes.
   static Map<String, dynamic> _normalizeTargetMap(
@@ -1270,8 +1301,10 @@ class LocalScoutEngine {
             id: 'notif-${DateTime.now().microsecondsSinceEpoch}-$seq-$vin',
             guestId: guestId,
             guestName: guest.name,
+            guestPhone: guest.phone,
             vin: vin,
             vehicleModel: modelLabel,
+            vehicleTitle: titleStr,
             message: message,
             location:
                 v['location']?.toString() ?? 'Preston Automotive Group',
@@ -2164,15 +2197,108 @@ class LocalScoutEngine {
 
   /// Conflict-free multi-device merge of remote Google Drive snapshot into local store.
   /// Preserves guests created/updated on any device, applies delete tombstones across
-  /// devices, and merges vehicle matches by (guestId, vin) keeping earliest foundAt.
+  /// devices, merges vehicle matches by (guestId, vin) keeping earliest foundAt, and
+  /// dispatches Android notifications for brand-new matches found after a guest's initial search.
   static Future<({int totalGuests, int totalMatches, bool localChanged})>
       mergeCloudSnapshot(Map<String, dynamic> remote) async {
     await ensureInitialized();
+
+    // Snapshot pre-merge seen VINs for guests who ALREADY completed their initial search on this device
+    final preMergeSeenByGuest = <String, Set<String>>{};
+    for (final g in _guests) {
+      final gid = g['id']?.toString() ?? '';
+      if (gid.isEmpty) continue;
+      final initialDone = (g['initialSearchCompleted'] == true) ||
+          ((g['lastSearchedAt']?.toString() ?? '').trim().isNotEmpty);
+      if (!initialDone) continue;
+
+      final seen = <String>{
+        ...((g['seenMatchVins'] as List<dynamic>?)
+                ?.map((e) => e.toString().trim())
+                .where((s) => s.isNotEmpty) ??
+            const <String>[]),
+      };
+      for (final m in _matches) {
+        if (m['guestId']?.toString() == gid) {
+          final v = (m['vin']?.toString() ?? '').trim();
+          if (v.isNotEmpty) seen.add(v);
+        }
+      }
+      preMergeSeenByGuest[gid] = seen;
+    }
+
+    final existingNotifKeys = <String>{
+      for (final n in _notifications)
+        '${n['guestId']?.toString() ?? ''}::${n['vin']?.toString() ?? ''}',
+    };
+
     final res = _mergeCloudSnapshotSync(remote);
-    if (res.localChanged) {
+
+    final cloudAlerts = <MatchAlertNotification>[];
+    if (preMergeSeenByGuest.isNotEmpty) {
+      final guestById = <String, Map<String, dynamic>>{
+        for (final g in _guests) (g['id']?.toString() ?? ''): g,
+      };
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      int seq = 0;
+
+      for (final m in _matches) {
+        final gid = m['guestId']?.toString() ?? '';
+        final vin = (m['vin']?.toString() ?? '').trim();
+        if (gid.isEmpty || vin.isEmpty) continue;
+
+        final prevSeen = preMergeSeenByGuest[gid];
+        if (prevSeen == null || prevSeen.contains(vin)) continue;
+        prevSeen.add(vin);
+
+        final notifKey = '$gid::$vin';
+        if (!existingNotifKeys.add(notifKey)) continue;
+
+        final gMap = guestById[gid];
+        final guestName = (gMap?['name']?.toString() ?? 'Guest').trim();
+        final guestPhone = (gMap?['phone']?.toString() ?? '').trim();
+        final makeStr = m['make']?.toString() ?? '';
+        final modelStr = m['model']?.toString() ?? '';
+        final titleStr = m['title']?.toString() ?? '';
+        final modelLabel = MatchAlertNotification.extractVehicleModelLabel(
+          make: makeStr,
+          model: modelStr,
+          title: titleStr,
+        );
+        final message = MatchAlertNotification.formatMessage(
+          clientName: guestName,
+          make: makeStr,
+          model: modelStr,
+          title: titleStr,
+        );
+        seq++;
+        final alert = MatchAlertNotification(
+          id: 'notif-cloud-${DateTime.now().microsecondsSinceEpoch}-$seq-$vin',
+          guestId: gid,
+          guestName: guestName,
+          guestPhone: guestPhone,
+          vin: vin,
+          vehicleModel: modelLabel,
+          vehicleTitle: titleStr,
+          message: message,
+          location: m['location']?.toString() ?? 'Preston Automotive Group',
+          price: (m['price'] as num?)?.toDouble(),
+          createdAt: m['foundAt']?.toString() ?? nowIso,
+          read: false,
+        );
+        _notifications.insert(0, alert.toJson());
+        cloudAlerts.add(alert);
+      }
+    }
+
+    if (res.localChanged || cloudAlerts.isNotEmpty) {
       await _persist();
     } else {
       await _syncWidget();
+    }
+    if (cloudAlerts.isNotEmpty) {
+      await MatchNotificationService.instance
+          .dispatchNewNotifications(cloudAlerts);
     }
     return res;
   }

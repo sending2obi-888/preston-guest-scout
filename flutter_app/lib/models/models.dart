@@ -564,8 +564,10 @@ class MatchAlertNotification {
   final String id;
   final String guestId;
   final String guestName;
+  final String guestPhone;
   final String vin;
   final String vehicleModel;
+  final String vehicleTitle;
   final String message;
   final String location;
   final double? price;
@@ -576,8 +578,10 @@ class MatchAlertNotification {
     required this.id,
     required this.guestId,
     required this.guestName,
+    this.guestPhone = '',
     required this.vin,
     required this.vehicleModel,
+    this.vehicleTitle = '',
     required this.message,
     this.location = '',
     this.price,
@@ -648,8 +652,10 @@ class MatchAlertNotification {
       id: json['id']?.toString() ?? '',
       guestId: json['guestId']?.toString() ?? '',
       guestName: gName,
+      guestPhone: json['guestPhone']?.toString() ?? '',
       vin: json['vin']?.toString() ?? '',
       vehicleModel: vModel,
+      vehicleTitle: json['vehicleTitle']?.toString() ?? '',
       message: rawMsg.isNotEmpty
           ? rawMsg
           : '$gName - Match Found - $vModel',
@@ -664,8 +670,10 @@ class MatchAlertNotification {
         'id': id,
         'guestId': guestId,
         'guestName': guestName,
+        'guestPhone': guestPhone,
         'vin': vin,
         'vehicleModel': vehicleModel,
+        'vehicleTitle': vehicleTitle,
         'message': message,
         'location': location,
         'price': price,
@@ -678,8 +686,10 @@ class MatchAlertNotification {
       id: id,
       guestId: guestId,
       guestName: guestName,
+      guestPhone: guestPhone,
       vin: vin,
       vehicleModel: vehicleModel,
+      vehicleTitle: vehicleTitle,
       message: message,
       location: location,
       price: price,

@@ -9,6 +9,7 @@ import 'screens/match_detail_screen.dart';
 import 'services/api_service.dart';
 import 'services/calendar_service.dart';
 import 'services/google_drive_sync_service.dart';
+import 'services/local_engine.dart';
 import 'services/match_notification_service.dart';
 import 'services/widget_sync_service.dart';
 import 'theme/app_theme.dart';
@@ -241,6 +242,10 @@ class _MainShellScreenState extends State<MainShellScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (!kIsWeb) {
+        unawaited(LocalScoutEngine.reloadFromDiskOnResume());
+      }
+      unawaited(MatchNotificationService.instance.refreshPermissionStatus());
       _queryDriveAndRefresh();
     }
   }

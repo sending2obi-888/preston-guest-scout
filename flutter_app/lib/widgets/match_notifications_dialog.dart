@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import 'package:material_ui/material_ui.dart';
 import '../models/models.dart';
@@ -27,13 +28,14 @@ class MatchNotificationsDialog extends StatelessWidget {
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 640),
+        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 660),
         child: ListenableBuilder(
           listenable: MatchNotificationService.instance,
           builder: (context, _) {
             final svc = MatchNotificationService.instance;
             final alerts = svc.notifications;
             final unread = svc.unreadCount;
+            final permGranted = svc.permissionGranted;
 
             return Column(
               mainAxisSize: MainAxisSize.min,
@@ -68,7 +70,7 @@ class MatchNotificationsDialog extends StatelessWidget {
                                   ?.copyWith(fontWeight: FontWeight.w700),
                             ),
                             Text(
-                              'Alerts sent after initial search when new matches arrive',
+                              'Full Android & OS alerts with guest name + vehicle model after initial search',
                               style: Theme.of(context)
                                   .textTheme
                                   .bodySmall
@@ -88,47 +90,118 @@ class MatchNotificationsDialog extends StatelessWidget {
                 Divider(height: 1, color: scheme.outlineVariant),
                 Padding(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      TextButton.icon(
-                        onPressed: () async {
-                          final ok = await svc.requestPermission();
-                          if (!context.mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                ok
-                                    ? 'System notifications are enabled.'
-                                    : 'Notification permission requested — check device/browser notification settings if blocked.',
-                              ),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.tune_rounded, size: 17),
-                        label: const Text('Enable OS Alerts'),
-                      ),
                       Row(
-                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          if (unread > 0)
-                            TextButton(
-                              onPressed: () {
-                                ApiService.markAllNotificationsRead();
-                              },
-                              child: const Text('Mark All Read'),
+                          Icon(
+                            permGranted
+                                ? Icons.verified_rounded
+                                : Icons.notifications_paused_rounded,
+                            size: 18,
+                            color: permGranted
+                                ? Colors.green.shade700
+                                : scheme.error,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              permGranted
+                                  ? 'Android & System Notifications Active (Heads-Up + Sound)'
+                                  : 'System Notifications Disabled — allow notifications to receive match alerts',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                    color: permGranted
+                                        ? scheme.onSurface
+                                        : scheme.error,
+                                  ),
                             ),
-                          if (alerts.isNotEmpty)
-                            TextButton(
-                              onPressed: () {
-                                ApiService.clearNotifications();
-                              },
-                              child: const Text('Clear'),
-                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              if (!permGranted)
+                                FilledButton.tonalIcon(
+                                  onPressed: () async {
+                                    final ok = await svc.requestPermission();
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                          ok
+                                              ? 'Android match notifications enabled!'
+                                              : 'Notification permission blocked — tap "Android Settings" to allow.',
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(
+                                      Icons.notifications_active_rounded,
+                                      size: 17),
+                                  label: const Text('Enable OS Alerts'),
+                                ),
+                              if (!kIsWeb)
+                                OutlinedButton.icon(
+                                  onPressed: () {
+                                    svc.openNotificationSettings();
+                                  },
+                                  icon: const Icon(Icons.tune_rounded, size: 16),
+                                  label: const Text('Android Settings'),
+                                ),
+                              TextButton.icon(
+                                onPressed: () async {
+                                  final sent = await svc.sendTestNotification();
+                                  if (!context.mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        sent
+                                            ? 'Sent test Android notification: "Sample Guest - Match Found - Ford Bronco"'
+                                            : 'Could not post notification — enable notifications in Android Settings.',
+                                      ),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.send_to_mobile_rounded,
+                                    size: 16),
+                                label: const Text('Test Alert'),
+                              ),
+                            ],
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (unread > 0)
+                                TextButton(
+                                  onPressed: () {
+                                    ApiService.markAllNotificationsRead();
+                                  },
+                                  child: const Text('Mark All Read'),
+                                ),
+                              if (alerts.isNotEmpty)
+                                TextButton(
+                                  onPressed: () {
+                                    ApiService.clearNotifications();
+                                  },
+                                  child: const Text('Clear'),
+                                ),
+                            ],
+                          ),
                         ],
                       ),
                     ],
@@ -158,7 +231,7 @@ class MatchNotificationsDialog extends StatelessWidget {
                               ),
                               const SizedBox(height: 6),
                               Text(
-                                'Initial intake searches are silent. Whenever a new matching vehicle arrives on a subsequent 7:30 AM, 2:00 PM, or manual search, you will receive a notification saying:\n"Client Name - Match Found - Model"',
+                                'Initial intake searches are silent. Whenever a new matching vehicle is found for a guest after their first initial search (during 7:30 AM, 2:00 PM, background, or manual scans), a full Android notification is posted with the guest\'s name and vehicle model:\n"Guest Name - Match Found - Vehicle Model"',
                                 textAlign: TextAlign.center,
                                 style: Theme.of(context)
                                     .textTheme
@@ -176,11 +249,17 @@ class MatchNotificationsDialog extends StatelessWidget {
                             height: 1,
                             indent: 16,
                             endIndent: 16,
-                            color: scheme.outlineVariant.withValues(alpha: 0.5),
+                            color:
+                                scheme.outlineVariant.withValues(alpha: 0.5),
                           ),
                           itemBuilder: (context, index) {
                             final MatchAlertNotification item = alerts[index];
                             final subtitleParts = <String>[];
+                            if (item.guestName.trim().isNotEmpty &&
+                                item.vehicleModel.trim().isNotEmpty) {
+                              subtitleParts.add(
+                                  '${item.guestName.trim()} • ${item.vehicleModel.trim()}');
+                            }
                             if (item.price != null && item.price! > 0) {
                               subtitleParts.add(priceFmt.format(item.price));
                             }

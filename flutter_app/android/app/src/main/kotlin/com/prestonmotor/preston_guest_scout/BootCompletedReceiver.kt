@@ -5,8 +5,9 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Automatically boots Preston Guest Scout at startup on the Googlebook (Chromebook ARCVM) / Android
- * and registers the twice-daily 7:30 AM & 2:00 PM alarms.
+ * Automatically arms twice-daily 7:30 AM & 2:00 PM alarms + periodic background JobScheduler
+ * scans on Android & Googlebook startup so post-initial-search vehicle match notifications work
+ * reliably after device reboot.
  */
 class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -16,12 +17,19 @@ class BootCompletedReceiver : BroadcastReceiver() {
             action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
             action == Intent.ACTION_MY_PACKAGE_REPLACED
         ) {
+            MatchNotificationHelper.ensureChannelCreated(context)
             DailySearchAlarmReceiver.scheduleTwiceDailyAlarms(context)
+            BackgroundMatchScanJobService.schedulePeriodicBackgroundScan(context)
             PrestonGuestWidgetProvider.updateAllWidgets(context)
-            val launchIntent = Intent(context, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            try {
+                val launchIntent = Intent(context, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                context.startActivity(launchIntent)
+            } catch (_: Exception) {
+                // Expected on Android 10+ phones where background activity launches on boot are restricted;
+                // alarms and JobScheduler background scans remain armed.
             }
-            context.startActivity(launchIntent)
         }
     }
 }

@@ -14,12 +14,15 @@ class MatchNotificationService extends ChangeNotifier {
       MethodChannel('com.prestonmotor.scout/notifications');
 
   bool _initialized = false;
+  bool _permissionGranted = false;
   List<MatchAlertNotification> _notifications = [];
   final Set<String> _deliveredIds = <String>{};
 
   /// Optional callback invoked when a brand-new post-initial-search match alert arrives
   /// while the app is open so MainShellScreen can display an immediate banner.
   void Function(MatchAlertNotification alert)? onForegroundBanner;
+
+  bool get permissionGranted => _permissionGranted;
 
   List<MatchAlertNotification> get notifications =>
       List<MatchAlertNotification>.unmodifiable(_notifications);
@@ -35,26 +38,127 @@ class MatchNotificationService extends ChangeNotifier {
     if (kIsWeb) {
       registerBrowserNotificationClickListener(onTapNotification);
       try {
-        await requestBrowserNotificationPermission();
+        final perm = await requestBrowserNotificationPermission();
+        _permissionGranted = perm == 'granted';
       } catch (_) {}
+      notifyListeners();
       return;
     }
 
+    _channel.setMethodCallHandler(_handleNativeMethodCall);
+
     try {
-      await _channel.invokeMethod<bool>('requestNotificationPermission');
+      final alreadyEnabled =
+          await _channel.invokeMethod<bool>('areNotificationsEnabled') ?? false;
+      if (alreadyEnabled) {
+        _permissionGranted = true;
+      } else {
+        final granted =
+            await _channel.invokeMethod<bool>('requestNotificationPermission') ??
+                false;
+        _permissionGranted = granted;
+      }
     } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<dynamic> _handleNativeMethodCall(MethodCall call) async {
+    if (call.method == 'onNotificationPermissionChanged') {
+      final enabled = call.arguments == true;
+      if (_permissionGranted != enabled) {
+        _permissionGranted = enabled;
+        notifyListeners();
+      }
+    }
+    return null;
+  }
+
+  /// Refreshes current Android / browser notification permission state.
+  Future<bool> refreshPermissionStatus() async {
+    if (kIsWeb) {
+      return _permissionGranted;
+    }
+    try {
+      final enabled =
+          await _channel.invokeMethod<bool>('areNotificationsEnabled') ?? false;
+      if (_permissionGranted != enabled) {
+        _permissionGranted = enabled;
+        notifyListeners();
+      }
+      return enabled;
+    } catch (_) {
+      return _permissionGranted;
+    }
   }
 
   /// Requests OS notification permission explicitly (e.g., from the Notification Center dialog).
   Future<bool> requestPermission() async {
     if (kIsWeb) {
       final perm = await requestBrowserNotificationPermission();
-      return perm == 'granted';
+      _permissionGranted = perm == 'granted';
+      notifyListeners();
+      return _permissionGranted;
     }
     try {
       final granted =
-          await _channel.invokeMethod<bool>('requestNotificationPermission');
-      return granted ?? false;
+          await _channel.invokeMethod<bool>('requestNotificationPermission') ??
+              false;
+      _permissionGranted = granted;
+      notifyListeners();
+      return granted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens Android's system App Notification Settings screen for Preston Motor Guest Scout.
+  Future<bool> openNotificationSettings() async {
+    if (kIsWeb) return false;
+    try {
+      final opened =
+          await _channel.invokeMethod<bool>('openNotificationSettings') ??
+              false;
+      return opened;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Posts a live test notification so the user can verify full Android heads-up alerts
+  /// (with guest name & vehicle model) immediately on their device.
+  Future<bool> sendTestNotification({
+    String guestName = 'Sample Guest',
+    String vehicleModel = 'Ford Bronco',
+  }) async {
+    if (!_permissionGranted) {
+      await requestPermission();
+    }
+    final title = '$guestName - Match Found - $vehicleModel';
+    const body =
+        'New Ford Bronco found for Sample Guest • \$45,990 • Boulevard Ford of Millsboro';
+    if (kIsWeb) {
+      showBrowserMatchNotification(
+        title: title,
+        body: body,
+        tag: 'test-match-alert',
+        guestId: '',
+      );
+      return true;
+    }
+    try {
+      final ok = await _channel.invokeMethod<bool>('showMatchNotification', {
+        'notifId': DateTime.now().millisecondsSinceEpoch & 0x7fffffff,
+        'guestId': '',
+        'guestName': guestName,
+        'guestPhone': '',
+        'vehicleModel': vehicleModel,
+        'vehicleTitle': '2026 $vehicleModel Big Bend 4WD',
+        'price': 45990.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'title': title,
+        'body': body,
+      });
+      return ok ?? false;
     } catch (_) {
       return false;
     }
@@ -76,7 +180,7 @@ class MatchNotificationService extends ChangeNotifier {
   }
 
   /// Synchronizes notifications from the Node.js backend (Web / API mode) and dispatches
-  /// browser OS notifications for any newly arrived unread match alerts.
+  /// OS notifications for any newly arrived unread match alerts.
   Future<void> syncFromServerList(
     List<MatchAlertNotification> serverAlerts,
   ) async {
@@ -108,8 +212,8 @@ class MatchNotificationService extends ChangeNotifier {
     }
   }
 
-  /// Dispatches newly discovered post-initial-search match alerts to the OS notification bar
-  /// (Android/Googlebook NotificationManager or Web Notification API) + in-app center.
+  /// Dispatches newly discovered post-initial-search match alerts to the Android
+  /// NotificationManager (or Web Notification API) + in-app notification center.
   Future<void> dispatchNewNotifications(
     List<MatchAlertNotification> alerts,
   ) async {
@@ -160,6 +264,10 @@ class MatchNotificationService extends ChangeNotifier {
 
   String _formatSubtitle(MatchAlertNotification alert) {
     final parts = <String>[];
+    if (alert.guestName.trim().isNotEmpty &&
+        alert.vehicleModel.trim().isNotEmpty) {
+      parts.add('New ${alert.vehicleModel.trim()} found for ${alert.guestName.trim()}');
+    }
     if (alert.price != null && alert.price! > 0) {
       final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 0);
       parts.add(fmt.format(alert.price));
@@ -170,7 +278,7 @@ class MatchNotificationService extends ChangeNotifier {
     if (parts.isEmpty) {
       return '${alert.message} — Tap to view vehicle match';
     }
-    return '${parts.join(' • ')} — Tap to view vehicle match';
+    return parts.join(' • ');
   }
 
   Future<void> _postSystemNotification(MatchAlertNotification alert) async {
@@ -189,17 +297,28 @@ class MatchNotificationService extends ChangeNotifier {
 
     final notifId = alert.id.hashCode & 0x7fffffff;
     try {
-      await _channel.invokeMethod<bool>('showMatchNotification', {
+      final posted = await _channel.invokeMethod<bool>('showMatchNotification', {
         'notifId': notifId,
         'guestId': alert.guestId,
+        'guestName': alert.guestName,
+        'guestPhone': alert.guestPhone,
+        'vehicleModel': alert.vehicleModel,
+        'vehicleTitle': alert.vehicleTitle,
+        'price': alert.price,
+        'location': alert.location,
         'title': title,
         'body': body,
       });
+      if (posted == true && !_permissionGranted) {
+        _permissionGranted = true;
+        notifyListeners();
+      }
     } catch (_) {}
   }
 
   void resetForTest() {
     _initialized = false;
+    _permissionGranted = false;
     _notifications = [];
     _deliveredIds.clear();
     onForegroundBanner = null;

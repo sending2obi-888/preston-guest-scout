@@ -719,6 +719,7 @@ void main() {
     // 1. Initial Search when creating a new client: finds 1 match, MUST send 0 notifications!
     final created = await LocalScoutEngine.createGuest(
       name: 'Alex Carter',
+      phone: '302-555-0142',
       make: 'Ford',
       model: 'Mustang',
       maxPrice: 55000,
@@ -757,7 +758,7 @@ void main() {
     expect(dispatchedOsNotifications, isEmpty);
 
     // 3. Subsequent search (e.g. 7:30 AM / 2:00 PM / Search Now) finds a NEW Mustang VIN:
-    // MUST send exactly 1 OS notification saying "Alex Carter - Match Found - Ford Mustang"!
+    // MUST send a full Android notification with guest's name and model of vehicle found!
     final updatedInventory = <Map<String, dynamic>>[
       ...initialInventory,
       {
@@ -801,6 +802,18 @@ void main() {
       dispatchedOsNotifications.first['title'],
       'Alex Carter - Match Found - Ford Mustang',
     );
+    expect(dispatchedOsNotifications.first['guestName'], 'Alex Carter');
+    expect(dispatchedOsNotifications.first['guestPhone'], '302-555-0142');
+    expect(dispatchedOsNotifications.first['vehicleModel'], 'Ford Mustang');
+    expect(
+      dispatchedOsNotifications.first['vehicleTitle'],
+      '2026 Ford Mustang EcoBoost Premium',
+    );
+    expect(dispatchedOsNotifications.first['price'], 38995.0);
+    expect(
+      dispatchedOsNotifications.first['location'],
+      'Boulevard Ford of Millsboro',
+    );
     expect(
       dispatchedOsNotifications.first['guestId'],
       created.guest.id,
@@ -815,7 +828,52 @@ void main() {
     );
     expect(dispatchedOsNotifications.length, 1);
 
-    // 5. Verify MatchNotificationsDialog renders the exact notification message & navigates on tap
+    // 5. Post-initial-search Google Drive cloud sync delivering a brand-new Explorer VIN
+    // for an existing guest who already completed their initial search MUST ALSO send an Android notification!
+    await LocalScoutEngine.mergeCloudSnapshot({
+      'guests': [
+        {
+          'id': created.guest.id,
+          'name': created.guest.name,
+          'phone': created.guest.phone,
+          'createdAt': created.guest.createdAt,
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+          'initialSearchCompleted': true,
+          'seenMatchVins': [
+            '1FA6P8CF0R5100001',
+            '1FMSK8DH0RGA20002',
+            '1FA6P8CF9S5300099',
+            '1FMSK8FH2SGA99999',
+          ],
+        },
+      ],
+      'matches': [
+        {
+          'id': 'match-cloud-explorer-1',
+          'guestId': created.guest.id,
+          'vin': '1FMSK8FH2SGA99999',
+          'title': '2026 Ford Explorer ST-Line 4WD',
+          'year': 2026,
+          'make': 'Ford',
+          'model': 'Explorer',
+          'trim': 'ST-Line',
+          'condition': 'New',
+          'price': 48250.0,
+          'location': 'Preston Ford of Keller',
+          'foundAt': DateTime.now().toUtc().toIso8601String(),
+          'lastSeenAt': DateTime.now().toUtc().toIso8601String(),
+        },
+      ],
+    });
+    expect(dispatchedOsNotifications.length, 2);
+    expect(
+      dispatchedOsNotifications[1]['title'],
+      'Alex Carter - Match Found - Ford Explorer',
+    );
+    expect(dispatchedOsNotifications[1]['guestName'], 'Alex Carter');
+    expect(dispatchedOsNotifications[1]['vehicleModel'], 'Ford Explorer');
+
+    // 6. Verify MatchNotificationsDialog renders guest name + vehicle model, Test Alert button, & navigates on tap
     String? tappedGuestId;
     await tester.pumpWidget(
       MaterialApp(
@@ -832,9 +890,29 @@ void main() {
       find.text('Alex Carter - Match Found - Ford Mustang'),
       findsOneWidget,
     );
+    expect(
+      find.text('Alex Carter - Match Found - Ford Explorer'),
+      findsOneWidget,
+    );
+    expect(find.text('Android Settings'), findsOneWidget);
+    expect(find.text('Test Alert'), findsOneWidget);
+
+    await tester.tap(find.text('Test Alert'));
+    await tester.pumpAndSettle();
+    expect(dispatchedOsNotifications.length, 3);
+    expect(dispatchedOsNotifications[2]['guestName'], 'Sample Guest');
+    expect(dispatchedOsNotifications[2]['vehicleModel'], 'Ford Bronco');
+    expect(
+      dispatchedOsNotifications[2]['title'],
+      'Sample Guest - Match Found - Ford Bronco',
+    );
+
     await tester.tap(find.text('Alex Carter - Match Found - Ford Mustang'));
     await tester.pumpAndSettle();
     expect(tappedGuestId, created.guest.id);
+
+    // Drain 700ms GoogleDriveSyncService.scheduleAutoSave timer
+    await tester.pump(const Duration(seconds: 1));
 
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);

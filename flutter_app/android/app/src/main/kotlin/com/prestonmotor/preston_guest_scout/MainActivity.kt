@@ -43,7 +43,7 @@ class MainActivity : FlutterActivity() {
         const val AUTH_CHANNEL = "com.prestonmotor.scout/google_auth"
         const val NOTIF_CHANNEL = "com.prestonmotor.scout/notifications"
         const val CALENDAR_CHANNEL = "com.prestonmotor.scout/calendar"
-        const val MATCH_ALERT_CHANNEL_ID = "preston_match_alerts"
+        const val MATCH_ALERT_CHANNEL_ID = MatchNotificationHelper.MATCH_ALERT_CHANNEL_ID
         const val PREFS_NAME = "preston_scout_widget_prefs"
         const val KEY_RECENT_TEN_JSON = "recent_ten_guests_json"
         const val KEY_SIGNED_IN_EMAIL = "google_sso_selected_email"
@@ -56,8 +56,21 @@ class MainActivity : FlutterActivity() {
         private const val REQ_CHOOSE_GOOGLE_ACCOUNT = 9003
         private const val REQ_RUNTIME_PERMISSIONS = 9004
         private const val REQ_CALENDAR_PERMISSIONS = 9005
+        private const val REQ_NOTIFICATION_PERMISSIONS = 9006
         private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
         private const val DEFAULT_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+
+        @Volatile
+        private var activeForegroundInstance: MainActivity? = null
+
+        fun dispatchForegroundScheduledSearch(slotLabel: String): Boolean {
+            val inst = activeForegroundInstance ?: return false
+            val ch = inst.methodChannel ?: return false
+            inst.runOnUiThread {
+                ch.invokeMethod("runScheduledDailySearch", slotLabel)
+            }
+            return true
+        }
     }
 
     private var methodChannel: MethodChannel? = null
@@ -70,6 +83,7 @@ class MainActivity : FlutterActivity() {
 
     private var pendingSignInResult: MethodChannel.Result? = null
     private var pendingCalendarPermResult: MethodChannel.Result? = null
+    private var pendingNotifPermResult: MethodChannel.Result? = null
     private var pendingDriveScope: String = DEFAULT_DRIVE_SCOPE
     private var pendingConsentEmail: String? = null
     private var pendingConsentDisplayName: String? = null
@@ -77,32 +91,33 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ensureNotificationChannelCreated()
+        MatchNotificationHelper.ensureChannelCreated(this)
         requestStartupRuntimePermissions()
         DailySearchAlarmReceiver.scheduleTwiceDailyAlarms(this)
+        BackgroundMatchScanJobService.schedulePeriodicBackgroundScan(this)
         handleIncomingIntent(intent, isColdStart = true)
     }
 
-    private fun ensureNotificationChannelCreated() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            val channel = NotificationChannel(
-                MATCH_ALERT_CHANNEL_ID,
-                "New Vehicle Match Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description =
-                    "Alerts when a new matching vehicle is found on prestonmotor.com after a client's initial search"
-                enableVibration(true)
-            }
-            nm.createNotificationChannel(channel)
+    override fun onResume() {
+        super.onResume()
+        activeForegroundInstance = this
+        notifChannel?.invokeMethod(
+            "onNotificationPermissionChanged",
+            MatchNotificationHelper.areNotificationsFullyEnabled(this)
+        )
+    }
+
+    override fun onPause() {
+        if (activeForegroundInstance === this) {
+            activeForegroundInstance = null
         }
+        super.onPause()
     }
 
     private fun requestStartupRuntimePermissions() {
         val missing = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 33) {
-            val notifPerm = "android.permission.POST_NOTIFICATIONS"
+            val notifPerm = Manifest.permission.POST_NOTIFICATIONS
             if (checkSelfPermission(notifPerm) != PackageManager.PERMISSION_GRANTED) {
                 missing.add(notifPerm)
             }
@@ -118,15 +133,20 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun requestPostNotificationsPermissionIfNeeded(): Boolean {
-        if (Build.VERSION.SDK_INT >= 33) {
-            val perm = "android.permission.POST_NOTIFICATIONS"
-            if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(arrayOf(perm), REQ_RUNTIME_PERMISSIONS)
-                return false
-            }
+    private fun requestNotificationPermissionInteractive(callbackResult: MethodChannel.Result) {
+        MatchNotificationHelper.ensureChannelCreated(this)
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            callbackResult.success(MatchNotificationHelper.areNotificationsFullyEnabled(this))
+            return
         }
-        return true
+        pendingNotifPermResult?.success(MatchNotificationHelper.areNotificationsFullyEnabled(this))
+        pendingNotifPermResult = callbackResult
+        requestPermissions(
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            REQ_NOTIFICATION_PERMISSIONS
+        )
     }
 
     private fun hasCalendarPermissions(): Boolean {
@@ -153,14 +173,24 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        val granted = hasCalendarPermissions()
+        val calGranted = hasCalendarPermissions()
+        val notifGranted = MatchNotificationHelper.areNotificationsFullyEnabled(this)
+
         if (requestCode == REQ_CALENDAR_PERMISSIONS || requestCode == REQ_RUNTIME_PERMISSIONS) {
-            calendarChannel?.invokeMethod("onCalendarPermissionChanged", granted)
+            calendarChannel?.invokeMethod("onCalendarPermissionChanged", calGranted)
+        }
+        if (requestCode == REQ_NOTIFICATION_PERMISSIONS || requestCode == REQ_RUNTIME_PERMISSIONS) {
+            notifChannel?.invokeMethod("onNotificationPermissionChanged", notifGranted)
         }
         if (requestCode == REQ_CALENDAR_PERMISSIONS) {
             val cb = pendingCalendarPermResult
             pendingCalendarPermResult = null
-            cb?.success(granted)
+            cb?.success(calGranted)
+        }
+        if (requestCode == REQ_NOTIFICATION_PERMISSIONS) {
+            val cb = pendingNotifPermResult
+            pendingNotifPermResult = null
+            cb?.success(notifGranted)
         }
     }
 
@@ -354,65 +384,6 @@ class MainActivity : FlutterActivity() {
                 "reason" to (e.localizedMessage ?: "INSERT_EXCEPTION")
             )
         }
-    }
-
-    private fun postMatchSystemNotification(
-        notifId: Int,
-        guestId: String,
-        title: String,
-        body: String
-    ): Boolean {
-        ensureNotificationChannelCreated()
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPostNotificationsPermissionIfNeeded()
-            return false
-        }
-
-        val tapIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP
-            if (guestId.isNotBlank()) {
-                putExtra(EXTRA_GUEST_ID, guestId)
-                data = Uri.parse("prestonscout://guest/$guestId")
-            }
-        }
-        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        val contentPendingIntent = PendingIntent.getActivity(this, notifId, tapIntent, pendingFlags)
-
-        val displayBody = if (body.isNotBlank()) body else title
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, MATCH_ALERT_CHANNEL_ID)
-        } else {
-            Notification.Builder(this)
-        }
-
-        builder
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(displayBody)
-            .setStyle(
-                Notification.BigTextStyle()
-                    .setBigContentTitle(title)
-                    .bigText(displayBody)
-            )
-            .setAutoCancel(true)
-            .setContentIntent(contentPendingIntent)
-
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            builder.setPriority(Notification.PRIORITY_HIGH)
-            builder.setDefaults(Notification.DEFAULT_ALL)
-        }
-
-        nm.notify(notifId, builder.build())
-        return true
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -853,26 +824,38 @@ class MainActivity : FlutterActivity() {
         nChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "requestNotificationPermission" -> {
-                    val granted = requestPostNotificationsPermissionIfNeeded()
-                    result.success(granted)
+                    requestNotificationPermissionInteractive(result)
                 }
                 "areNotificationsEnabled" -> {
-                    val granted = Build.VERSION.SDK_INT < 33 ||
-                        checkSelfPermission("android.permission.POST_NOTIFICATIONS") ==
-                            PackageManager.PERMISSION_GRANTED
-                    result.success(granted)
+                    result.success(MatchNotificationHelper.areNotificationsFullyEnabled(this))
+                }
+                "openNotificationSettings" -> {
+                    result.success(MatchNotificationHelper.openAppNotificationSettings(this))
                 }
                 "showMatchNotification" -> {
                     val notifId = call.argument<Int>("notifId")
                         ?: (System.currentTimeMillis() % 1000000L).toInt()
                     val guestId = call.argument<String>("guestId") ?: ""
-                    val title = call.argument<String>("title") ?: "Match Found"
+                    val guestName = call.argument<String>("guestName") ?: ""
+                    val guestPhone = call.argument<String>("guestPhone") ?: ""
+                    val vehicleModel = call.argument<String>("vehicleModel") ?: ""
+                    val vehicleTitle = call.argument<String>("vehicleTitle") ?: ""
+                    val price = call.argument<Number>("price")?.toDouble()
+                    val location = call.argument<String>("location") ?: ""
+                    val title = call.argument<String>("title") ?: ""
                     val body = call.argument<String>("body") ?: ""
-                    val ok = postMatchSystemNotification(
+                    val ok = MatchNotificationHelper.postMatchNotification(
+                        context = this,
                         notifId = notifId,
                         guestId = guestId,
-                        title = title,
-                        body = body
+                        guestName = guestName,
+                        guestPhone = guestPhone,
+                        vehicleModel = vehicleModel,
+                        vehicleTitle = vehicleTitle,
+                        price = price,
+                        location = location,
+                        fallbackTitle = title,
+                        fallbackBody = body
                     )
                     result.success(ok)
                 }
