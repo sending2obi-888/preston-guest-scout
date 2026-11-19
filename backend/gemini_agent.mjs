@@ -1,41 +1,118 @@
 import { getSetting } from './db.mjs';
+import {
+  doesVehicleMatchCabStyle,
+  doesVehicleMatchColor,
+  doesVehicleMatchEngine,
+  doesVehicleMatchModel,
+  doesVehicleMatchStrictPackages,
+  doesVehicleMatchTrim,
+  extractBedLengthFromVehicle,
+  formatBedLengthLabel,
+} from './natural_language_parser.mjs';
 import { normalizeGuestSpecs } from './preston_scraper.mjs';
 
-function preFilterCandidates(rawGuest, candidates) {
+function doesVehicleMatchDrivetrain(targetDrivetrain, v) {
+  if (!targetDrivetrain || targetDrivetrain === 'Any') return true;
+  const targetDt = targetDrivetrain.toUpperCase();
+  const vDt = String(v.drivetrain || '').toUpperCase();
+  const hay = `${vDt} ${(v.highlights || []).join(' ')} ${v.commentsSummary || ''}`.toUpperCase();
+
+  if (targetDt === '4WD') {
+    return (
+      vDt === '4WD' ||
+      vDt === 'AWD / 4WD' ||
+      hay.includes('4WD') ||
+      hay.includes('4X4') ||
+      hay.includes('FOUR WHEEL DRIVE') ||
+      hay.includes('4-WHEEL DRIVE')
+    );
+  }
+  if (targetDt === 'AWD') {
+    return (
+      vDt === 'AWD' ||
+      vDt === 'AWD / 4WD' ||
+      hay.includes('AWD') ||
+      hay.includes('ALL WHEEL DRIVE') ||
+      hay.includes('ALL-WHEEL DRIVE')
+    );
+  }
+  if (targetDt === 'RWD') {
+    return vDt === 'RWD' || hay.includes('RWD') || hay.includes('REAR WHEEL DRIVE') || hay.includes('2WD');
+  }
+  if (targetDt === 'FWD') {
+    return vDt === 'FWD' || hay.includes('FWD') || hay.includes('FRONT WHEEL DRIVE');
+  }
+  return vDt === targetDt || hay.includes(targetDt);
+}
+
+export function preFilterCandidates(rawGuest, candidates) {
   const guest = normalizeGuestSpecs(rawGuest);
 
   return candidates.filter((v) => {
+    // 1. Make
     if (guest.make) {
       const targetMake = guest.make.trim().toLowerCase();
-      if (
-        v.make &&
-        !v.make.toLowerCase().includes(targetMake) &&
-        !v.title.toLowerCase().includes(targetMake)
-      ) {
+      const makeHay = `${v.make || ''} ${v.title || ''}`.toLowerCase();
+      if (!makeHay.includes(targetMake)) {
         return false;
       }
     }
 
-    if (guest.model) {
-      const tokens = guest.model
-        .toLowerCase()
-        .split(/[\s-]+/)
-        .filter((t) => t.length >= 2);
-      const hay = `${v.model} ${v.title} ${v.trim}`.toLowerCase().replace(/-/g, ' ');
-      const normalizedTokens = guest.model
-        .toLowerCase()
-        .replace(/-/g, ' ')
-        .split(/\s+/)
-        .filter(Boolean);
-      const matchesAll = normalizedTokens.every((t) => hay.includes(t));
-      const matchesRaw = `${v.model} ${v.title}`
-        .toLowerCase()
-        .includes(guest.model.trim().toLowerCase());
-      if (!matchesAll && !matchesRaw && tokens.length > 0) {
+    // 2. Model (exact model disambiguation: e.g. F150 -> F-150, Bronco != Bronco Sport, CX-5 != CX-50)
+    if (guest.model && !doesVehicleMatchModel(guest.model, v)) {
+      return false;
+    }
+
+    // 3. Trim (strict word-boundary trim check: e.g. XLT != XL, XL != XLT, ST != STX/ST-Line)
+    if (guest.trim && !doesVehicleMatchTrim(guest.trim, v)) {
+      return false;
+    }
+
+    // 4. Truck Bed Length (strict check: e.g. "6.5ft bed" -> ONLY verified 6.5' bed trucks)
+    if (guest.bedLength) {
+      const vBed =
+        v.bedLength ||
+        extractBedLengthFromVehicle(
+          v,
+          v.fullCommentsSearchText || v.commentsSummary || ''
+        );
+      if (vBed !== guest.bedLength) {
         return false;
       }
     }
 
+    // 5. Cab Style (Regular Cab / SuperCab / Crew Cab)
+    if (guest.cabStyle && !doesVehicleMatchCabStyle(guest.cabStyle, v)) {
+      return false;
+    }
+
+    // 6. Engine / Powertrain (strict only when not in a "preferred" clause)
+    if (guest.engineSpec && !doesVehicleMatchEngine(guest.engineSpec, v)) {
+      return false;
+    }
+
+    // 7. Drivetrain
+    if (guest.drivetrain && guest.drivetrain !== 'Any') {
+      if (!doesVehicleMatchDrivetrain(guest.drivetrain, v)) {
+        return false;
+      }
+    }
+
+    // 8. Exterior Color
+    if (guest.exteriorColor && !doesVehicleMatchColor(guest.exteriorColor, v)) {
+      return false;
+    }
+
+    // 9. Explicit Strict Equipment / Package Codes (e.g. FX4, 302A, Black Appearance, Tow/Haul)
+    if (
+      Array.isArray(guest.strictPackages) &&
+      guest.strictPackages.length > 0 &&
+      !doesVehicleMatchStrictPackages(guest.strictPackages, v)
+    ) {
+      return false;
+    }
+
+    // 10. Year range
     if (guest.minYear && v.year && v.year < Number(guest.minYear)) {
       return false;
     }
@@ -43,8 +120,7 @@ function preFilterCandidates(rawGuest, candidates) {
       return false;
     }
 
-    // Strict maxPrice check: when a budget cap (e.g. "under $60K") is specified,
-    // require either a verified selling/final price <= maxPrice, or (if unpriced) an MSRP <= maxPrice.
+    // 11. Strict maxPrice cap
     if (guest.maxPrice != null && Number(guest.maxPrice) > 0) {
       const cap = Number(guest.maxPrice);
       const effectivePrice =
@@ -58,10 +134,12 @@ function preFilterCandidates(rawGuest, candidates) {
       }
     }
 
+    // 12. Max Mileage cap
     if (guest.maxMileage && typeof v.mileage === 'number' && v.mileage > Number(guest.maxMileage)) {
       return false;
     }
 
+    // 13. Condition
     if (guest.condition && guest.condition !== 'Any') {
       const c = guest.condition.toLowerCase();
       const vc = (v.condition || '').toLowerCase();
@@ -70,8 +148,7 @@ function preFilterCandidates(rawGuest, candidates) {
       if (c === 'pre-owned' && vc.includes('new') && !vc.includes('pre')) return false;
     }
 
-    // If the guest explicitly specified a dealership/town in notes (e.g., "Boulevard Ford" or "Millsboro"),
-    // enforce that location requirement; otherwise include all Preston Automotive Group locations.
+    // 14. Dealership / Town location hints
     if (Array.isArray(guest.locationHints) && guest.locationHints.length > 0) {
       const locHay = `${v.location || ''} ${v.dealerCity || ''} ${v.dealerState || ''}`.toLowerCase();
       const matchesLocation = guest.locationHints.some((hint) => locHay.includes(hint));
@@ -82,60 +159,62 @@ function preFilterCandidates(rawGuest, candidates) {
   });
 }
 
-function deterministicEvaluate(rawGuest, candidates) {
+export function deterministicEvaluate(rawGuest, candidates) {
   const guest = normalizeGuestSpecs(rawGuest);
   const strictFiltered = preFilterCandidates(guest, candidates);
   const results = [];
 
   const desiredFeatures = [...(Array.isArray(guest.features) ? guest.features : [])];
-  const noteTokens = (guest.notes || '')
-    .split(/[,;\n•]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 3 && s.length <= 55);
+  const preferenceClauses = Array.isArray(guest.preferenceClauses) ? guest.preferenceClauses : [];
 
   for (const v of strictFiltered) {
     const matchedFeatures = [];
-    let score = 80;
+    let score = 84;
 
-    // 1. Drivetrain check
-    if (guest.drivetrain && guest.drivetrain !== 'Any') {
-      const targetDt = guest.drivetrain.toUpperCase();
-      const vDt = (v.drivetrain || '').toUpperCase();
-      const hay = `${vDt} ${v.highlights.join(' ')} ${v.commentsSummary}`.toUpperCase();
-      if (
-        vDt === targetDt ||
-        hay.includes(targetDt) ||
-        (targetDt === '4WD' && (hay.includes('4X4') || hay.includes('4WD/AWD'))) ||
-        (targetDt === 'AWD' && hay.includes('4WD/AWD'))
-      ) {
-        matchedFeatures.push(`${v.drivetrain || targetDt} Drivetrain`);
-        score += 5;
-      } else {
-        if (vDt && vDt !== targetDt) continue;
-      }
-    } else if (v.drivetrain) {
-      matchedFeatures.push(`${v.drivetrain} Drivetrain`);
+    const vBed =
+      v.bedLength ||
+      extractBedLengthFromVehicle(v, v.fullCommentsSearchText || v.commentsSummary || '');
+
+    // 1. Bed Length badge (prominently surfaced when requested or known on trucks)
+    if (guest.bedLength) {
+      matchedFeatures.push(`${formatBedLengthLabel(guest.bedLength)} (Verified)`);
+      score += 6;
+    } else if (vBed) {
+      matchedFeatures.push(formatBedLengthLabel(vBed));
     }
 
-    // 2. Trim check
+    // 2. Trim badge
     if (guest.trim) {
-      const targetTrim = guest.trim.trim().toLowerCase();
-      if (`${v.trim} ${v.title} ${v.commentsSummary}`.toLowerCase().includes(targetTrim)) {
-        matchedFeatures.push(`${v.trim || guest.trim} Trim Package`);
-        score += 5;
-      } else {
-        continue;
-      }
+      matchedFeatures.push(`${v.trim || guest.trim} Trim Package`);
+      score += 5;
     } else if (v.trim) {
       matchedFeatures.push(`${v.trim} Trim`);
     }
 
-    // 3. Make / Condition badge
+    // 3. Cab Style & Engine badges
+    if (guest.cabStyle) {
+      matchedFeatures.push(v.bodyStyle || guest.cabStyle);
+      score += 3;
+    }
+    if (guest.engineSpec) {
+      matchedFeatures.push(`${guest.engineSpec} Powertrain`);
+      score += 3;
+    }
+
+    // 4. Drivetrain badge
+    if (guest.drivetrain && guest.drivetrain !== 'Any') {
+      matchedFeatures.push(`${v.drivetrain || guest.drivetrain} Drivetrain`);
+      score += 4;
+    } else if (v.drivetrain) {
+      matchedFeatures.push(`${v.drivetrain} Drivetrain`);
+    }
+
+    // 5. Make / Model / Condition badge
     if (guest.make && v.make) {
       matchedFeatures.push(`${v.year || ''} ${v.make} ${v.model} (${v.condition})`.trim());
     }
 
-    // 4. Price check
+    // 6. Price check
     if (guest.maxPrice && v.price) {
       const savings = Math.round(Number(guest.maxPrice) - v.price);
       matchedFeatures.push(
@@ -146,7 +225,7 @@ function deterministicEvaluate(rawGuest, candidates) {
       score += 4;
     }
 
-    // 5. Year & Mileage check
+    // 7. Year, Mileage, Color & Strict Packages
     if ((guest.minYear || guest.maxYear) && v.year) {
       matchedFeatures.push(`${v.year} ${v.condition} Model Year`);
     }
@@ -155,19 +234,21 @@ function deterministicEvaluate(rawGuest, candidates) {
         `${v.mileage.toLocaleString()} mi (Under ${Number(guest.maxMileage).toLocaleString()} mi limit)`
       );
     }
-
-    // 6. Color check
-    if (guest.exteriorColor) {
-      const targetColor = guest.exteriorColor.trim().toLowerCase();
-      if ((v.exteriorColor || '').toLowerCase().includes(targetColor)) {
-        matchedFeatures.push(`${v.exteriorColor} Exterior`);
+    if (guest.exteriorColor && v.exteriorColor) {
+      matchedFeatures.push(`${v.exteriorColor} Exterior`);
+      score += 3;
+    }
+    if (Array.isArray(guest.strictPackages)) {
+      for (const pkg of guest.strictPackages) {
+        matchedFeatures.push(pkg);
         score += 3;
       }
     }
 
-    // 7. Specific requested features & notes against vehicle highlights + build sheet
+    // 8. Soft / Preferred features against vehicle highlights + build sheet
+    const vHighlights = Array.isArray(v.highlights) ? v.highlights : [];
     const fullText =
-      `${v.highlights.join(' | ')} | ${v.engine} | ${v.transmission} | ${v.exteriorColor} | ${v.interiorColor} | ${v.location} | ${v.commentsSummary}`.toLowerCase();
+      `${vHighlights.join(' | ')} | ${v.engine || ''} | ${v.transmission || ''} | ${v.exteriorColor || ''} | ${v.interiorColor || ''} | ${v.location || ''} | ${v.fullCommentsSearchText || v.commentsSummary || ''}`.toLowerCase();
 
     for (const reqFeat of desiredFeatures) {
       const cleanReq = reqFeat.trim();
@@ -178,7 +259,7 @@ function deterministicEvaluate(rawGuest, candidates) {
         .split(/\s+/)
         .filter((w) => w.length >= 3);
 
-      const exactHighlight = v.highlights.find(
+      const exactHighlight = vHighlights.find(
         (h) =>
           h.toLowerCase().includes(cleanReq.toLowerCase()) ||
           keywords.some((kw) => h.toLowerCase().includes(kw))
@@ -186,35 +267,34 @@ function deterministicEvaluate(rawGuest, candidates) {
 
       if (exactHighlight) {
         matchedFeatures.push(exactHighlight);
-        score += 3;
+        score += 2;
       } else if (keywords.length > 0 && keywords.some((kw) => fullText.includes(kw))) {
         matchedFeatures.push(cleanReq);
-        score += 2;
+        score += 1;
       }
     }
 
-    for (const phrase of noteTokens) {
-      const kws = phrase
+    for (const pref of preferenceClauses) {
+      const kws = pref
         .toLowerCase()
-        .replace(/\$?\d+(?:,\d{3})*(?:\.\d+)?\s*(?:k|thousand)?/gi, ' ')
+        .replace(/\b(?:prefer(?:s|red)?|ideally|nice\s+to\s+have|optional|if\s+possible)\b/gi, ' ')
         .split(/\s+/)
-        .filter(
-          (w) =>
-            w.length >= 4 &&
-            !['must', 'have', 'with', 'prefer', 'wants', 'needs', 'under', 'below', 'ford', 'lincoln'].includes(
-              w
-            )
-        );
-      if (kws.length > 0 && kws.every((kw) => fullText.includes(kw))) {
-        matchedFeatures.push(phrase);
+        .filter((w) => w.length >= 3);
+      if (kws.length > 0 && kws.some((kw) => fullText.includes(kw))) {
         score += 2;
       }
     }
 
-    // Fill in standout vehicle highlights if user kept feature requirements broad (e.g. "Ford under $60K")
     if (matchedFeatures.length < 5) {
-      for (const h of v.highlights.slice(0, 5)) {
-        if (!matchedFeatures.includes(h)) {
+      for (const h of vHighlights.slice(0, 6)) {
+        const hLower = h.toLowerCase();
+        const alreadyCovered = matchedFeatures.some(
+          (mf) =>
+            mf.toLowerCase() === hLower ||
+            mf.toLowerCase().includes(hLower) ||
+            (hLower === '4wd/awd' && mf.toLowerCase().includes('drivetrain'))
+        );
+        if (!alreadyCovered) {
           matchedFeatures.push(h);
         }
         if (matchedFeatures.length >= 6) break;
@@ -224,6 +304,16 @@ function deterministicEvaluate(rawGuest, candidates) {
     const dedupedFeatures = Array.from(new Set(matchedFeatures)).slice(0, 8);
     const clampedScore = Math.min(99, score);
 
+    const specSummaryParts = [
+      guest.make || null,
+      guest.model || null,
+      guest.trim ? `${guest.trim} trim` : null,
+      guest.bedLength ? formatBedLengthLabel(guest.bedLength) : null,
+      guest.cabStyle || null,
+      guest.drivetrain && guest.drivetrain !== 'Any' ? guest.drivetrain : null,
+      guest.maxPrice ? `under $${Number(guest.maxPrice).toLocaleString()} budget` : null,
+    ].filter(Boolean);
+
     results.push({
       vehicle: v,
       matchScore: clampedScore,
@@ -231,21 +321,11 @@ function deterministicEvaluate(rawGuest, candidates) {
       agentSummary: `Verified match at ${v.location}: ${v.title} (${v.condition}) priced at ${
         v.price ? `$${v.price.toLocaleString()}` : 'Call for Price'
       } satisfies ${guest.name}'s ${
-        [
-          guest.make || null,
-          guest.minYear || guest.maxYear ? 'model year' : null,
-          guest.maxPrice ? `under $${Number(guest.maxPrice).toLocaleString()} budget` : null,
-          guest.drivetrain && guest.drivetrain !== 'Any' ? guest.drivetrain : null,
-          desiredFeatures.length > 0 ? 'feature' : 'inventory',
-        ]
-          .filter(Boolean)
-          .join(', ')
+        specSummaryParts.length > 0 ? specSummaryParts.join(', ') : 'target vehicle'
       } criteria.`,
     });
   }
 
-  // Sort highest match score first, then lowest price so best-value deals surface cleanly,
-  // WITHOUT truncating results so ALL qualifying vehicles across all Preston locations are returned.
   results.sort((a, b) => {
     if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
     const pa = a.vehicle.price ?? Number.MAX_SAFE_INTEGER;
@@ -256,12 +336,6 @@ function deterministicEvaluate(rawGuest, candidates) {
   return results;
 }
 
-/**
- * Selects a diverse sample across dealerships when sending a batch to Gemini so
- * multi-location inventories (Hurlock, Millsboro, Pittsville, Aberdeen, etc.) are
- * all represented in Gemini's semantic pass, while ALL remaining qualifying vehicles
- * are preserved via hybrid merge (zero match truncation).
- */
 function sampleAcrossLocations(vehicles, limit = 30) {
   if (vehicles.length <= limit) return vehicles;
   const byLoc = new Map();
@@ -297,12 +371,14 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     return {
       mode: apiKey ? 'gemini' : 'smart-matcher',
       matches: [],
-      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles; 0 met ${guest.name}'s core year/make/model/budget filters.`,
+      summary: `Scanned ${candidates.length} live prestonmotor.com vehicles; 0 met ${guest.name}'s exact vehicle criteria.`,
     };
   }
 
-  // Always compute full-inventory deterministic matches across ALL qualifying vehicles (no cap)
   const fullDeterministicMatches = deterministicEvaluate(guest, preFiltered);
+  const deterministicByVin = new Map(
+    fullDeterministicMatches.map((dm) => [dm.vehicle.vin, dm])
+  );
 
   if (!apiKey) {
     const locCount = new Set(fullDeterministicMatches.map((m) => m.vehicle.location)).size;
@@ -313,7 +389,6 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     };
   }
 
-  // Sample up to 30 vehicles distributed across all Preston dealerships for Gemini LLM enrichment
   const sampledVehicles = sampleAcrossLocations(preFiltered, 30);
   const compactCandidates = sampledVehicles.map((v) => ({
     vin: v.vin,
@@ -322,6 +397,8 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     make: v.make,
     model: v.model,
     trim: v.trim,
+    bodyStyle: v.bodyStyle,
+    bedLength: v.bedLength || '',
     condition: v.condition,
     price: v.price,
     location: v.location,
@@ -342,19 +419,23 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     make: guest.make,
     model: guest.model,
     trim: guest.trim,
+    bedLength: guest.bedLength || '',
+    cabStyle: guest.cabStyle || '',
+    engineSpec: guest.engineSpec || '',
     maxPrice: guest.maxPrice,
     maxMileage: guest.maxMileage,
     drivetrain: guest.drivetrain,
     exteriorColor: guest.exteriorColor,
+    strictPackages: guest.strictPackages || [],
     mustHaveFeatures: guest.features,
     additionalNotesAndSpecs: guest.notes,
   };
 
   const systemPrompt = `You are the Preston Automotive Group Gemini Inventory Scout Agent.
-Evaluate live vehicle listings from prestonmotor.com against the guest's target vehicle specifications and requirements.
+Evaluate live vehicle listings from prestonmotor.com against the guest's exact target vehicle specifications and natural-language requirements.
 Rules:
-1. Only include vehicles that genuinely satisfy the guest's core requirements (make, model if specified, trim if specified, drivetrain if specified, price cap if specified, and critical must-have features).
-2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's previously input specs & requirements (e.g., "4WD Drivetrain", "Reserve Trim", "Apple CarPlay & Navigation", "$42,900 ($17,100 under $60,000 cap)", "Oxford White Exterior").
+1. Only include vehicles that strictly satisfy EVERY specified requirement (make, exact model, exact trim, bedLength if specified, cabStyle if specified, drivetrain if specified, price cap if specified, and strict packages).
+2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's specs (e.g., "6.5 ft Bed (Verified)", "XLT Trim Package", "4WD Drivetrain", "Oxford White Exterior").
 3. Provide a concise, helpful 1-2 sentence "agentSummary" explaining why this specific unit at its Preston dealership location fits the guest.`;
 
   const body = {
@@ -376,7 +457,7 @@ Rules:
       },
     ],
     generationConfig: {
-      temperature: 0.15,
+      temperature: 0.1,
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'OBJECT',
@@ -429,23 +510,31 @@ Rules:
 
     const geminiByVin = new Map();
     for (const m of parsed.matches || []) {
+      // Only allow VINs that already passed strict deterministic pre-filtering!
       const vehicle = byVin.get(m.vin);
-      if (!vehicle) continue;
+      if (!vehicle || !deterministicByVin.has(m.vin)) continue;
+      const detFeatures = deterministicByVin.get(m.vin)?.matchedFeatures || [];
+      const combinedFeatures = Array.from(
+        new Set([
+          ...(guest.bedLength ? [`${formatBedLengthLabel(guest.bedLength)} (Verified)`] : []),
+          ...(guest.trim ? [`${vehicle.trim || guest.trim} Trim Package`] : []),
+          ...(Array.isArray(m.matchedFeatures) ? m.matchedFeatures : []),
+          ...detFeatures,
+        ])
+      ).slice(0, 8);
+
       geminiByVin.set(m.vin, {
         vehicle,
-        matchScore: Math.max(1, Math.min(100, Number(m.matchScore) || 88)),
-        matchedFeatures: Array.isArray(m.matchedFeatures) ? m.matchedFeatures : [],
-        agentSummary: m.agentSummary || '',
+        matchScore: Math.max(1, Math.min(100, Number(m.matchScore) || 90)),
+        matchedFeatures: combinedFeatures,
+        agentSummary: m.agentSummary || deterministicByVin.get(m.vin)?.agentSummary || '',
       });
     }
 
-    // If all candidates fit inside Gemini's single-call window (<= 30), use Gemini's exact verified list.
-    // If there are more than 30 qualifying vehicles (e.g., "Ford under $60K" -> 1,000+ matches across
-    // all Preston dealerships including Boulevard Ford in Millsboro), merge Gemini's enriched cards
-    // with the full verified inventory so NO qualifying vehicle is ever dropped!
     let mergedMatches;
     if (preFiltered.length <= 30) {
-      mergedMatches = Array.from(geminiByVin.values());
+      mergedMatches =
+        geminiByVin.size > 0 ? Array.from(geminiByVin.values()) : fullDeterministicMatches;
     } else {
       mergedMatches = [];
       for (const dm of fullDeterministicMatches) {

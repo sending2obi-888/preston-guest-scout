@@ -4,11 +4,13 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:preston_guest_scout/models/models.dart';
 import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
+import 'package:preston_guest_scout/screens/home_intake_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
 import 'package:preston_guest_scout/services/calendar_service.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
+import 'package:preston_guest_scout/services/natural_language_parser.dart';
 import 'package:preston_guest_scout/widgets/calendar_events_dialog.dart';
 import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
 import 'package:preston_guest_scout/widgets/settings_and_chromebook_dialog.dart';
@@ -1521,5 +1523,253 @@ void main() {
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
     LocalScoutEngine.resetForTest();
+  });
+
+  test(
+      'Natural-language query "Ford F150. 6.5ft bed. XLT." parses Ford F-150 XLT 6.5ft bed and returns ONLY matching vehicles',
+      () {
+    final normalized = LocalScoutEngine.normalizeSpecsForTest({
+      'id': 'guest-nl-f150',
+      'name': 'Chris Miller',
+      'notes': 'Ford F150. 6.5ft bed. XLT.',
+      'createdAt': '2026-11-19T12:00:00Z',
+    });
+
+    expect(normalized['make'], 'Ford');
+    expect(normalized['model'], 'F-150');
+    expect(normalized['trim'], 'XLT');
+    expect(normalized['bedLength'], "6.5'");
+
+    final guest = GuestProfile.fromJson(normalized);
+    expect(guest.make, 'Ford');
+    expect(guest.model, 'F-150');
+    expect(guest.trim, 'XLT');
+    expect(guest.bedLength, "6.5'");
+    expect(guest.targetVehicleLabel, 'Ford F-150 XLT • 6.5 ft Bed');
+
+    final mixedInventory = <Map<String, dynamic>>[
+      // 1. SHOULD MATCH: New 2026 Ford F-150 XLT with DMS-verified 6.5' bed
+      {
+        'vin': '1FTFW3L81TKE78366',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'bedLength': "6.5'",
+        'bodyStyle': 'SuperCrew Cab',
+        'condition': 'New',
+        'price': 50509.0,
+        'location': 'Preston Ford Aberdeen, MD',
+        'drivetrain': '4WD',
+        'highlights': ['6.5 ft Bed', '4WD/AWD', 'Blind Spot Monitor'],
+        'commentsSummary': 'New 2026 Ford F-150 XLT in Oxford White.',
+      },
+      // 2. SHOULD MATCH: Pre-Owned 2024 Ford F-150 XLT whose build comments specify 6.5' bed
+      {
+        'vin': '1FTFW3L87RKF38272',
+        'title': '2024 Ford F-150 XLT',
+        'year': 2024,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'bedLength': '',
+        'bodyStyle': 'SuperCrew Cab',
+        'condition': 'Pre-Owned',
+        'price': 39700.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': '4WD',
+        'highlights': ['Remote Start', 'Tow Hitch'],
+        'commentsSummary':
+            "2024 Ford F-150 XLT SuperCrew 4x4 3.5L EcoBoost FX4 6.5' Bed 36-Gallon Tank.",
+      },
+      // 3. MUST REJECT: Ford F-150 XLT with 5.5-ft bed
+      {
+        'vin': '1FTFW1E51PKF81199',
+        'title': '2023 Ford F-150 XLT',
+        'year': 2023,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'bedLength': "5.5'",
+        'bodyStyle': 'SuperCrew Cab',
+        'condition': 'Pre-Owned',
+        'price': 36900.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': '4WD',
+        'highlights': ['4WD'],
+        'commentsSummary': '145-inch wheelbase SuperCrew with 5.5-foot bed.',
+      },
+      // 4. MUST REJECT: Ford F-150 XLT with unverified/unknown bed
+      {
+        'vin': '1FTFW3L80TKD99999',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'bedLength': '',
+        'bodyStyle': 'SuperCrew Cab',
+        'condition': 'New',
+        'price': 49200.0,
+        'location': 'Preston Ford Denton, MD',
+        'drivetrain': '4WD',
+        'highlights': ['4WD'],
+        'commentsSummary': 'New 2026 Ford F-150 XLT SuperCrew.',
+      },
+      // 5. MUST REJECT: Ford F-150 XL (wrong trim!) even though it has 6.5' bed
+      {
+        'vin': '1FTEX1KP0TKE11111',
+        'title': '2026 Ford F-150 XL',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XL',
+        'bedLength': "6.5'",
+        'bodyStyle': 'SuperCab',
+        'condition': 'New',
+        'price': 42500.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': '4WD',
+        'highlights': ['6.5 ft Bed'],
+        'commentsSummary': 'SuperCab 6.5ft bed XL work truck.',
+      },
+      // 6. MUST REJECT: Ford F-150 Lariat (wrong trim!) even though it has 6.5' bed
+      {
+        'vin': '1FTFW5L80TKE22222',
+        'title': '2026 Ford F-150 LARIAT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'LARIAT',
+        'bedLength': "6.5'",
+        'bodyStyle': 'SuperCrew Cab',
+        'condition': 'New',
+        'price': 64900.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'drivetrain': '4WD',
+        'highlights': ['6.5 ft Bed'],
+        'commentsSummary': 'Lariat 6.5ft box.',
+      },
+      // 7. MUST REJECT: Ford F-250 XLT (wrong model!)
+      {
+        'vin': '1FT7X2BT0TEC33333',
+        'title': '2026 Ford Super Duty F-250 SRW XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'Super Duty F-250 SRW',
+        'trim': 'XLT',
+        'bedLength': "6.5'",
+        'bodyStyle': 'SuperCab',
+        'condition': 'New',
+        'price': 55900.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': '4WD',
+        'highlights': ['4WD'],
+        'commentsSummary': 'Super Duty XLT.',
+      },
+    ];
+
+    final matches = LocalScoutEngine.evaluateAllForTest(guest, mixedInventory);
+    expect(matches.length, 2);
+    final matchedVins =
+        matches.map((m) => (m['vehicle'] as Map)['vin'].toString()).toSet();
+    expect(matchedVins, {'1FTFW3L81TKE78366', '1FTFW3L87RKF38272'});
+
+    for (final m in matches) {
+      final feats = (m['matchedFeatures'] as List).cast<String>();
+      expect(feats, contains('6.5 ft Bed (Verified)'));
+      expect(feats, contains('XLT Trim Package'));
+    }
+
+    // Word-boundary trim check: searching "Ford F150. XL." must NOT match XLT!
+    final xlGuest = GuestProfile.fromJson(
+      LocalScoutEngine.normalizeSpecsForTest({
+        'id': 'guest-xl-only',
+        'name': 'XL Buyer',
+        'notes': 'Ford F150. XL.',
+        'createdAt': '2026-11-19T12:00:00Z',
+      }),
+    );
+    final xlMatches =
+        LocalScoutEngine.evaluateAllForTest(xlGuest, mixedInventory);
+    expect(xlMatches.length, 1);
+    expect((xlMatches.first['vehicle'] as Map)['vin'], '1FTEX1KP0TKE11111');
+
+    // Model disambiguation check: searching "Ford Bronco" must NOT match "Bronco Sport"!
+    expect(
+      NaturalLanguageVehicleParser.doesVehicleMatchModel(
+        'Bronco',
+        {'model': 'Bronco Sport', 'title': '2026 Ford Bronco Sport Big Bend'},
+      ),
+      isFalse,
+    );
+    expect(
+      NaturalLanguageVehicleParser.doesVehicleMatchModel(
+        'Bronco',
+        {'model': 'Bronco', 'title': '2026 Ford Bronco Badlands'},
+      ),
+      isTrue,
+    );
+  });
+
+  testWidgets(
+      'HomeIntakeScreen displays live Understood Search Criteria chips when entering "Ford F150. 6.5ft bed. XLT." in natural-language field',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1024, 1100));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HomeIntakeScreen(
+            status: const SystemStatus(
+              totalGuests: 3,
+              totalMatches: 42,
+              nextScheduledRunLabel: 'Today at 2:00 PM',
+              timeZone: 'America/New_York',
+              isRunning: false,
+              geminiConfigured: true,
+              geminiModel: 'gemini-2.5-flash',
+            ),
+            onGuestCreated: () {},
+            onOpenGuestMatches: (_) {},
+            onOpenSettings: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('parsed_natural_language_summary')),
+      findsNothing,
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('natural_language_search_input')),
+      'Ford F150. 6.5ft bed. XLT.',
+    );
+    await tester.pumpAndSettle();
+
+    final summaryBox =
+        find.byKey(const ValueKey('parsed_natural_language_summary'));
+    expect(summaryBox, findsOneWidget);
+    expect(
+      find.descendant(of: summaryBox, matching: find.text('Make: Ford')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: summaryBox, matching: find.text('Model: F-150')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: summaryBox, matching: find.text('Trim: XLT')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: summaryBox, matching: find.text('Bed: 6.5 ft Bed')),
+      findsOneWidget,
+    );
+
+    await tester.binding.setSurfaceSize(null);
   });
 }

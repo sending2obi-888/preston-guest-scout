@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/natural_language_parser.dart';
 
 class AddVehicleCriteriaDialog extends StatefulWidget {
   final GuestProfile guest;
@@ -85,6 +86,19 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     });
   }
 
+  double? _parseMaxPrice(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    final hasK = RegExp(r'[kK]\b').hasMatch(trimmed);
+    final numeric = trimmed.replaceAll(RegExp(r'[^0-9.]'), '');
+    final parsed = double.tryParse(numeric);
+    if (parsed == null || parsed <= 0) return null;
+    if (hasK || parsed < 500) {
+      return parsed * 1000.0;
+    }
+    return parsed;
+  }
+
   Future<void> _submit() async {
     final make = _makeCtrl.text.trim();
     final model = _modelCtrl.text.trim();
@@ -92,8 +106,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     final notes = _notesCtrl.text.trim();
     final minYear = int.tryParse(_minYearCtrl.text.trim());
     final maxYear = int.tryParse(_maxYearCtrl.text.trim());
-    final maxPrice =
-        double.tryParse(_maxPriceCtrl.text.replaceAll(',', '').trim());
+    final maxPrice = _parseMaxPrice(_maxPriceCtrl.text);
     final maxMileage =
         int.tryParse(_maxMileageCtrl.text.replaceAll(',', '').trim());
 
@@ -514,16 +527,111 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
 
                     const SizedBox(height: 14),
                     TextField(
+                      key: const ValueKey('dialog_natural_language_search_input'),
                       controller: _notesCtrl,
                       maxLines: 2,
+                      onChanged: (_) => setState(() {}),
                       decoration: const InputDecoration(
                         labelText:
-                            'Additional Criteria / Notes for Gemini Agent (Optional)',
+                            'Natural-Language Search / Additional Criteria (Optional)',
                         hintText:
-                            'e.g. Prefer 2nd-row captain chairs or Boulevard Lincoln in Millsboro...',
+                            'e.g. Ford F150. 6.5ft bed. XLT. — or describe cab/box, engine, trim, budget...',
                         alignLabelWithHint: true,
                       ),
                     ),
+                    if (_notesCtrl.text.trim().isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Builder(
+                        builder: (context) {
+                          final chips =
+                              NaturalLanguageVehicleParser.buildPreviewChips({
+                            'condition': _condition,
+                            'minYear': int.tryParse(_minYearCtrl.text.trim()),
+                            'maxYear': int.tryParse(_maxYearCtrl.text.trim()),
+                            'make': _makeCtrl.text.trim(),
+                            'model': _modelCtrl.text.trim(),
+                            'trim': _trimCtrl.text.trim(),
+                            'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
+                            'maxMileage': int.tryParse(
+                              _maxMileageCtrl.text.replaceAll(',', '').trim(),
+                            ),
+                            'drivetrain': _drivetrain,
+                            'exteriorColor': _exteriorColorCtrl.text.trim(),
+                            'features': _selectedFeatures.toList(),
+                            'notes': _notesCtrl.text.trim(),
+                          });
+                          if (chips.isEmpty) return const SizedBox.shrink();
+                          return Container(
+                            key: const ValueKey(
+                              'dialog_parsed_natural_language_summary',
+                            ),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: scheme.secondaryContainer
+                                  .withValues(alpha: 0.45),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: scheme.primary.withValues(alpha: 0.25),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.verified_outlined,
+                                      size: 15,
+                                      color: scheme.primary,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        'Understood Search Criteria',
+                                        style: textTheme.labelSmall?.copyWith(
+                                          fontWeight: FontWeight.w700,
+                                          color: scheme.onSecondaryContainer,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  children: chips
+                                      .map(
+                                        (c) => Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: scheme.surface,
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                            border: Border.all(
+                                              color: scheme.outlineVariant,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            c,
+                                            style:
+                                                textTheme.labelSmall?.copyWith(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ],
                 ),
               ),

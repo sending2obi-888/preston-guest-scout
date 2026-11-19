@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../models/models.dart';
 import 'calendar_service.dart';
 import 'match_notification_service.dart';
+import 'natural_language_parser.dart';
 import 'widget_sync_service.dart';
 
 /// Self-contained on-device engine for the Android / Googlebook APK.
@@ -16,51 +17,6 @@ class LocalScoutEngine {
       MethodChannel('com.prestonmotor.scout/launcher_widget');
   static const String _prestonHost = 'www.prestonmotor.com';
   static const String _prestonBase = 'https://www.prestonmotor.com';
-
-  static const Map<String, List<String>> _knownMakes = {
-    'Ford': ['ford'],
-    'Lincoln': ['lincoln'],
-    'Hyundai': ['hyundai'],
-    'Mazda': ['mazda'],
-    'Nissan': ['nissan'],
-    'Chevrolet': ['chevrolet', 'chevy'],
-    'Jeep': ['jeep'],
-    'Ram': ['ram'],
-    'Dodge': ['dodge'],
-    'Chrysler': ['chrysler'],
-    'Toyota': ['toyota'],
-    'Honda': ['honda'],
-    'GMC': ['gmc'],
-    'Kia': ['kia'],
-    'Subaru': ['subaru'],
-    'Genesis': ['genesis'],
-    'Volkswagen': ['volkswagen', 'vw'],
-    'BMW': ['bmw'],
-    'Mercedes-Benz': ['mercedes-benz', 'mercedes'],
-    'Audi': ['audi'],
-    'Lexus': ['lexus'],
-    'Cadillac': ['cadillac'],
-    'Buick': ['buick'],
-  };
-
-  static const List<String> _locationKeywords = [
-    'millsboro',
-    'boulevard ford',
-    'boulevard lincoln',
-    'lewes',
-    'georgetown',
-    'hurlock',
-    'pittsville',
-    'aberdeen',
-    'denton',
-    'keller',
-    'dover',
-    'randallstown',
-    'wilmington',
-    'easton',
-    'snow hill',
-    'salisbury',
-  ];
 
   static bool _initialized = false;
   static bool _isRunningBatch = false;
@@ -211,109 +167,35 @@ class LocalScoutEngine {
     } catch (_) {}
   }
 
-  /// Normalizes structured vehicle criteria AND extracts fallback specs (Make, Max Price
-  /// such as "$60K" or shorthand "60" -> 60000, Condition, Drivetrain) from free-form notes.
+  /// Normalizes structured vehicle criteria AND extracts structured specs (Make, Model like
+  /// "F150" -> "F-150", Trim like "XLT", Bed Length like "6.5ft bed", Cab Style, Engine,
+  /// Year Range, Max Price, Max Mileage, Condition, Drivetrain, Color) from natural language.
   static Map<String, dynamic> _normalizeTargetMap(
     Map<String, dynamic> raw, {
     required String fallbackId,
     required String fallbackCreatedAt,
   }) {
-    final featuresList = (raw['features'] as List<dynamic>? ?? [])
-        .map((e) => e.toString().trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    final notesStr = (raw['notes']?.toString() ?? '').trim();
-    final combinedText = '$notesStr ${featuresList.join(' ')}'.trim();
-    final lowerText = combinedText.toLowerCase();
-
-    String make = (raw['make']?.toString() ?? '').trim();
-    if (make.isEmpty && lowerText.isNotEmpty) {
-      for (final entry in _knownMakes.entries) {
-        final hit = entry.value.any((alias) {
-          final pattern = alias.replaceAll('-', r'[-\s]?');
-          return RegExp('\\b$pattern\\b', caseSensitive: false)
-              .hasMatch(lowerText);
-        });
-        if (hit) {
-          make = entry.key;
-          break;
-        }
-      }
-    }
-
-    double? maxPrice = (raw['maxPrice'] as num?)?.toDouble();
-    if (maxPrice != null && maxPrice <= 0) maxPrice = null;
-    if (maxPrice != null && maxPrice > 0 && maxPrice < 500) {
-      maxPrice = maxPrice * 1000.0;
-    }
-    if (maxPrice == null && combinedText.isNotEmpty) {
-      final budgetReg = RegExp(
-        r'(?:under|below|max|up\s+to|less\s+than|around|budget(?:\s+of)?|<=?)\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|thousand)?\b|\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|thousand)\b|\$\s*(\d{1,3}(?:,\d{3})+)\b',
-        caseSensitive: false,
-      );
-      final m = budgetReg.firstMatch(combinedText);
-      if (m != null) {
-        if (m.group(1) != null) {
-          var val =
-              double.tryParse(m.group(1)!.replaceAll(',', '')) ?? 0.0;
-          if (m.group(2) != null || (val > 0 && val < 500)) val *= 1000.0;
-          if (val >= 1000) maxPrice = val;
-        } else if (m.group(3) != null) {
-          final val =
-              (double.tryParse(m.group(3)!.replaceAll(',', '')) ?? 0.0) *
-                  1000.0;
-          if (val >= 1000) maxPrice = val;
-        } else if (m.group(5) != null) {
-          final val =
-              double.tryParse(m.group(5)!.replaceAll(',', '')) ?? 0.0;
-          if (val >= 1000) maxPrice = val;
-        }
-      }
-    }
-
-    String condition = (raw['condition']?.toString() ?? 'Any').trim();
-    if (condition.isEmpty) condition = 'Any';
-    if (condition == 'Any' && lowerText.isNotEmpty) {
-      if (RegExp(r'\bbrand\s+new\b|\bnew\s+only\b').hasMatch(lowerText)) {
-        condition = 'New';
-      } else if (RegExp(r'\bcpo\b|\bcertified\s+pre-?owned\b')
-          .hasMatch(lowerText)) {
-        condition = 'CPO';
-      } else if (RegExp(r'\bpre-?owned\s+only\b|\bused\s+only\b')
-          .hasMatch(lowerText)) {
-        condition = 'Pre-Owned';
-      }
-    }
-
-    String drivetrain = (raw['drivetrain']?.toString() ?? 'Any').trim();
-    if (drivetrain.isEmpty) drivetrain = 'Any';
-    if (drivetrain == 'Any' && lowerText.isNotEmpty) {
-      if (RegExp(r'\b(4wd|4x4|four[\s-]wheel[\s-]drive)\b')
-          .hasMatch(lowerText)) {
-        drivetrain = '4WD';
-      } else if (RegExp(r'\b(awd|all[\s-]wheel[\s-]drive)\b')
-          .hasMatch(lowerText)) {
-        drivetrain = 'AWD';
-      }
-    }
-
+    final parsed = NaturalLanguageVehicleParser.parseCriteriaMap(raw);
     final rawId = (raw['id']?.toString() ?? '').trim();
     final rawCreated = (raw['createdAt']?.toString() ?? '').trim();
 
     return <String, dynamic>{
       'id': rawId.isNotEmpty ? rawId : fallbackId,
-      'condition': condition,
-      'minYear': (raw['minYear'] as num?)?.toInt(),
-      'maxYear': (raw['maxYear'] as num?)?.toInt(),
-      'make': make,
-      'model': (raw['model']?.toString() ?? '').trim(),
-      'trim': (raw['trim']?.toString() ?? '').trim(),
-      'maxPrice': maxPrice,
-      'maxMileage': (raw['maxMileage'] as num?)?.toInt(),
-      'drivetrain': drivetrain,
-      'exteriorColor': (raw['exteriorColor']?.toString() ?? '').trim(),
-      'features': featuresList,
-      'notes': notesStr,
+      'condition': parsed['condition'],
+      'minYear': parsed['minYear'],
+      'maxYear': parsed['maxYear'],
+      'make': parsed['make'],
+      'model': parsed['model'],
+      'trim': parsed['trim'],
+      'bedLength': parsed['bedLength'],
+      'cabStyle': parsed['cabStyle'],
+      'engineSpec': parsed['engineSpec'],
+      'maxPrice': parsed['maxPrice'],
+      'maxMileage': parsed['maxMileage'],
+      'drivetrain': parsed['drivetrain'],
+      'exteriorColor': parsed['exteriorColor'],
+      'features': parsed['features'],
+      'notes': parsed['notes'],
       'createdAt': rawCreated.isNotEmpty ? rawCreated : fallbackCreatedAt,
     };
   }
@@ -413,6 +295,9 @@ class LocalScoutEngine {
       'make': primary['make'],
       'model': primary['model'],
       'trim': primary['trim'],
+      'bedLength': primary['bedLength'],
+      'cabStyle': primary['cabStyle'],
+      'engineSpec': primary['engineSpec'],
       'maxPrice': primary['maxPrice'],
       'maxMileage': primary['maxMileage'],
       'drivetrain': primary['drivetrain'],
@@ -426,12 +311,6 @@ class LocalScoutEngine {
       'seenMatchVins': seenVinSet.toList(),
       'scheduledCallVins': scheduledCallSet.toList(),
     };
-  }
-
-  static List<String> _extractLocationHints(GuestProfile guest) {
-    final lower = '${guest.notes} ${guest.features.join(' ')}'.toLowerCase();
-    if (lower.trim().isEmpty) return const [];
-    return _locationKeywords.where((loc) => lower.contains(loc)).toList();
   }
 
   static Future<void> _persist() async {
@@ -914,6 +793,9 @@ class LocalScoutEngine {
       make: target.make,
       model: target.model,
       trim: target.trim,
+      bedLength: target.bedLength,
+      cabStyle: target.cabStyle,
+      engineSpec: target.engineSpec,
       maxPrice: target.maxPrice,
       maxMileage: target.maxMileage,
       drivetrain: target.drivetrain,
@@ -1463,7 +1345,25 @@ class LocalScoutEngine {
 
   static Future<List<Map<String, dynamic>>> _fetchPrestonCandidates(
       GuestProfile guest) async {
-    final cond = guest.condition.toLowerCase();
+    final normalizedSpec = NaturalLanguageVehicleParser.parseCriteriaMap({
+      'condition': guest.condition,
+      'minYear': guest.minYear,
+      'maxYear': guest.maxYear,
+      'make': guest.make,
+      'model': guest.model,
+      'trim': guest.trim,
+      'bedLength': guest.bedLength,
+      'cabStyle': guest.cabStyle,
+      'engineSpec': guest.engineSpec,
+      'maxPrice': guest.maxPrice,
+      'maxMileage': guest.maxMileage,
+      'drivetrain': guest.drivetrain,
+      'exteriorColor': guest.exteriorColor,
+      'features': guest.features,
+      'notes': guest.notes,
+    });
+
+    final cond = (normalizedSpec['condition']?.toString() ?? 'Any').toLowerCase();
     final pageIds = <int>[];
     if (cond == 'new') {
       pageIds.add(1446609);
@@ -1477,28 +1377,44 @@ class LocalScoutEngine {
     }
 
     final byVin = <String, Map<String, dynamic>>{};
-    final make = guest.make.trim();
-    final model = guest.model.trim();
-    final trim = guest.trim.trim();
-    final maxPrice = guest.maxPrice;
+    final make = (normalizedSpec['make']?.toString() ?? '').trim();
+    final model = (normalizedSpec['model']?.toString() ?? '').trim();
+    final trim = (normalizedSpec['trim']?.toString() ?? '').trim();
+    final bedLength = (normalizedSpec['bedLength']?.toString() ?? '').trim();
+    final maxPrice = (normalizedSpec['maxPrice'] as num?)?.toDouble();
+    final variants =
+        NaturalLanguageVehicleParser.expandPrestonModelVariants(make, model);
+    final bedFacets =
+        NaturalLanguageVehicleParser.bedLengthToCosmosFacetValues(bedLength);
 
     final client = http.Client();
     try {
       for (final pid in pageIds) {
         final batch = <Map<String, dynamic>>[];
 
-        // Strategy 1: Exact Make + Model facet query across all pages
-        if (make.isNotEmpty && model.isNotEmpty) {
-          final variants = <String>[model];
-          final sd = RegExp(r'^f-?([234]50)$', caseSensitive: false)
-              .firstMatch(model);
-          if (sd != null) {
-            variants.add('Super Duty F-${sd.group(1)} SRW');
-            variants.add('Super Duty F-${sd.group(1)} DRW');
-          } else if (RegExp(r'^mach[\s-]?e$', caseSensitive: false)
-              .hasMatch(model)) {
-            variants.add('Mustang Mach-E');
+        // Strategy 0: Exact DMS BedLength facet query when truck bed length is specified (e.g. "6.5ft bed")
+        if (bedFacets.isNotEmpty) {
+          final targetModels = variants.isNotEmpty ? variants : const [''];
+          for (final mv in targetModels) {
+            for (final bedFacet in bedFacets) {
+              final facetParams = <String, String>{
+                'BedLength': bedFacet,
+                if (make.isNotEmpty) 'Make': make,
+                if (mv.isNotEmpty) 'Model': mv,
+              };
+              batch.addAll(await _queryAllCosmosPages(
+                client,
+                pid,
+                facetParams,
+                maxPrice: maxPrice,
+                facetBedLength: bedLength,
+              ));
+            }
           }
+        }
+
+        // Strategy 1: Exact Make + Model facet query across all pages
+        if (make.isNotEmpty && variants.isNotEmpty) {
           for (final mv in variants) {
             batch.addAll(await _queryAllCosmosPages(
               client,
@@ -1510,7 +1426,7 @@ class LocalScoutEngine {
         }
 
         // Strategy 2: Make-only (or Make + Trim) full multi-page scan — e.g. "Ford under $60K"
-        if (make.isNotEmpty && model.isEmpty) {
+        if (make.isNotEmpty && variants.isEmpty) {
           final params = <String, String>{'Make': make};
           if (trim.isNotEmpty) params['q'] = '$make $trim';
           batch.addAll(await _queryAllCosmosPages(
@@ -1564,8 +1480,17 @@ class LocalScoutEngine {
 
         for (final v in batch) {
           final vin = v['vin']?.toString() ?? '';
-          if (vin.isNotEmpty && !byVin.containsKey(vin)) {
+          if (vin.isEmpty) continue;
+          final existing = byVin[vin];
+          if (existing == null) {
             byVin[vin] = v;
+          } else if ((existing['bedLength']?.toString() ?? '').isEmpty &&
+              (v['bedLength']?.toString() ?? '').isNotEmpty) {
+            byVin[vin] = <String, dynamic>{
+              ...existing,
+              'bedLength': v['bedLength'],
+              'highlights': v['highlights'],
+            };
           }
         }
       }
@@ -1580,8 +1505,9 @@ class LocalScoutEngine {
     http.Client client,
     int pageId,
     Map<String, String> params,
-    int pageNumber,
-  ) async {
+    int pageNumber, {
+    String facetBedLength = '',
+  }) async {
     final queryParams = <String, String>{
       ...params,
       'pn': '96',
@@ -1617,7 +1543,10 @@ class LocalScoutEngine {
           if (item is! Map || item['IsAdCard'] == true) continue;
           final vc = item['VehicleCard'];
           if (vc is! Map) continue;
-          final parsed = _parseVehicleCard(Map<String, dynamic>.from(vc));
+          final parsed = _parseVehicleCard(
+            Map<String, dynamic>.from(vc),
+            facetBedLength: facetBedLength,
+          );
           if (parsed != null) out.add(parsed);
         }
 
@@ -1651,8 +1580,15 @@ class LocalScoutEngine {
     int pageId,
     Map<String, String> params, {
     double? maxPrice,
+    String facetBedLength = '',
   }) async {
-    final first = await _querySingleCosmosPage(client, pageId, params, 1);
+    final first = await _querySingleCosmosPage(
+      client,
+      pageId,
+      params,
+      1,
+      facetBedLength: facetBedLength,
+    );
     final all = <Map<String, dynamic>>[...first.vehicles];
     if (first.totalPages <= 1) return all;
 
@@ -1668,7 +1604,15 @@ class LocalScoutEngine {
       }
 
       final batchRes = await Future.wait(
-        pageNums.map((pt) => _querySingleCosmosPage(client, pageId, params, pt)),
+        pageNums.map(
+          (pt) => _querySingleCosmosPage(
+            client,
+            pageId,
+            params,
+            pt,
+            facetBedLength: facetBedLength,
+          ),
+        ),
       );
 
       bool batchAllOverCap = false;
@@ -1720,7 +1664,10 @@ class LocalScoutEngine {
     return '$branch ($cityState)';
   }
 
-  static Map<String, dynamic>? _parseVehicleCard(Map<String, dynamic> vc) {
+  static Map<String, dynamic>? _parseVehicleCard(
+    Map<String, dynamic> vc, {
+    String facetBedLength = '',
+  }) {
     final vin = vc['VehicleVin']?.toString() ?? '';
     if (vin.isEmpty) return null;
 
@@ -1756,7 +1703,7 @@ class LocalScoutEngine {
         : ((vcMsrp != null && vcMsrp > 0) ? vcMsrp : null);
     msrp ??= (vcMsrp != null && vcMsrp > 0) ? vcMsrp : null;
 
-    final highlights =
+    final rawHighlights =
         ((vc['VehicleHighlightsModel'] as Map?)?['Highlights'] as List?)
                 ?.map((e) => e.toString())
                 .toList() ??
@@ -1767,8 +1714,28 @@ class LocalScoutEngine {
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
+    final bodyStyle =
+        (vc['VehicleBodyStyle'] ?? vc['VehicleBodyType'] ?? '').toString();
+    final bedLength = NaturalLanguageVehicleParser.extractBedLengthFromVehicle(
+      vc,
+      fullCommentsClean: comments,
+      facetBedLength: facetBedLength,
+    );
+    final cabStyle = NaturalLanguageVehicleParser.extractCabStyleFromText(
+      '$bodyStyle ${vc['VehicleName'] ?? ''} $comments',
+    );
+
+    final highlights = <String>[...rawHighlights];
+    if (bedLength.isNotEmpty) {
+      final bedLabel = NaturalLanguageVehicleParser.formatBedLengthLabel(bedLength);
+      if (bedLabel.isNotEmpty &&
+          !highlights.any((h) => h.toLowerCase().contains(bedLabel.toLowerCase()))) {
+        highlights.insert(0, bedLabel);
+      }
+    }
+
     final rawDt =
-        '${vc['VehicleDriveTrain'] ?? ''} ${highlights.join(' ')} $comments'
+        '${vc['VehicleDriveTrain'] ?? ''} ${rawHighlights.join(' ')} $comments'
             .toUpperCase();
     String drivetrain = '';
     if (rawDt.contains('4X4') || rawDt.contains('FOUR WHEEL DRIVE')) {
@@ -1813,7 +1780,13 @@ class LocalScoutEngine {
       'year': (vc['VehicleYear'] as num?)?.toInt(),
       'make': vc['VehicleMake']?.toString() ?? '',
       'model': vc['VehicleModel']?.toString() ?? '',
-      'trim': vc['VehicleTrim']?.toString() ?? '',
+      'trim': (vc['VehicleTrim'] ?? vc['VehicleRuleAdjustedTrim'] ?? '')
+          .toString()
+          .trim(),
+      'bodyStyle': bodyStyle,
+      'bedLength': bedLength,
+      'cabStyle': cabStyle,
+      'vehicleLength': (vc['Length'] as num?)?.toDouble(),
       'condition': condition,
       'price': finalPrice,
       'msrp': msrp,
@@ -1824,65 +1797,154 @@ class LocalScoutEngine {
       'mileage': (vc['VehicleMileage'] as num?)?.toInt() ?? 0,
       'drivetrain': drivetrain,
       'engine': vc['VehicleEngine']?.toString() ?? '',
+      'fuelType': vc['VehicleFuelType']?.toString() ?? '',
       'exteriorColor': vc['ExteriorColorLabel']?.toString() ?? '',
       'interiorColor': vc['InteriorColorLabel']?.toString() ?? '',
       'photoUrl': photoUrl,
       'listingUrl': listingUrl,
       'highlights': highlights,
       'commentsSummary':
-          comments.length > 700 ? comments.substring(0, 700) : comments,
+          comments.length > 900 ? comments.substring(0, 900) : comments,
+      'fullCommentsSearchText':
+          comments.length > 3500 ? comments.substring(0, 3500) : comments,
     };
+  }
+
+  static Map<String, dynamic> _guestToCriteriaMap(GuestProfile guest) {
+    return NaturalLanguageVehicleParser.parseCriteriaMap(<String, dynamic>{
+      'condition': guest.condition,
+      'minYear': guest.minYear,
+      'maxYear': guest.maxYear,
+      'make': guest.make,
+      'model': guest.model,
+      'trim': guest.trim,
+      'bedLength': guest.bedLength,
+      'cabStyle': guest.cabStyle,
+      'engineSpec': guest.engineSpec,
+      'maxPrice': guest.maxPrice,
+      'maxMileage': guest.maxMileage,
+      'drivetrain': guest.drivetrain,
+      'exteriorColor': guest.exteriorColor,
+      'features': guest.features,
+      'notes': guest.notes,
+    });
   }
 
   static List<Map<String, dynamic>> _preFilter(
       GuestProfile guest, List<Map<String, dynamic>> candidates) {
-    final locationHints = _extractLocationHints(guest);
+    final spec = _guestToCriteriaMap(guest);
+    final targetMake = (spec['make']?.toString() ?? '').trim();
+    final targetModel = (spec['model']?.toString() ?? '').trim();
+    final targetTrim = (spec['trim']?.toString() ?? '').trim();
+    final targetBed = (spec['bedLength']?.toString() ?? '').trim();
+    final targetCab = (spec['cabStyle']?.toString() ?? '').trim();
+    final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
+    final targetDt = (spec['drivetrain']?.toString() ?? 'Any').trim();
+    final targetColor = (spec['exteriorColor']?.toString() ?? '').trim();
+    final targetCondition = (spec['condition']?.toString() ?? 'Any').trim();
+    final minYear = (spec['minYear'] as num?)?.toInt();
+    final maxYear = (spec['maxYear'] as num?)?.toInt();
+    final maxPrice = (spec['maxPrice'] as num?)?.toDouble();
+    final maxMileage = (spec['maxMileage'] as num?)?.toInt();
+    final locationHints = (spec['locationHints'] as List<dynamic>? ?? const [])
+        .map((e) => e.toString())
+        .toList();
+    final strictPackages =
+        (spec['strictPackages'] as List<dynamic>? ?? const [])
+            .map((e) => e.toString())
+            .toList();
 
     return candidates.where((v) {
-      if (guest.make.isNotEmpty) {
-        final m = guest.make.toLowerCase();
-        final hay = '${v['make']} ${v['title']}'.toLowerCase();
+      if (targetMake.isNotEmpty) {
+        final m = targetMake.toLowerCase();
+        final hay = '${v['make'] ?? ''} ${v['title'] ?? ''}'.toLowerCase();
         if (!hay.contains(m)) return false;
       }
-      if (guest.model.isNotEmpty) {
-        final tokens = guest.model
-            .toLowerCase()
-            .replaceAll('-', ' ')
-            .split(RegExp(r'\s+'))
-            .where((t) => t.isNotEmpty)
-            .toList();
-        final hay = '${v['model']} ${v['title']} ${v['trim']}'
-            .toLowerCase()
-            .replaceAll('-', ' ');
-        if (!tokens.every((t) => hay.contains(t))) return false;
-      }
-      final yr = v['year'] as int?;
-      if (guest.minYear != null && yr != null && yr < guest.minYear!) {
-        return false;
-      }
-      if (guest.maxYear != null && yr != null && yr > guest.maxYear!) {
+
+      if (targetModel.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchModel(targetModel, v)) {
         return false;
       }
 
-      // Strict maxPrice check: require verified price <= maxPrice (or MSRP <= maxPrice if unpriced)
-      if (guest.maxPrice != null && guest.maxPrice! > 0) {
+      if (targetTrim.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchTrim(targetTrim, v)) {
+        return false;
+      }
+
+      if (targetBed.isNotEmpty) {
+        final vBed = NaturalLanguageVehicleParser.extractBedLengthFromVehicle(
+          v,
+          fullCommentsClean:
+              (v['fullCommentsSearchText'] ?? v['commentsSummary'] ?? '')
+                  .toString(),
+        );
+        if (vBed != targetBed) return false;
+      }
+
+      if (targetCab.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchCabStyle(
+            targetCab,
+            v,
+          )) {
+        return false;
+      }
+
+      if (targetEngine.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchEngine(
+            targetEngine,
+            v,
+          )) {
+        return false;
+      }
+
+      if (targetDt.isNotEmpty &&
+          targetDt != 'Any' &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchDrivetrain(
+            targetDt,
+            v,
+          )) {
+        return false;
+      }
+
+      if (targetColor.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchColor(targetColor, v)) {
+        return false;
+      }
+
+      if (strictPackages.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchStrictPackages(
+            strictPackages,
+            v,
+          )) {
+        return false;
+      }
+
+      final yr = v['year'] as int?;
+      if (minYear != null && yr != null && yr < minYear) {
+        return false;
+      }
+      if (maxYear != null && yr != null && yr > maxYear) {
+        return false;
+      }
+
+      if (maxPrice != null && maxPrice > 0) {
         final pr = (v['price'] as num?)?.toDouble();
         final msrp = (v['msrp'] as num?)?.toDouble();
         final effectivePrice = (pr != null && pr > 0)
             ? pr
             : ((msrp != null && msrp > 0) ? msrp : null);
-        if (effectivePrice == null || effectivePrice > guest.maxPrice!) {
+        if (effectivePrice == null || effectivePrice > maxPrice) {
           return false;
         }
       }
 
       final mi = (v['mileage'] as num?)?.toInt() ?? 0;
-      if (guest.maxMileage != null && mi > guest.maxMileage!) {
+      if (maxMileage != null && mi > maxMileage) {
         return false;
       }
 
-      if (guest.condition.isNotEmpty && guest.condition != 'Any') {
-        final c = guest.condition.toLowerCase();
+      if (targetCondition.isNotEmpty && targetCondition != 'Any') {
+        final c = targetCondition.toLowerCase();
         final vc = (v['condition']?.toString() ?? '').toLowerCase();
         if (c == 'new' && !vc.contains('new')) return false;
         if (c == 'cpo' && !vc.contains('certified')) return false;
@@ -1906,47 +1968,93 @@ class LocalScoutEngine {
 
   static List<Map<String, dynamic>> _deterministicEvaluate(
       GuestProfile guest, List<Map<String, dynamic>> filtered) {
+    final spec = _guestToCriteriaMap(guest);
+    final strictFiltered = _preFilter(guest, filtered);
+    final targetMake = (spec['make']?.toString() ?? '').trim();
+    final targetTrim = (spec['trim']?.toString() ?? '').trim();
+    final targetBed = (spec['bedLength']?.toString() ?? '').trim();
+    final targetCab = (spec['cabStyle']?.toString() ?? '').trim();
+    final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
+    final targetDt = (spec['drivetrain']?.toString() ?? 'Any').trim();
+    final targetColor = (spec['exteriorColor']?.toString() ?? '').trim();
+    final maxPrice = (spec['maxPrice'] as num?)?.toDouble();
+    final strictPackages =
+        (spec['strictPackages'] as List<dynamic>? ?? const [])
+            .map((e) => e.toString())
+            .toList();
+
     final out = <Map<String, dynamic>>[];
 
-    for (final v in filtered) {
+    for (final v in strictFiltered) {
       final matched = <String>[];
-      int score = 80;
-      final vDt = (v['drivetrain']?.toString() ?? '');
-      if (guest.drivetrain != 'Any') {
-        if (vDt.isNotEmpty &&
-            !vDt.toUpperCase().contains(guest.drivetrain.toUpperCase()) &&
-            !vDt.contains('AWD / 4WD')) {
-          continue;
-        }
-        matched.add('${vDt.isNotEmpty ? vDt : guest.drivetrain} Drivetrain');
+      int score = 84;
+
+      final vBed = NaturalLanguageVehicleParser.extractBedLengthFromVehicle(
+        v,
+        fullCommentsClean:
+            (v['fullCommentsSearchText'] ?? v['commentsSummary'] ?? '')
+                .toString(),
+      );
+
+      if (targetBed.isNotEmpty) {
+        matched.add(
+            '${NaturalLanguageVehicleParser.formatBedLengthLabel(targetBed)} (Verified)');
+        score += 6;
+      } else if (vBed.isNotEmpty) {
+        matched.add(NaturalLanguageVehicleParser.formatBedLengthLabel(vBed));
+      }
+
+      final vTrim = (v['trim']?.toString() ?? '').trim();
+      if (targetTrim.isNotEmpty) {
+        matched.add('${vTrim.isNotEmpty ? vTrim : targetTrim} Trim Package');
         score += 5;
+      } else if (vTrim.isNotEmpty) {
+        matched.add('$vTrim Trim');
+      }
+
+      if (targetCab.isNotEmpty) {
+        final bStyle = (v['bodyStyle']?.toString() ?? '').trim();
+        matched.add(bStyle.isNotEmpty ? bStyle : targetCab);
+        score += 3;
+      }
+
+      if (targetEngine.isNotEmpty) {
+        matched.add('$targetEngine Powertrain');
+        score += 3;
+      }
+
+      final vDt = (v['drivetrain']?.toString() ?? '').trim();
+      if (targetDt.isNotEmpty && targetDt != 'Any') {
+        matched.add('${vDt.isNotEmpty ? vDt : targetDt} Drivetrain');
+        score += 4;
       } else if (vDt.isNotEmpty) {
         matched.add('$vDt Drivetrain');
       }
 
-      if (guest.trim.isNotEmpty) {
-        final hay =
-            '${v['trim']} ${v['title']} ${v['commentsSummary']}'.toLowerCase();
-        if (!hay.contains(guest.trim.toLowerCase())) continue;
-        matched.add('${v['trim']} Trim');
-        score += 5;
-      } else if ((v['trim']?.toString() ?? '').isNotEmpty) {
-        matched.add('${v['trim']} Trim');
-      }
-
-      if (guest.make.isNotEmpty && (v['make']?.toString() ?? '').isNotEmpty) {
+      if (targetMake.isNotEmpty && (v['make']?.toString() ?? '').isNotEmpty) {
         matched.add(
             '${v['year'] ?? ''} ${v['make']} ${v['model']} (${v['condition']})'
                 .trim());
       }
 
       final pr = (v['price'] as num?)?.toDouble();
-      if (guest.maxPrice != null && pr != null) {
-        final diff = (guest.maxPrice! - pr).round();
+      if (maxPrice != null && pr != null) {
+        final diff = (maxPrice - pr).round();
         matched.add(diff > 0
-            ? '\$${pr.toStringAsFixed(0)} Preston Price (\$$diff under \$${guest.maxPrice!.toStringAsFixed(0)} cap)'
-            : 'Within \$${guest.maxPrice!.toStringAsFixed(0)} Budget');
+            ? '\$${pr.toStringAsFixed(0)} Preston Price (\$$diff under \$${maxPrice.toStringAsFixed(0)} cap)'
+            : 'Within \$${maxPrice.toStringAsFixed(0)} Budget');
         score += 4;
+      }
+
+      if (targetColor.isNotEmpty &&
+          (v['exteriorColor']?.toString() ?? '').isNotEmpty) {
+        matched.add('${v['exteriorColor']} Exterior');
+        score += 3;
+      }
+
+      for (final pkg in strictPackages) {
+        matched.add(pkg);
+        score += 3;
       }
 
       final highlights = (v['highlights'] as List<dynamic>? ?? [])
@@ -1959,12 +2067,19 @@ class LocalScoutEngine {
         );
         if (hit.isNotEmpty) {
           matched.add(hit);
-          score += 3;
+          score += 2;
         }
       }
-      for (final h in highlights.take(5)) {
+      for (final h in highlights.take(6)) {
         if (matched.length >= 6) break;
-        if (!matched.contains(h)) matched.add(h);
+        final hLower = h.toLowerCase();
+        final alreadyCovered = matched.any(
+          (mf) =>
+              mf.toLowerCase() == hLower ||
+              mf.toLowerCase().contains(hLower) ||
+              (hLower == '4wd/awd' && mf.toLowerCase().contains('drivetrain')),
+        );
+        if (!alreadyCovered) matched.add(h);
       }
 
       out.add({
@@ -1972,7 +2087,7 @@ class LocalScoutEngine {
         'matchScore': score.clamp(1, 99),
         'matchedFeatures': matched.toSet().take(8).toList(),
         'agentSummary':
-            'Verified match at ${v['location']}: ${v['title']} (${v['condition']}) priced at ${pr != null ? '\$${pr.toStringAsFixed(0)}' : 'Call for Price'} meets ${guest.name}\'s target specs.',
+            'Verified match at ${v['location']}: ${v['title']} (${v['condition']}) priced at ${pr != null ? '\$${pr.toStringAsFixed(0)}' : 'Call for Price'} meets ${guest.name}\'s ${guest.targetVehicleLabel} criteria.',
       });
     }
 
@@ -1987,7 +2102,6 @@ class LocalScoutEngine {
       return pa.compareTo(pb);
     });
 
-    // Return ALL qualifying vehicles across all Preston locations (no 25-item cap!)
     return out;
   }
 
@@ -2024,11 +2138,15 @@ class LocalScoutEngine {
       return (
         matches: <Map<String, dynamic>>[],
         summary:
-            'Scanned ${candidates.length} live prestonmotor.com vehicles; 0 met core criteria.',
+            'Scanned ${candidates.length} live prestonmotor.com vehicles; 0 met ${guest.targetVehicleLabel} criteria.',
       );
     }
 
     final fullDeterministic = _deterministicEvaluate(guest, filtered);
+    final detByVin = <String, Map<String, dynamic>>{
+      for (final dm in fullDeterministic)
+        (dm['vehicle'] as Map)['vin'].toString(): dm,
+    };
     final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
     final model = _settings['geminiModel']?.toString() ?? 'gemini-2.5-flash';
 
@@ -2039,6 +2157,11 @@ class LocalScoutEngine {
             .map((v) => {
                   'vin': v['vin'],
                   'title': v['title'],
+                  'make': v['make'],
+                  'model': v['model'],
+                  'trim': v['trim'],
+                  'bodyStyle': v['bodyStyle'],
+                  'bedLength': v['bedLength'],
                   'condition': v['condition'],
                   'price': v['price'],
                   'location': v['location'],
@@ -2061,7 +2184,7 @@ class LocalScoutEngine {
                   'parts': [
                     {
                       'text':
-                          'Evaluate live prestonmotor.com vehicles against the guest requirements. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
+                          'Evaluate live prestonmotor.com vehicles against the guest\'s exact requirements (make, exact model, exact trim, bedLength, cabStyle, drivetrain, budget). Only include vehicles that satisfy every specified criterion. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
                     }
                   ]
                 },
@@ -2074,6 +2197,11 @@ class LocalScoutEngine {
                           'guest': {
                             'name': guest.name,
                             'target': guest.targetVehicleLabel,
+                            'make': guest.make,
+                            'model': guest.model,
+                            'trim': guest.trim,
+                            'bedLength': guest.bedLength,
+                            'cabStyle': guest.cabStyle,
                             'drivetrain': guest.drivetrain,
                             'maxPrice': guest.maxPrice,
                             'features': guest.features,
@@ -2087,7 +2215,7 @@ class LocalScoutEngine {
                   }
                 ],
                 'generationConfig': {
-                  'temperature': 0.15,
+                  'temperature': 0.1,
                   'responseMimeType': 'application/json',
                 }
               }),
@@ -2110,20 +2238,34 @@ class LocalScoutEngine {
             if (m is! Map) continue;
             final vin = m['vin']?.toString() ?? '';
             final v = byVin[vin];
-            if (v == null) continue;
+            if (v == null || !detByVin.containsKey(vin)) continue;
+            final detFeatures = (detByVin[vin]?['matchedFeatures'] as List<dynamic>? ?? const [])
+                .map((e) => e.toString())
+                .toList();
+            final combinedFeatures = <String>{
+              if (guest.bedLength.isNotEmpty)
+                '${NaturalLanguageVehicleParser.formatBedLengthLabel(guest.bedLength)} (Verified)',
+              if (guest.trim.isNotEmpty)
+                '${(v['trim']?.toString() ?? '').isNotEmpty ? v['trim'] : guest.trim} Trim Package',
+              ...((m['matchedFeatures'] as List<dynamic>? ?? const [])
+                  .map((e) => e.toString())),
+              ...detFeatures,
+            }.take(8).toList();
+
             geminiByVin[vin] = {
               'vehicle': v,
-              'matchScore': (m['matchScore'] as num?)?.toInt() ?? 88,
-              'matchedFeatures': (m['matchedFeatures'] as List<dynamic>? ?? [])
-                  .map((e) => e.toString())
-                  .toList(),
-              'agentSummary': m['agentSummary']?.toString() ?? '',
+              'matchScore': (m['matchScore'] as num?)?.toInt() ?? 90,
+              'matchedFeatures': combinedFeatures,
+              'agentSummary': m['agentSummary']?.toString() ??
+                  (detByVin[vin]?['agentSummary']?.toString() ?? ''),
             };
           }
 
           List<Map<String, dynamic>> merged;
           if (filtered.length <= 30) {
-            merged = geminiByVin.values.toList();
+            merged = geminiByVin.isNotEmpty
+                ? geminiByVin.values.toList()
+                : fullDeterministic;
           } else {
             merged = [];
             for (final dm in fullDeterministic) {

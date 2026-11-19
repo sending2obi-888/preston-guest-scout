@@ -1,3 +1,5 @@
+import '../services/natural_language_parser.dart';
+
 class VehicleSearchTarget {
   final String id;
   final String condition;
@@ -6,6 +8,9 @@ class VehicleSearchTarget {
   final String make;
   final String model;
   final String trim;
+  final String bedLength;
+  final String cabStyle;
+  final String engineSpec;
   final double? maxPrice;
   final int? maxMileage;
   final String drivetrain;
@@ -22,6 +27,9 @@ class VehicleSearchTarget {
     this.make = '',
     this.model = '',
     this.trim = '',
+    this.bedLength = '',
+    this.cabStyle = '',
+    this.engineSpec = '',
     this.maxPrice,
     this.maxMileage,
     this.drivetrain = 'Any',
@@ -32,23 +40,27 @@ class VehicleSearchTarget {
   });
 
   factory VehicleSearchTarget.fromJson(Map<String, dynamic> json) {
+    final norm = NaturalLanguageVehicleParser.parseCriteriaMap(json);
     return VehicleSearchTarget(
       id: json['id']?.toString() ?? '',
-      condition: json['condition']?.toString() ?? 'Any',
-      minYear: (json['minYear'] as num?)?.toInt(),
-      maxYear: (json['maxYear'] as num?)?.toInt(),
-      make: json['make']?.toString() ?? '',
-      model: json['model']?.toString() ?? '',
-      trim: json['trim']?.toString() ?? '',
-      maxPrice: (json['maxPrice'] as num?)?.toDouble(),
-      maxMileage: (json['maxMileage'] as num?)?.toInt(),
-      drivetrain: json['drivetrain']?.toString() ?? 'Any',
-      exteriorColor: json['exteriorColor']?.toString() ?? '',
-      features: (json['features'] as List<dynamic>?)
+      condition: norm['condition']?.toString() ?? 'Any',
+      minYear: (norm['minYear'] as num?)?.toInt(),
+      maxYear: (norm['maxYear'] as num?)?.toInt(),
+      make: norm['make']?.toString() ?? '',
+      model: norm['model']?.toString() ?? '',
+      trim: norm['trim']?.toString() ?? '',
+      bedLength: norm['bedLength']?.toString() ?? '',
+      cabStyle: norm['cabStyle']?.toString() ?? '',
+      engineSpec: norm['engineSpec']?.toString() ?? '',
+      maxPrice: (norm['maxPrice'] as num?)?.toDouble(),
+      maxMileage: (norm['maxMileage'] as num?)?.toInt(),
+      drivetrain: norm['drivetrain']?.toString() ?? 'Any',
+      exteriorColor: norm['exteriorColor']?.toString() ?? '',
+      features: (norm['features'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .toList() ??
           const [],
-      notes: json['notes']?.toString() ?? '',
+      notes: norm['notes']?.toString() ?? '',
       createdAt: json['createdAt']?.toString() ?? '',
     );
   }
@@ -61,6 +73,9 @@ class VehicleSearchTarget {
         'make': make,
         'model': model,
         'trim': trim,
+        'bedLength': bedLength,
+        'cabStyle': cabStyle,
+        'engineSpec': engineSpec,
         'maxPrice': maxPrice,
         'maxMileage': maxMileage,
         'drivetrain': drivetrain,
@@ -83,7 +98,14 @@ class VehicleSearchTarget {
     if (make.isNotEmpty) parts.add(make);
     if (model.isNotEmpty) parts.add(model);
     if (trim.isNotEmpty) parts.add(trim);
-    if (parts.isEmpty) {
+
+    final qualifiers = <String>[];
+    if (cabStyle.isNotEmpty) qualifiers.add(cabStyle);
+    if (bedLength.isNotEmpty) {
+      qualifiers.add(NaturalLanguageVehicleParser.formatBedLengthLabel(bedLength));
+    }
+
+    if (parts.isEmpty && qualifiers.isEmpty) {
       if (maxPrice != null) {
         return 'Vehicles under \$${maxPrice!.toStringAsFixed(0)}';
       }
@@ -93,7 +115,11 @@ class VehicleSearchTarget {
       }
       return 'Custom Vehicle Requirements';
     }
-    return parts.join(' ');
+
+    final base = parts.join(' ');
+    if (qualifiers.isEmpty) return base;
+    if (base.isEmpty) return qualifiers.join(' • ');
+    return '$base • ${qualifiers.join(' • ')}';
   }
 }
 
@@ -134,6 +160,9 @@ class GuestProfile {
   final String make;
   final String model;
   final String trim;
+  final String bedLength;
+  final String cabStyle;
+  final String engineSpec;
   final double? maxPrice;
   final int? maxMileage;
   final String drivetrain;
@@ -163,6 +192,9 @@ class GuestProfile {
     this.make = '',
     this.model = '',
     this.trim = '',
+    this.bedLength = '',
+    this.cabStyle = '',
+    this.engineSpec = '',
     this.maxPrice,
     this.maxMileage,
     this.drivetrain = 'Any',
@@ -210,22 +242,25 @@ class GuestProfile {
 
     if (parsedTargets.isEmpty) {
       parsedTargets.add(
-        VehicleSearchTarget(
-          id: guestId.isNotEmpty ? '$guestId-primary' : 'primary',
-          condition: json['condition']?.toString() ?? 'Any',
-          minYear: (json['minYear'] as num?)?.toInt(),
-          maxYear: (json['maxYear'] as num?)?.toInt(),
-          make: json['make']?.toString() ?? '',
-          model: json['model']?.toString() ?? '',
-          trim: json['trim']?.toString() ?? '',
-          maxPrice: (json['maxPrice'] as num?)?.toDouble(),
-          maxMileage: (json['maxMileage'] as num?)?.toInt(),
-          drivetrain: json['drivetrain']?.toString() ?? 'Any',
-          exteriorColor: json['exteriorColor']?.toString() ?? '',
-          features: primaryFeatures,
-          notes: json['notes']?.toString() ?? '',
-          createdAt: createdAtStr,
-        ),
+        VehicleSearchTarget.fromJson(<String, dynamic>{
+          'id': guestId.isNotEmpty ? '$guestId-primary' : 'primary',
+          'condition': json['condition']?.toString() ?? 'Any',
+          'minYear': json['minYear'],
+          'maxYear': json['maxYear'],
+          'make': json['make']?.toString() ?? '',
+          'model': json['model']?.toString() ?? '',
+          'trim': json['trim']?.toString() ?? '',
+          'bedLength': json['bedLength']?.toString() ?? '',
+          'cabStyle': json['cabStyle']?.toString() ?? '',
+          'engineSpec': json['engineSpec']?.toString() ?? '',
+          'maxPrice': json['maxPrice'],
+          'maxMileage': json['maxMileage'],
+          'drivetrain': json['drivetrain']?.toString() ?? 'Any',
+          'exteriorColor': json['exteriorColor']?.toString() ?? '',
+          'features': primaryFeatures,
+          'notes': json['notes']?.toString() ?? '',
+          'createdAt': createdAtStr,
+        }),
       );
     }
 
@@ -292,6 +327,9 @@ class GuestProfile {
       make: first.make,
       model: first.model,
       trim: first.trim,
+      bedLength: first.bedLength,
+      cabStyle: first.cabStyle,
+      engineSpec: first.engineSpec,
       maxPrice: first.maxPrice,
       maxMileage: first.maxMileage,
       drivetrain: first.drivetrain,
@@ -318,22 +356,25 @@ class GuestProfile {
   List<VehicleSearchTarget> get effectiveTargets {
     if (vehicleTargets.isNotEmpty) return vehicleTargets;
     return [
-      VehicleSearchTarget(
-        id: id.isNotEmpty ? '$id-primary' : 'primary',
-        condition: condition,
-        minYear: minYear,
-        maxYear: maxYear,
-        make: make,
-        model: model,
-        trim: trim,
-        maxPrice: maxPrice,
-        maxMileage: maxMileage,
-        drivetrain: drivetrain,
-        exteriorColor: exteriorColor,
-        features: features,
-        notes: notes,
-        createdAt: createdAt,
-      ),
+      VehicleSearchTarget.fromJson(<String, dynamic>{
+        'id': id.isNotEmpty ? '$id-primary' : 'primary',
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'bedLength': bedLength,
+        'cabStyle': cabStyle,
+        'engineSpec': engineSpec,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'createdAt': createdAt,
+      }),
     ];
   }
 
@@ -360,6 +401,10 @@ class GuestProfile {
         ..write(t.model)
         ..write(' ')
         ..write(t.trim)
+        ..write(' ')
+        ..write(t.bedLength)
+        ..write(' ')
+        ..write(t.cabStyle)
         ..write(' ')
         ..write(t.drivetrain)
         ..write(' ')

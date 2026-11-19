@@ -1,3 +1,12 @@
+import {
+  bedLengthToCosmosFacetValues,
+  expandPrestonModelVariants,
+  extractBedLengthFromVehicle,
+  extractCabStyleFromText,
+  formatBedLengthLabel,
+  parseNaturalLanguageCriteria,
+} from './natural_language_parser.mjs';
+
 const PRESTON_HOST = 'www.prestonmotor.com';
 const BASE_URL = `https://${PRESTON_HOST}`;
 
@@ -8,135 +17,14 @@ let cachedConfig = {
   fetchedAt: 0,
 };
 
-const KNOWN_MAKES = [
-  { canonical: 'Ford', aliases: ['ford'] },
-  { canonical: 'Lincoln', aliases: ['lincoln'] },
-  { canonical: 'Hyundai', aliases: ['hyundai'] },
-  { canonical: 'Mazda', aliases: ['mazda'] },
-  { canonical: 'Nissan', aliases: ['nissan'] },
-  { canonical: 'Chevrolet', aliases: ['chevrolet', 'chevy'] },
-  { canonical: 'Jeep', aliases: ['jeep'] },
-  { canonical: 'Ram', aliases: ['ram'] },
-  { canonical: 'Dodge', aliases: ['dodge'] },
-  { canonical: 'Chrysler', aliases: ['chrysler'] },
-  { canonical: 'Toyota', aliases: ['toyota'] },
-  { canonical: 'Honda', aliases: ['honda'] },
-  { canonical: 'GMC', aliases: ['gmc'] },
-  { canonical: 'Kia', aliases: ['kia'] },
-  { canonical: 'Subaru', aliases: ['subaru'] },
-  { canonical: 'Genesis', aliases: ['genesis'] },
-  { canonical: 'Volkswagen', aliases: ['volkswagen', 'vw'] },
-  { canonical: 'BMW', aliases: ['bmw'] },
-  { canonical: 'Mercedes-Benz', aliases: ['mercedes-benz', 'mercedes'] },
-  { canonical: 'Audi', aliases: ['audi'] },
-  { canonical: 'Lexus', aliases: ['lexus'] },
-  { canonical: 'Cadillac', aliases: ['cadillac'] },
-  { canonical: 'Buick', aliases: ['buick'] },
-];
-
-const LOCATION_KEYWORDS = [
-  'millsboro',
-  'boulevard ford',
-  'boulevard lincoln',
-  'lewes',
-  'georgetown',
-  'hurlock',
-  'pittsville',
-  'aberdeen',
-  'denton',
-  'keller',
-  'dover',
-  'randallstown',
-  'wilmington',
-  'easton',
-  'snow hill',
-  'salisbury',
-];
-
 /**
- * Normalizes structured guest fields AND extracts fallback specs (such as Make,
- * Max Price like "$60K" or shorthand "60", Drivetrain, Condition, and Dealership
- * Location hints) from natural-language notes so broad queries like
- * "Ford under $60K" always match every qualifying vehicle on prestonmotor.com.
+ * Normalizes structured guest fields AND extracts structured vehicle criteria
+ * (Make, Model like "F150" -> "F-150", Trim like "XLT", Bed Length like "6.5ft bed",
+ * Cab Style, Engine, Year Range, Max Price, Max Mileage, Condition, Drivetrain,
+ * Color, and Dealership Location hints) from natural-language input.
  */
 export function normalizeGuestSpecs(guest) {
-  const rawNotes = `${guest.notes || ''} ${(guest.features || []).join(' ')}`.trim();
-  const lowerNotes = rawNotes.toLowerCase();
-
-  // 1. Normalize Make
-  let make = (guest.make || '').trim();
-  if (!make && lowerNotes) {
-    for (const entry of KNOWN_MAKES) {
-      const hit = entry.aliases.some((alias) =>
-        new RegExp(`\\b${alias.replace('-', '[-\\s]?')}\\b`, 'i').test(lowerNotes)
-      );
-      if (hit) {
-        make = entry.canonical;
-        break;
-      }
-    }
-  }
-
-  // 2. Normalize Max Price (handles 60000, "60k", "$60K" in notes, or shorthand 60 -> 60000)
-  let maxPrice = guest.maxPrice != null && Number(guest.maxPrice) > 0 ? Number(guest.maxPrice) : null;
-  if (maxPrice != null && maxPrice > 0 && maxPrice < 500) {
-    // Shorthand entry such as "60" when typing "60K" into a numeric field
-    maxPrice = maxPrice * 1000;
-  }
-  if (maxPrice == null && rawNotes) {
-    const budgetRegex =
-      /(?:under|below|max|up\s+to|less\s+than|around|budget(?:\s+of)?|<=?)\s*\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|thousand)?\b|\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(k|thousand)\b|\$\s*(\d{1,3}(?:,\d{3})+)\b/i;
-    const m = rawNotes.match(budgetRegex);
-    if (m) {
-      if (m[1]) {
-        let val = parseFloat(m[1].replace(/,/g, ''));
-        if (m[2] || (val > 0 && val < 500)) val *= 1000;
-        if (val >= 1000) maxPrice = val;
-      } else if (m[3]) {
-        const val = parseFloat(m[3].replace(/,/g, '')) * 1000;
-        if (val >= 1000) maxPrice = val;
-      } else if (m[5]) {
-        const val = parseFloat(m[5].replace(/,/g, ''));
-        if (val >= 1000) maxPrice = val;
-      }
-    }
-  }
-
-  // 3. Normalize Condition if Any
-  let condition = (guest.condition || 'Any').trim();
-  if (condition === 'Any' && lowerNotes) {
-    if (/\bbrand\s+new\b|\bnew\s+only\b/.test(lowerNotes)) {
-      condition = 'New';
-    } else if (/\bcpo\b|\bcertified\s+pre-?owned\b/.test(lowerNotes)) {
-      condition = 'CPO';
-    } else if (/\bpre-?owned\s+only\b|\bused\s+only\b/.test(lowerNotes)) {
-      condition = 'Pre-Owned';
-    }
-  }
-
-  // 4. Normalize Drivetrain if Any
-  let drivetrain = (guest.drivetrain || 'Any').trim();
-  if (drivetrain === 'Any' && lowerNotes) {
-    if (/\b(4wd|4x4|four[\s-]wheel[\s-]drive)\b/i.test(lowerNotes)) {
-      drivetrain = '4WD';
-    } else if (/\b(awd|all[\s-]wheel[\s-]drive)\b/i.test(lowerNotes)) {
-      drivetrain = 'AWD';
-    }
-  }
-
-  // 5. Detect explicit dealership / town filter in notes (only when explicitly mentioned)
-  const locationHints = LOCATION_KEYWORDS.filter((loc) => lowerNotes.includes(loc));
-
-  return {
-    ...guest,
-    make,
-    model: (guest.model || '').trim(),
-    trim: (guest.trim || '').trim(),
-    condition,
-    drivetrain,
-    maxPrice,
-    locationHints,
-  };
+  return parseNaturalLanguageCriteria(guest);
 }
 
 async function refreshDealerOnConfig(force = false) {
@@ -281,7 +169,7 @@ function formatDealershipLocation(vc) {
   return `${dealerBranch} (${cityState})`;
 }
 
-function parseVehicleCard(vc) {
+function parseVehicleCard(vc, { facetBedLength = '' } = {}) {
   if (!vc || !vc.VehicleVin) return null;
 
   const prices = parsePriceLibrary(vc.VehiclePriceLibrary);
@@ -290,13 +178,26 @@ function parseVehicleCard(vc) {
     (vc.VehicleInternetPrice > 0 ? vc.VehicleInternetPrice : null) ||
     (vc.VehicleMsrp > 0 ? vc.VehicleMsrp : null);
 
-  const highlights = Array.isArray(vc.VehicleHighlightsModel?.Highlights)
+  const rawHighlights = Array.isArray(vc.VehicleHighlightsModel?.Highlights)
     ? vc.VehicleHighlightsModel.Highlights.filter(Boolean)
     : [];
 
   const commentsClean = stripHtml(vc.VehicleComments || '');
-  const drivetrain = normalizeDrivetrain(vc, highlights, commentsClean);
+  const drivetrain = normalizeDrivetrain(vc, rawHighlights, commentsClean);
   const location = formatDealershipLocation(vc);
+  const bodyStyle = vc.VehicleBodyStyle || vc.VehicleBodyType || '';
+  const bedLength = extractBedLengthFromVehicle(vc, commentsClean, facetBedLength);
+  const cabStyle = extractCabStyleFromText(
+    `${bodyStyle} ${vc.VehicleName || ''} ${commentsClean}`
+  );
+
+  const highlights = [...rawHighlights];
+  if (bedLength) {
+    const bedLabel = formatBedLengthLabel(bedLength);
+    if (bedLabel && !highlights.some((h) => h.toLowerCase().includes(bedLabel.toLowerCase()))) {
+      highlights.unshift(bedLabel);
+    }
+  }
 
   const rawPhoto =
     vc.VehicleImageModel?.VehicleImageCarouselModel?.PhotoList?.[0] ||
@@ -325,7 +226,10 @@ function parseVehicleCard(vc) {
     model: (vc.VehicleModel || '').trim(),
     trim: (vc.VehicleTrim || vc.VehicleRuleAdjustedTrim || '').trim(),
     condition,
-    bodyStyle: vc.VehicleBodyStyle || vc.VehicleBodyType || '',
+    bodyStyle,
+    bedLength,
+    cabStyle,
+    vehicleLength: Number(vc.Length) || null,
     price,
     msrp: prices.msrp || (vc.VehicleMsrp > 0 ? vc.VehicleMsrp : null),
     dealerFee: prices.dealerFee,
@@ -335,6 +239,7 @@ function parseVehicleCard(vc) {
     mileage: typeof vc.VehicleMileage === 'number' ? vc.VehicleMileage : 0,
     drivetrain,
     engine: vc.VehicleEngine || '',
+    fuelType: vc.VehicleFuelType || '',
     transmission: vc.VehicleTransmission || '',
     exteriorColor: vc.ExteriorColorLabel || vc.VehicleGenericColor || '',
     interiorColor: vc.InteriorColorLabel || '',
@@ -342,10 +247,18 @@ function parseVehicleCard(vc) {
     listingUrl: detailUrl.startsWith('http') ? detailUrl : `${BASE_URL}${detailUrl}`,
     highlights,
     commentsSummary: commentsClean.slice(0, 900),
+    fullCommentsSearchText: commentsClean.slice(0, 3500),
   };
 }
 
-async function fetchSingleCosmosPage(dealerId, pageId, paramsObj, pageNumber = 1, retries = 1) {
+async function fetchSingleCosmosPage(
+  dealerId,
+  pageId,
+  paramsObj,
+  pageNumber = 1,
+  retries = 1,
+  { facetBedLength = '' } = {}
+) {
   const queryObj = {
     ...paramsObj,
     pn: '96',
@@ -374,7 +287,7 @@ async function fetchSingleCosmosPage(dealerId, pageId, paramsObj, pageNumber = 1
       const vehicles = [];
       for (const item of cards) {
         if (item?.IsAdCard || !item?.VehicleCard) continue;
-        const parsed = parseVehicleCard(item.VehicleCard);
+        const parsed = parseVehicleCard(item.VehicleCard, { facetBedLength });
         if (parsed) vehicles.push(parsed);
       }
 
@@ -400,8 +313,15 @@ async function fetchSingleCosmosPage(dealerId, pageId, paramsObj, pageNumber = 1
  * every matching vehicle across every Preston Automotive Group store (including Boulevard Ford
  * in Millsboro, DE).
  */
-async function fetchAllCosmosPages(dealerId, pageId, paramsObj, { maxPrice = null } = {}) {
-  const firstPage = await fetchSingleCosmosPage(dealerId, pageId, paramsObj, 1);
+async function fetchAllCosmosPages(
+  dealerId,
+  pageId,
+  paramsObj,
+  { maxPrice = null, facetBedLength = '' } = {}
+) {
+  const firstPage = await fetchSingleCosmosPage(dealerId, pageId, paramsObj, 1, 1, {
+    facetBedLength,
+  });
   const allVehicles = [...firstPage.vehicles];
 
   if (firstPage.totalPages <= 1) {
@@ -417,7 +337,7 @@ async function fetchAllCosmosPages(dealerId, pageId, paramsObj, { maxPrice = nul
 
     const batchResults = await Promise.all(
       pageNums.map((pt) =>
-        fetchSingleCosmosPage(dealerId, pageId, paramsObj, pt).catch(() => ({
+        fetchSingleCosmosPage(dealerId, pageId, paramsObj, pt, 1, { facetBedLength }).catch(() => ({
           vehicles: [],
         }))
       )
@@ -485,21 +405,40 @@ export async function searchPrestonInventory(rawGuest) {
   const make = guest.make;
   const model = guest.model;
   const trim = guest.trim;
+  const bedLength = guest.bedLength || '';
   const maxPrice = guest.maxPrice;
+  const modelVariants = expandPrestonModelVariants(make, model);
+  const bedFacetValues = bedLengthToCosmosFacetValues(bedLength);
 
   for (const pageId of pageIds) {
     const mergedBatch = [];
 
-    // Strategy 1: Exact Make + Model facet query across all pages (with Ford Super Duty & Mach-E normalization)
-    if (make && model) {
-      const modelVariants = [model];
-      const sdMatch = model.match(/^f-?([234]50)$/i);
-      if (sdMatch) {
-        modelVariants.push(`Super Duty F-${sdMatch[1]} SRW`);
-        modelVariants.push(`Super Duty F-${sdMatch[1]} DRW`);
-      } else if (/^mach[\s-]?e$/i.test(model)) {
-        modelVariants.push('Mustang Mach-E');
+    // Strategy 0: Exact DMS BedLength facet query when user specified a truck bed length (e.g. "6.5ft bed")!
+    // DealerOn stores factory bed length as a server-side facet ("6-1/2' Box", "5-1/2' Box", "8' Box", etc.)
+    // even when VehicleCard comments omit bed dimensions on New factory-invoice trucks.
+    if (bedFacetValues.length > 0) {
+      const targetModels = modelVariants.length > 0 ? modelVariants : [''];
+      for (const mv of targetModels) {
+        for (const bedFacet of bedFacetValues) {
+          const facetParams = { BedLength: bedFacet };
+          if (make) facetParams.Make = make;
+          if (mv) facetParams.Model = mv;
+          try {
+            const facetRes = await fetchAllCosmosPages(cfg.dealerId, pageId, facetParams, {
+              maxPrice,
+              facetBedLength: bedLength,
+            });
+            mergedBatch.push(...facetRes);
+          } catch {
+            // Ignore individual facet query error
+          }
+        }
       }
+    }
+
+    // Strategy 1: Exact Make + Model facet query across all pages (also captures Pre-Owned units
+    // whose dealer build sheet comments specify "6.5' bed" even when DMS BedLength facet is blank)
+    if (make && modelVariants.length > 0) {
       for (const mv of modelVariants) {
         try {
           const res = await fetchAllCosmosPages(
@@ -516,7 +455,7 @@ export async function searchPrestonInventory(rawGuest) {
     }
 
     // Strategy 2: Make-only (or Make + Trim) full multi-page scan — e.g. "Ford under $60K"
-    if (make && !model) {
+    if (make && modelVariants.length === 0) {
       try {
         const params = { Make: make };
         if (trim) params.q = `${make} ${trim}`;
@@ -579,8 +518,15 @@ export async function searchPrestonInventory(rawGuest) {
     }
 
     for (const v of mergedBatch) {
-      if (!byVin.has(v.vin)) {
+      const existing = byVin.get(v.vin);
+      if (!existing) {
         byVin.set(v.vin, v);
+      } else if (!existing.bedLength && v.bedLength) {
+        byVin.set(v.vin, {
+          ...existing,
+          bedLength: v.bedLength,
+          highlights: v.highlights,
+        });
       }
     }
   }

@@ -269,7 +269,53 @@ object NativeBackgroundMatchScanner {
         if (make.isNotEmpty()) parts.add(make)
         if (model.isNotEmpty()) parts.add(model)
         if (trim.isNotEmpty()) parts.add(trim)
-        return if (parts.isEmpty()) "Target Vehicle" else parts.joinToString(" ")
+        val qualifiers = mutableListOf<String>()
+        val cab = target.optString("cabStyle", "").trim()
+        val bed = target.optString("bedLength", "").trim()
+        if (cab.isNotEmpty()) qualifiers.add(cab)
+        if (bed.isNotEmpty()) qualifiers.add("${bed.removeSuffix("'")} ft Bed")
+        val base = parts.joinToString(" ")
+        return when {
+            base.isEmpty() && qualifiers.isEmpty() -> "Target Vehicle"
+            qualifiers.isEmpty() -> base
+            base.isEmpty() -> qualifiers.joinToString(" • ")
+            else -> "$base • ${qualifiers.joinToString(" • ")}"
+        }
+    }
+
+    private fun bedLengthToFacetValues(bedLength: String): List<String> = when (bedLength) {
+        "5'" -> listOf("5-ft bed")
+        "5.5'" -> listOf("5-1/2' Box", "5.5-Ft.")
+        "6'" -> listOf("6-ft bed")
+        "6.5'" -> listOf("6-1/2' Box")
+        "6.75'" -> listOf("6 3/4' Box")
+        "8'" -> listOf("8' Box")
+        else -> emptyList()
+    }
+
+    private fun expandModelVariants(make: String, model: String): List<String> {
+        val m = model.trim()
+        if (m.isEmpty()) return emptyList()
+        val out = LinkedHashSet<String>()
+        out.add(m)
+        val sd = Regex("^f[\\s-]*([2345]50)$", RegexOption.IGNORE_CASE).matchEntire(m)
+        if (sd != null) {
+            val num = sd.groupValues[1]
+            out.add("F-$num")
+            out.add("Super Duty F-$num")
+            out.add("Super Duty F-$num SRW")
+            out.add("Super Duty F-$num DRW")
+            out.add("F-$num Super Duty")
+        } else if (Regex("^f[\\s-]*150$", RegexOption.IGNORE_CASE).matches(m)) {
+            out.add("F-150")
+        } else if (Regex("^cx[\\s-]*(\\d+)$", RegexOption.IGNORE_CASE).matches(m)) {
+            val num = Regex("\\d+").find(m)?.value ?: ""
+            out.add("CX-$num")
+            out.add("Mazda CX-$num")
+        } else if (make.equals("Ram", ignoreCase = true) && Regex("^(1500|2500|3500)$").matches(m)) {
+            out.add("Ram $m")
+        }
+        return out.toList()
     }
 
     private fun fetchCandidatesForTarget(target: JSONObject): List<JSONObject> {
@@ -282,25 +328,54 @@ object NativeBackgroundMatchScanner {
         }
         val make = target.optString("make", "").trim()
         val model = target.optString("model", "").trim()
+        val bedLength = target.optString("bedLength", "").trim()
+        val variants = expandModelVariants(make, model)
+        val bedFacets = bedLengthToFacetValues(bedLength)
         val byVin = LinkedHashMap<String, JSONObject>()
 
         for (pid in pageIds) {
-            val params = LinkedHashMap<String, String>()
-            if (make.isNotEmpty()) params["Make"] = make
-            if (make.isNotEmpty() && model.isNotEmpty()) params["Model"] = model
-
-            var totalPages = 1
-            var page = 1
-            while (page <= totalPages && page <= 12) {
-                val res = querySinglePage(pid, params, page)
-                totalPages = res.second
-                for (v in res.first) {
-                    val vin = v.optString("vin", "")
-                    if (vin.isNotEmpty() && !byVin.containsKey(vin)) {
-                        byVin[vin] = v
+            if (bedFacets.isNotEmpty()) {
+                val modelsToQuery = if (variants.isNotEmpty()) variants else listOf("")
+                for (mv in modelsToQuery) {
+                    for (bf in bedFacets) {
+                        val fp = LinkedHashMap<String, String>()
+                        fp["BedLength"] = bf
+                        if (make.isNotEmpty()) fp["Make"] = make
+                        if (mv.isNotEmpty()) fp["Model"] = mv
+                        var totalPages = 1
+                        var page = 1
+                        while (page <= totalPages && page <= 12) {
+                            val res = querySinglePage(pid, fp, page, facetBedLength = bedLength)
+                            totalPages = res.second
+                            for (v in res.first) {
+                                val vin = v.optString("vin", "")
+                                if (vin.isNotEmpty()) byVin[vin] = v
+                            }
+                            page++
+                        }
                     }
                 }
-                page++
+            }
+
+            val modelRuns = if (make.isNotEmpty() && variants.isNotEmpty()) variants else listOf("")
+            for (mv in modelRuns) {
+                val params = LinkedHashMap<String, String>()
+                if (make.isNotEmpty()) params["Make"] = make
+                if (make.isNotEmpty() && mv.isNotEmpty()) params["Model"] = mv
+
+                var totalPages = 1
+                var page = 1
+                while (page <= totalPages && page <= 12) {
+                    val res = querySinglePage(pid, params, page)
+                    totalPages = res.second
+                    for (v in res.first) {
+                        val vin = v.optString("vin", "")
+                        if (vin.isNotEmpty() && !byVin.containsKey(vin)) {
+                            byVin[vin] = v
+                        }
+                    }
+                    page++
+                }
             }
         }
         return byVin.values.toList()
@@ -309,7 +384,8 @@ object NativeBackgroundMatchScanner {
     private fun querySinglePage(
         pageId: Int,
         params: Map<String, String>,
-        pageNumber: Int
+        pageNumber: Int,
+        facetBedLength: String = ""
     ): Pair<List<JSONObject>, Int> {
         val qp = LinkedHashMap<String, String>(params)
         qp["pn"] = "96"
@@ -345,7 +421,7 @@ object NativeBackgroundMatchScanner {
                 val card = cards.optJSONObject(i) ?: continue
                 if (card.optBoolean("IsAdCard", false)) continue
                 val vc = card.optJSONObject("VehicleCard") ?: continue
-                parseVehicleCard(vc)?.let { out.add(it) }
+                parseVehicleCard(vc, facetBedLength = facetBedLength)?.let { out.add(it) }
             }
             val paging = data.optJSONObject("Paging")?.optJSONObject("PaginationDataModel")
             val totalCount = paging?.optInt("TotalCount", out.size) ?: out.size
@@ -360,7 +436,57 @@ object NativeBackgroundMatchScanner {
         }
     }
 
-    private fun parseVehicleCard(vc: JSONObject): JSONObject? {
+    private fun extractCabStyle(text: String): String = when {
+        Regex("\\b(?:super\\s*crew|crew\\s*cab|crewcab|crewmax)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Crew Cab"
+        Regex("\\b(?:super\\s*cab|extended\\s*cab|ext\\.?\\s*cab|double\\s*cab|quad\\s*cab)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "SuperCab"
+        Regex("\\b(?:regular\\s*cab|reg\\.?\\s*cab|single\\s*cab|standard\\s*cab)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Regular Cab"
+        else -> ""
+    }
+
+    private fun extractBedLengthFromVehicleText(
+        title: String,
+        model: String,
+        bodyStyle: String,
+        commentsClean: String,
+        lengthInches: Double,
+        facetBedLength: String
+    ): String {
+        if (facetBedLength.isNotEmpty()) return facetBedLength
+        val text = "$title | $bodyStyle | $commentsClean"
+        if (Regex("\\b(?:6\\.75|6[\\s-]*3/4)\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:pickup\\s*)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "6.75'"
+        }
+        if (Regex("\\b(?:6\\.5|6[\\s-]*1/2)\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:styleside\\s+|pickup\\s+)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "6.5'"
+        }
+        if (Regex("\\b(?:5\\.5|5[\\s-]*1/2)\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:styleside\\s+|pickup\\s+)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "5.5'"
+        }
+        if (Regex("\\b8(?:\\.0)?\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:styleside\\s+|pickup\\s+)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "8'"
+        }
+        if (Regex("\\b5(?:\\.0)?\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:pickup\\s*)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "5'"
+        }
+        if (Regex("\\b6(?:\\.0)?\\s*(?:-|\\s)*(?:ft\\.?|foot|feet|')\\s*(?:pickup\\s*)?(?:bed|box)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) {
+            return "6'"
+        }
+        val isF150 = Regex("\\bf[\\s+-]*150\\b", RegexOption.IGNORE_CASE).containsMatchIn("$model $title") &&
+            !title.contains("lightning", ignoreCase = true)
+        if (isF150 && lengthInches > 0.0) {
+            val cab = extractCabStyle("$bodyStyle $title $commentsClean")
+            if (cab == "Regular Cab") {
+                if (lengthInches in 207.0..212.0) return "6.5'"
+                if (lengthInches in 225.0..230.0) return "8'"
+            } else if (cab == "SuperCab") {
+                if (lengthInches in 229.0..235.0) return "6.5'"
+                if (lengthInches in 248.0..253.0) return "8'"
+            }
+        }
+        return ""
+    }
+
+    private fun parseVehicleCard(vc: JSONObject, facetBedLength: String = ""): JSONObject? {
         val vin = vc.optString("VehicleVin", "").trim()
         if (vin.isEmpty()) return null
 
@@ -407,6 +533,24 @@ object NativeBackgroundMatchScanner {
             }
         }
 
+        val commentsClean = vc.optString("VehicleComments", "")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val titleStr = vc.optString("VehicleName", "")
+        val modelStr = vc.optString("VehicleModel", "")
+        val bodyStyle = vc.optString("VehicleBodyStyle", vc.optString("VehicleBodyType", ""))
+        val lenInches = vc.optDouble("Length", 0.0)
+        val bedLength = extractBedLengthFromVehicleText(
+            title = titleStr,
+            model = modelStr,
+            bodyStyle = bodyStyle,
+            commentsClean = commentsClean,
+            lengthInches = lenInches,
+            facetBedLength = facetBedLength
+        )
+        val cabStyle = extractCabStyle("$bodyStyle $titleStr $commentsClean")
+
         val city = vc.optString("DealerLocatedAtCity", "").trim()
         val state = vc.optString("DealerLocatedAtState", "").trim()
         val branch = vc.optString(
@@ -442,7 +586,7 @@ object NativeBackgroundMatchScanner {
             vc.optString("VehicleCondition", if (vc.optString("VehicleType") == "new") "New" else "Pre-Owned")
         }
 
-        val rawDt = "${vc.optString("VehicleDriveTrain", "")} $highlights".uppercase(Locale.US)
+        val rawDt = "${vc.optString("VehicleDriveTrain", "")} $highlights $commentsClean".uppercase(Locale.US)
         val drivetrain = when {
             rawDt.contains("4X4") || rawDt.contains("FOUR WHEEL DRIVE") || rawDt.contains("4WD") -> "4WD"
             rawDt.contains("ALL WHEEL DRIVE") || rawDt.contains("ALL-WHEEL") || rawDt.contains("AWD") -> "AWD"
@@ -454,12 +598,15 @@ object NativeBackgroundMatchScanner {
         return JSONObject().apply {
             put("vin", vin)
             put("stockNumber", vc.optString("VehicleStockNumber", ""))
-            put("title", vc.optString("VehicleName", ""))
+            put("title", titleStr)
             val yr = vc.optInt("VehicleYear", 0)
             if (yr > 0) put("year", yr)
             put("make", vc.optString("VehicleMake", ""))
-            put("model", vc.optString("VehicleModel", ""))
-            put("trim", vc.optString("VehicleTrim", ""))
+            put("model", modelStr)
+            put("trim", vc.optString("VehicleTrim", vc.optString("VehicleRuleAdjustedTrim", "")).trim())
+            put("bodyStyle", bodyStyle)
+            put("bedLength", bedLength)
+            put("cabStyle", cabStyle)
             put("condition", condition)
             if (finalPrice != null && finalPrice > 0.0) put("price", finalPrice)
             if (msrp != null && msrp > 0.0) put("msrp", msrp)
@@ -481,18 +628,49 @@ object NativeBackgroundMatchScanner {
             val hay = "${v.optString("make")} ${v.optString("title")}".lowercase(Locale.US)
             if (!hay.contains(make)) return false
         }
-        val model = target.optString("model", "").trim().lowercase(Locale.US)
+        val model = target.optString("model", "").trim()
         if (model.isNotEmpty()) {
-            val tokens = model.replace("-", " ").split(Regex("\\s+")).filter { it.isNotEmpty() }
-            val hay = "${v.optString("model")} ${v.optString("title")} ${v.optString("trim")}"
-                .lowercase(Locale.US)
-                .replace("-", " ")
-            if (!tokens.all { hay.contains(it) }) return false
+            val combinedLower = "${v.optString("model")} ${v.optString("title")}".lowercase(Locale.US)
+            val modelLower = model.lowercase(Locale.US)
+            if (modelLower == "bronco" && Regex("\\bbronco\\s+sport\\b").containsMatchIn(combinedLower)) return false
+            if (modelLower == "mustang" && Regex("\\bmach[\\s-]*e\\b").containsMatchIn(combinedLower)) return false
+            if (modelLower == "cherokee" && Regex("\\bgrand\\s+cherokee\\b").containsMatchIn(combinedLower)) return false
+            if (Regex("^f[\\s-]*150$", RegexOption.IGNORE_CASE).matches(model) && combinedLower.contains("lightning")) return false
+
+            val fMatch = Regex("^f[\\s-]*(\\d{3})$", RegexOption.IGNORE_CASE).matchEntire(model)
+            if (fMatch != null) {
+                val num = fMatch.groupValues[1]
+                if (!Regex("\\bf[\\s+-]*$num\\b").containsMatchIn(combinedLower)) return false
+            } else {
+                val tokens = modelLower.replace("-", " ").split(Regex("\\s+")).filter { it.isNotEmpty() }
+                val hay = combinedLower.replace("-", " ").replace("+", " ")
+                if (!tokens.all { tok -> Regex("\\b${Regex.escape(tok)}\\b").containsMatchIn(hay) }) return false
+            }
         }
-        val trim = target.optString("trim", "").trim().lowercase(Locale.US)
+        val trim = target.optString("trim", "").replace("®", "").replace("™", "").trim()
         if (trim.isNotEmpty()) {
-            val hay = "${v.optString("trim")} ${v.optString("title")}".lowercase(Locale.US)
-            if (!hay.contains(trim)) return false
+            val vTrim = v.optString("trim", "").replace("®", "").replace("™", "").trim()
+            val vTitle = v.optString("title", "").replace("®", "").replace("™", "").trim()
+            val escaped = Regex.escape(trim).replace(Regex("[\\s\\\\-]+"), "[\\\\s-]+")
+            val trimRegex = Regex("\\b$escaped\\b(?![-\\w])", RegexOption.IGNORE_CASE)
+            if (!trimRegex.containsMatchIn(vTrim) && !trimRegex.containsMatchIn(vTitle)) {
+                return false
+            }
+        }
+        val targetBed = target.optString("bedLength", "").trim()
+        if (targetBed.isNotEmpty()) {
+            if (v.optString("bedLength", "").trim() != targetBed) return false
+        }
+        val targetCab = target.optString("cabStyle", "").trim()
+        if (targetCab.isNotEmpty()) {
+            if (v.optString("cabStyle", "").trim() != targetCab) return false
+        }
+        val cond = target.optString("condition", "Any").trim().lowercase(Locale.US)
+        if (cond.isNotEmpty() && cond != "any") {
+            val vc = v.optString("condition", "").lowercase(Locale.US)
+            if (cond == "new" && !vc.contains("new")) return false
+            if (cond == "cpo" && !vc.contains("certified")) return false
+            if (cond == "pre-owned" && vc.contains("new") && !vc.contains("pre")) return false
         }
         val yr = v.optInt("year", 0)
         val minYear = target.optInt("minYear", 0)
@@ -517,13 +695,11 @@ object NativeBackgroundMatchScanner {
         val dt = target.optString("drivetrain", "Any").trim().uppercase(Locale.US)
         if (dt.isNotEmpty() && dt != "ANY") {
             val vDt = v.optString("drivetrain", "").uppercase(Locale.US)
-            if (vDt.isNotEmpty()) {
-                val ok = when (dt) {
-                    "4WD", "AWD", "4WD/AWD" -> vDt.contains("4WD") || vDt.contains("AWD")
-                    else -> vDt.contains(dt)
-                }
-                if (!ok) return false
+            val ok = when (dt) {
+                "4WD", "AWD", "4WD/AWD" -> vDt.contains("4WD") || vDt.contains("AWD")
+                else -> vDt.contains(dt)
             }
+            if (!ok) return false
         }
         return true
     }

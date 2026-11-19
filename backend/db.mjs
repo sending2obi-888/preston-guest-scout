@@ -2,6 +2,10 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  formatBedLengthLabel,
+  parseNaturalLanguageCriteria,
+} from './natural_language_parser.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, 'data');
@@ -231,8 +235,9 @@ export function setSetting(key, value) {
   ).run(key, String(value ?? ''));
 }
 
-export function formatVehicleTargetLabel(t) {
-  if (!t) return 'Custom Vehicle Requirements';
+export function formatVehicleTargetLabel(rawTarget) {
+  if (!rawTarget) return 'Custom Vehicle Requirements';
+  const t = parseNaturalLanguageCriteria(rawTarget);
   const parts = [];
   if (t.condition && t.condition !== 'Any') parts.push(t.condition);
   if (t.minYear != null && t.maxYear != null) {
@@ -245,12 +250,21 @@ export function formatVehicleTargetLabel(t) {
   if (t.make) parts.push(t.make);
   if (t.model) parts.push(t.model);
   if (t.trim) parts.push(t.trim);
-  if (parts.length === 0) {
+
+  const qualifiers = [];
+  if (t.cabStyle) qualifiers.push(t.cabStyle);
+  if (t.bedLength) qualifiers.push(formatBedLengthLabel(t.bedLength));
+
+  if (parts.length === 0 && qualifiers.length === 0) {
     if (t.maxPrice) return `Vehicles under $${Number(t.maxPrice).toLocaleString()}`;
     if (t.notes) return String(t.notes).slice(0, 42);
     return 'Custom Vehicle Requirements';
   }
-  return parts.join(' ');
+
+  const base = parts.join(' ');
+  if (qualifiers.length === 0) return base;
+  if (!base) return qualifiers.join(' • ');
+  return `${base} • ${qualifiers.join(' • ')}`;
 }
 
 export function mapGuestRow(row) {
@@ -272,26 +286,31 @@ export function mapGuestRow(row) {
 
   const normalizedTargets = parsedTargets
     .filter((t) => t && typeof t === 'object')
-    .map((t, idx) => ({
-      id: String(t.id || `${row.id}-vt-${idx + 1}`),
-      condition: String(t.condition || 'Any'),
-      minYear: t.minYear != null ? Number(t.minYear) : null,
-      maxYear: t.maxYear != null ? Number(t.maxYear) : null,
-      make: String(t.make || ''),
-      model: String(t.model || ''),
-      trim: String(t.trim || ''),
-      maxPrice: t.maxPrice != null ? Number(t.maxPrice) : null,
-      maxMileage: t.maxMileage != null ? Number(t.maxMileage) : null,
-      drivetrain: String(t.drivetrain || 'Any'),
-      exteriorColor: String(t.exteriorColor || ''),
-      features: Array.isArray(t.features) ? t.features.map(String) : [],
-      notes: String(t.notes || ''),
-      createdAt: String(t.createdAt || row.created_at),
-    }));
+    .map((t, idx) => {
+      const norm = parseNaturalLanguageCriteria(t);
+      return {
+        id: String(t.id || `${row.id}-vt-${idx + 1}`),
+        condition: String(norm.condition || 'Any'),
+        minYear: norm.minYear != null ? Number(norm.minYear) : null,
+        maxYear: norm.maxYear != null ? Number(norm.maxYear) : null,
+        make: String(norm.make || ''),
+        model: String(norm.model || ''),
+        trim: String(norm.trim || ''),
+        bedLength: String(norm.bedLength || ''),
+        cabStyle: String(norm.cabStyle || ''),
+        engineSpec: String(norm.engineSpec || ''),
+        maxPrice: norm.maxPrice != null ? Number(norm.maxPrice) : null,
+        maxMileage: norm.maxMileage != null ? Number(norm.maxMileage) : null,
+        drivetrain: String(norm.drivetrain || 'Any'),
+        exteriorColor: String(norm.exteriorColor || ''),
+        features: Array.isArray(norm.features) ? norm.features.map(String) : [],
+        notes: String(norm.notes || ''),
+        createdAt: String(t.createdAt || row.created_at),
+      };
+    });
 
   if (normalizedTargets.length === 0) {
-    normalizedTargets.push({
-      id: `${row.id}-primary`,
+    const normPrimary = parseNaturalLanguageCriteria({
       condition: row.condition || 'Any',
       minYear: row.min_year ?? null,
       maxYear: row.max_year ?? null,
@@ -304,6 +323,24 @@ export function mapGuestRow(row) {
       exteriorColor: row.exterior_color || '',
       features,
       notes: row.notes || '',
+    });
+    normalizedTargets.push({
+      id: `${row.id}-primary`,
+      condition: normPrimary.condition || 'Any',
+      minYear: normPrimary.minYear ?? null,
+      maxYear: normPrimary.maxYear ?? null,
+      make: normPrimary.make || '',
+      model: normPrimary.model || '',
+      trim: normPrimary.trim || '',
+      bedLength: normPrimary.bedLength || '',
+      cabStyle: normPrimary.cabStyle || '',
+      engineSpec: normPrimary.engineSpec || '',
+      maxPrice: normPrimary.maxPrice ?? null,
+      maxMileage: normPrimary.maxMileage ?? null,
+      drivetrain: normPrimary.drivetrain || 'Any',
+      exteriorColor: normPrimary.exteriorColor || '',
+      features: normPrimary.features,
+      notes: normPrimary.notes || '',
       createdAt: row.created_at,
     });
   }
@@ -370,6 +407,9 @@ export function mapGuestRow(row) {
     make: primary.make || '',
     model: primary.model || '',
     trim: primary.trim || '',
+    bedLength: primary.bedLength || '',
+    cabStyle: primary.cabStyle || '',
+    engineSpec: primary.engineSpec || '',
     maxPrice: primary.maxPrice,
     maxMileage: primary.maxMileage,
     drivetrain: primary.drivetrain || 'Any',

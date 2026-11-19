@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/natural_language_parser.dart';
 
 class HomeIntakeScreen extends StatefulWidget {
   final SystemStatus status;
@@ -727,13 +728,15 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                         ),
                         const SizedBox(height: 16),
                         TextFormField(
+                          key: const ValueKey('natural_language_search_input'),
                           controller: _notesCtrl,
                           maxLines: 3,
+                          onChanged: (_) => setState(() {}),
                           decoration: const InputDecoration(
                             labelText:
-                                'Additional Specs & Natural-Language Notes for Gemini Agent',
+                                'Additional Specs & Natural-Language Search for Gemini Agent',
                             hintText:
-                                'Describe any specific cab/box configuration, package codes, all-in price cap including dealer fee, or interior preferences...',
+                                'e.g. Ford F150. 6.5ft bed. XLT. — or describe cab/box configuration, engine, trim, budget, or package codes...',
                             alignLabelWithHint: true,
                             prefixIcon: Padding(
                               padding: EdgeInsets.only(bottom: 42),
@@ -741,6 +744,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             ),
                           ),
                         ),
+                        if (_notesCtrl.text.trim().isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          _buildParsedCriteriaBanner(scheme, textTheme),
+                        ],
                       ],
                     ),
                   ),
@@ -812,6 +819,82 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         labelText: 'Phone (Optional)',
         hintText: '(302) 555-0148',
         prefixIcon: Icon(Icons.phone_outlined),
+      ),
+    );
+  }
+
+  Widget _buildParsedCriteriaBanner(ColorScheme scheme, TextTheme textTheme) {
+    final chips = NaturalLanguageVehicleParser.buildPreviewChips({
+      'condition': _condition,
+      'minYear': int.tryParse(_minYearCtrl.text.trim()),
+      'maxYear': int.tryParse(_maxYearCtrl.text.trim()),
+      'make': _makeCtrl.text.trim(),
+      'model': _modelCtrl.text.trim(),
+      'trim': _trimCtrl.text.trim(),
+      'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
+      'maxMileage': int.tryParse(
+        _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), ''),
+      ),
+      'drivetrain': _drivetrain,
+      'exteriorColor': _exteriorColorCtrl.text.trim(),
+      'features': _selectedFeatures.toList(),
+      'notes': _notesCtrl.text.trim(),
+    });
+
+    if (chips.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      key: const ValueKey('parsed_natural_language_summary'),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.secondaryContainer.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.verified_outlined, size: 16, color: scheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Understood Search Criteria (Only Matching Vehicles Shown)',
+                  style: textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: scheme.onSecondaryContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: chips
+                .map(
+                  (c) => Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: scheme.surface,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: scheme.outlineVariant),
+                    ),
+                    child: Text(
+                      c,
+                      style: textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: scheme.onSurface,
+                      ),
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+        ],
       ),
     );
   }
