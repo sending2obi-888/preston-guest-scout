@@ -37,6 +37,7 @@ import {
 import {
   checkVinRecallsWithGemini,
   listRecentVinRecallChecks,
+  updateVinRecallCampaignStatus,
 } from './nhtsa_recall_agent.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1053,6 +1054,27 @@ const server = http.createServer(async (req, res) => {
         const code = Number(err.statusCode) || 500;
         return sendJson(res, code, {
           error: err.message || 'Unable to complete NHTSA VIN recall check.',
+        });
+      }
+    }
+
+    if (pathname === '/api/recalls/status' && (req.method === 'POST' || req.method === 'PATCH')) {
+      const body = await readJsonBody(req);
+      try {
+        const result = await updateVinRecallCampaignStatus({
+          vin: body.vin,
+          campaignNumber: body.campaignNumber,
+          status: body.status,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          result,
+          recent: listRecentVinRecallChecks(),
+        });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error: err.message || 'Unable to update recall completion status.',
         });
       }
     }

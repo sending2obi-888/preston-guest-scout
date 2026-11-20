@@ -47,6 +47,8 @@ class VinRecallScreen extends StatefulWidget {
 class _VinRecallScreenState extends State<VinRecallScreen> {
   late final TextEditingController _vinController;
   bool _isChecking = false;
+  String? _updatingCampaign;
+  String _statusFilter = 'all'; // 'all' | 'incomplete' | 'complete'
   String? _errorMessage;
   VinRecallCheckResult? _result;
   List<RecentVinRecallEntry> _recentChecks = const [];
@@ -145,6 +147,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     setState(() {
       _isChecking = true;
       _errorMessage = null;
+      _statusFilter = 'all';
     });
 
     try {
@@ -158,9 +161,53 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     } catch (err) {
       if (!mounted) return;
       setState(() {
-        _errorMessage = err.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+        _errorMessage =
+            err.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
         _isChecking = false;
       });
+    }
+  }
+
+  Future<void> _toggleCampaignStatus(
+    VinRecallCheckResult res,
+    NhtsaRecallCampaign rec,
+    String nextStatus,
+  ) async {
+    if (_updatingCampaign != null) return;
+    setState(() => _updatingCampaign = rec.campaignNumber);
+    try {
+      final updated = await ApiService.updateVinRecallStatus(
+        vin: res.vin,
+        campaignNumber: rec.campaignNumber,
+        status: nextStatus,
+      );
+      if (!mounted) return;
+      setState(() {
+        _result = updated.result;
+        _recentChecks = updated.recent;
+        _updatingCampaign = null;
+      });
+      final actionWord = nextStatus == 'complete'
+          ? 'Marked Complete'
+          : (nextStatus == 'incomplete'
+              ? 'Marked Incomplete'
+              : 'Reset to live VIN status');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 2),
+          content: Text('Recall ${rec.campaignNumber}: $actionWord'),
+        ),
+      );
+    } catch (err) {
+      if (!mounted) return;
+      setState(() => _updatingCampaign = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            err.toString().replaceFirst(RegExp(r'^Exception:\s*'), ''),
+          ),
+        ),
+      );
     }
   }
 
@@ -237,7 +284,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                                 ),
                               ),
                               Text(
-                                'Decodes any 17-digit VIN & checks www.nhtsa.gov/recalls with ${widget.status.geminiModel}',
+                                'Differentiates Incomplete (Open) vs. Complete (Closed) recalls per VIN via www.nhtsa.gov/recalls & ${widget.status.geminiModel}',
                                 style: textTheme.bodySmall?.copyWith(
                                   color: scheme.onPrimaryContainer
                                       .withValues(alpha: 0.85),
@@ -319,7 +366,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'Enter any vehicle VIN to decode its factory build and have Gemini check www.nhtsa.gov/recalls for safety recalls.',
+                        'Enter any vehicle VIN to decode its factory build and verify which safety recalls are still Incomplete (Open) vs. Complete (Closed).',
                         style: textTheme.bodySmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -409,7 +456,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                                 : const Icon(Icons.auto_awesome),
                             label: Text(
                               _isChecking
-                                  ? 'Checking www.nhtsa.gov/recalls with Gemini…'
+                                  ? 'Checking Incomplete vs. Complete Recalls…'
                                   : 'Check Recalls with Gemini',
                             ),
                           ),
@@ -444,14 +491,14 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Inspecting VIN ${_vinController.text.trim()} on NHTSA…',
+                                'Inspecting VIN ${_vinController.text.trim()} for Incomplete vs. Complete Recalls…',
                                 style: textTheme.titleSmall?.copyWith(
                                   fontWeight: FontWeight.w800,
                                 ),
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '1. Decoding 17-digit VIN via NHTSA vPIC • 2. Querying www.nhtsa.gov/recalls safety campaigns • 3. Evaluating applicability with Gemini',
+                                '1. Decoding 17-digit VIN via NHTSA vPIC • 2. Checking live VIN Open Recall completion • 3. Reconciling NHTSA campaigns with Gemini',
                                 style: textTheme.bodySmall?.copyWith(
                                   color: scheme.onSurfaceVariant,
                                 ),
@@ -491,27 +538,36 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    final isUrgent = res.parkItUrgent || res.parkOutsideWarning;
-    final Color bgTint = !res.hasRecalls
+    final hasIncomplete = res.incompleteCount > 0;
+    final isUrgent =
+        hasIncomplete && (res.parkItUrgent || res.parkOutsideWarning);
+
+    final Color bgTint = !hasIncomplete
         ? const Color(0xFFC4EED0).withValues(alpha: 0.55)
         : isUrgent
             ? scheme.errorContainer.withValues(alpha: 0.75)
             : const Color(0xFFFFE8B3).withValues(alpha: 0.7);
-    final Color borderTint = !res.hasRecalls
+    final Color borderTint = !hasIncomplete
         ? const Color(0xFF146C2E).withValues(alpha: 0.45)
         : isUrgent
             ? scheme.error
             : const Color(0xFFB06000).withValues(alpha: 0.55);
-    final Color badgeBg = !res.hasRecalls
+    final Color badgeBg = !hasIncomplete
         ? const Color(0xFF146C2E)
         : isUrgent
             ? scheme.error
             : const Color(0xFFB06000);
-    final IconData statusIcon = !res.hasRecalls
+    final IconData statusIcon = !hasIncomplete
         ? Icons.verified_rounded
         : isUrgent
             ? Icons.report_rounded
             : Icons.warning_amber_rounded;
+
+    final String topBadgeText = !hasIncomplete
+        ? (res.completeCount > 0
+            ? '0 INCOMPLETE RECALLS • ${res.completeCount} COMPLETE'
+            : '0 MATCHING NHTSA RECALLS')
+        : '${res.incompleteCount} INCOMPLETE RECALL${res.incompleteCount == 1 ? '' : 'S'} FOUND';
 
     return Card(
       key: const ValueKey('vin_recall_verdict_card'),
@@ -546,9 +602,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                       Icon(statusIcon, size: 16, color: Colors.white),
                       const SizedBox(width: 6),
                       Text(
-                        !res.hasRecalls
-                            ? '0 MATCHING NHTSA RECALLS'
-                            : '${res.recallCount} NHTSA RECALL${res.recallCount == 1 ? '' : 'S'} FOUND',
+                        topBadgeText,
                         style: textTheme.labelSmall?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w800,
@@ -630,6 +684,53 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
               ],
             ),
             const SizedBox(height: 14),
+
+            // Side-by-side Incomplete vs. Complete Recall KPI Summary Strip
+            Wrap(
+              key: const ValueKey('recall_completion_summary_strip'),
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _buildCompletionKpiCard(
+                  context,
+                  cardKey: const ValueKey('incomplete_recalls_kpi_card'),
+                  count: res.incompleteCount,
+                  title: 'Incomplete (Open)',
+                  subtitle: res.incompleteCount == 0
+                      ? '0 unrepaired recalls on VIN'
+                      : 'Action required — open on VIN',
+                  icon: res.incompleteCount == 0
+                      ? Icons.check_circle_rounded
+                      : Icons.error_outline_rounded,
+                  accentColor: res.incompleteCount == 0
+                      ? const Color(0xFF146C2E)
+                      : const Color(0xFFB06000),
+                  bgColor: res.incompleteCount == 0
+                      ? const Color(0xFFE6F4EA)
+                      : const Color(0xFFFFF3DA),
+                  onTap: res.recalls.isNotEmpty
+                      ? () => setState(() => _statusFilter = 'incomplete')
+                      : null,
+                ),
+                _buildCompletionKpiCard(
+                  context,
+                  cardKey: const ValueKey('complete_recalls_kpi_card'),
+                  count: res.completeCount,
+                  title: 'Complete (Closed)',
+                  subtitle: res.completeCount == 0
+                      ? 'No closed campaigns on VIN'
+                      : 'Verified closed / repaired on VIN',
+                  icon: Icons.task_alt_rounded,
+                  accentColor: const Color(0xFF146C2E),
+                  bgColor: const Color(0xFFE6F4EA),
+                  onTap: res.recalls.isNotEmpty
+                      ? () => setState(() => _statusFilter = 'complete')
+                      : null,
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 14),
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
@@ -697,6 +798,75 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCompletionKpiCard(
+    BuildContext context, {
+    required Key cardKey,
+    required int count,
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Color accentColor,
+    required Color bgColor,
+    VoidCallback? onTap,
+  }) {
+    final textTheme = Theme.of(context).textTheme;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 230, maxWidth: 320),
+      child: Material(
+        key: cardKey,
+        color: bgColor,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: accentColor.withValues(alpha: 0.45)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: accentColor,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, size: 20, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$count $title',
+                        style: textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                          color: const Color(0xFF1B1F23),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: textTheme.labelSmall?.copyWith(
+                          color: const Color(0xFF3C4043),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -799,195 +969,453 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
+    final filteredRecalls = res.recalls.where((rec) {
+      if (_statusFilter == 'incomplete') return rec.isIncomplete;
+      if (_statusFilter == 'complete') return rec.isComplete;
+      return true;
+    }).toList();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: Text(
-            'NHTSA Safety Recall Campaigns (${res.recalls.length})',
-            style: textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-            ),
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                'NHTSA & Manufacturer Recall Campaigns (${res.recalls.length})',
+                style: textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              Wrap(
+                key: const ValueKey('recall_status_filter_bar'),
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  ChoiceChip(
+                    key: const ValueKey('filter_all_recalls_chip'),
+                    label: Text('All (${res.recalls.length})'),
+                    selected: _statusFilter == 'all',
+                    onSelected: (_) => setState(() => _statusFilter = 'all'),
+                  ),
+                  ChoiceChip(
+                    key: const ValueKey('filter_incomplete_recalls_chip'),
+                    label: Text('Incomplete (${res.incompleteCount})'),
+                    selected: _statusFilter == 'incomplete',
+                    onSelected: (_) =>
+                        setState(() => _statusFilter = 'incomplete'),
+                  ),
+                  ChoiceChip(
+                    key: const ValueKey('filter_complete_recalls_chip'),
+                    label: Text('Complete (${res.completeCount})'),
+                    selected: _statusFilter == 'complete',
+                    onSelected: (_) =>
+                        setState(() => _statusFilter = 'complete'),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 10),
-        ...res.recalls.map((rec) {
-          final isOther = rec.isOtherVariant;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 12),
-            child: Card(
-              child: Padding(
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
+        const SizedBox(height: 12),
+        if (filteredRecalls.isEmpty)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Row(
+                children: [
+                  Icon(
+                    _statusFilter == 'incomplete'
+                        ? Icons.verified_rounded
+                        : Icons.info_outline_rounded,
+                    color: _statusFilter == 'incomplete'
+                        ? const Color(0xFF146C2E)
+                        : scheme.primary,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _statusFilter == 'incomplete'
+                          ? '0 Incomplete Recalls — All applicable recall campaigns on VIN ${res.vin} are Complete!'
+                          : '0 Complete Recalls in this view. Switch to "All" or "Incomplete" to inspect open campaigns.',
+                      style: textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          )
+        else
+          ...filteredRecalls.map(
+            (rec) => _buildSingleCampaignCard(context, res, rec),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildSingleCampaignCard(
+    BuildContext context,
+    VinRecallCheckResult res,
+    NhtsaRecallCampaign rec,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    final isComplete = rec.isComplete;
+    final isIncomplete = rec.isIncomplete;
+    final isOther = rec.isOtherVariant;
+    final isUpdatingThis = _updatingCampaign == rec.campaignNumber;
+
+    final Color borderColor = isComplete
+        ? const Color(0xFF146C2E).withValues(alpha: 0.45)
+        : isIncomplete
+            ? ((rec.parkIt || rec.parkOutSide)
+                ? const Color(0xFFB3261E)
+                : const Color(0xFFB06000).withValues(alpha: 0.65))
+            : scheme.outlineVariant;
+
+    final Color statusPillBg = isComplete
+        ? const Color(0xFF146C2E)
+        : isIncomplete
+            ? (rec.isRemedyUnavailable
+                ? const Color(0xFF8C1D18)
+                : const Color(0xFFB06000))
+            : scheme.surfaceContainerHighest;
+
+    final Color statusPillFg =
+        isOther ? scheme.onSurfaceVariant : Colors.white;
+
+    final IconData statusPillIcon = isComplete
+        ? Icons.task_alt_rounded
+        : isIncomplete
+            ? Icons.warning_amber_rounded
+            : Icons.remove_circle_outline_rounded;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        key: ValueKey('recall_card_${rec.campaignNumber}'),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(
+            color: borderColor,
+            width: isIncomplete ? 1.6 : 1.2,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      // Primary Complete vs. Incomplete Status Badge
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: statusPillBg,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(statusPillIcon, size: 14, color: statusPillFg),
+                            const SizedBox(width: 5),
+                            Text(
+                              rec.completionBadgeLabel,
+                              style: textTheme.labelSmall?.copyWith(
+                                color: statusPillFg,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.3,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: scheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'NHTSA #${rec.campaignNumber}',
+                          style: textTheme.labelSmall?.copyWith(
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.w800,
+                            color: scheme.onPrimaryContainer,
+                          ),
+                        ),
+                      ),
+                      if (rec.oemRecallNumber.isNotEmpty)
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
+                            horizontal: 9,
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: scheme.primaryContainer,
+                            color: scheme.secondaryContainer,
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
-                            'NHTSA #${rec.campaignNumber}',
+                            'OEM #${rec.oemRecallNumber}',
                             style: textTheme.labelSmall?.copyWith(
                               fontFamily: 'monospace',
                               fontWeight: FontWeight.w800,
-                              color: scheme.onPrimaryContainer,
+                              color: scheme.onSecondaryContainer,
                             ),
                           ),
                         ),
-                        if (rec.reportDate.isNotEmpty)
-                          Text(
-                            'Reported ${rec.reportDate}',
-                            style: textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w600,
-                            ),
+                      if (rec.reportDate.isNotEmpty)
+                        Text(
+                          'Reported ${rec.reportDate}',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
                           ),
+                        ),
+                      if (rec.parkIt && isIncomplete)
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
+                            horizontal: 9,
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: isOther
-                                ? scheme.surfaceContainerHighest
-                                : const Color(0xFFFFE8B3),
+                            color: const Color(0xFFB3261E),
                             borderRadius: BorderRadius.circular(20),
                           ),
                           child: Text(
-                            rec.applicability,
+                            'DO NOT DRIVE',
                             style: textTheme.labelSmall?.copyWith(
-                              fontWeight: FontWeight.w700,
-                              color: isOther
-                                  ? scheme.onSurfaceVariant
-                                  : const Color(0xFF7A4100),
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
                             ),
                           ),
                         ),
-                        if (rec.parkIt)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 9,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFB3261E),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              'DO NOT DRIVE',
-                              style: textTheme.labelSmall?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800,
-                              ),
+                      if (rec.parkOutSide && isIncomplete)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF8C1D18),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            'PARK OUTSIDE',
+                            style: textTheme.labelSmall?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
                             ),
                           ),
-                        if (rec.parkOutSide)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 9,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF8C1D18),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              'PARK OUTSIDE',
-                              style: textTheme.labelSmall?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800,
-                              ),
+                        ),
+                      if (rec.overTheAirUpdate)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: scheme.secondaryContainer,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            'OTA Software Remedy',
+                            style: textTheme.labelSmall?.copyWith(
+                              color: scheme.onSecondaryContainer,
+                              fontWeight: FontWeight.w700,
                             ),
                           ),
-                        if (rec.overTheAirUpdate)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 9,
-                              vertical: 4,
+                        ),
+                    ],
+                  ),
+                  if (!isOther)
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        if (isIncomplete)
+                          FilledButton.tonalIcon(
+                            key: ValueKey(
+                              'toggle_recall_status_${rec.campaignNumber}',
                             ),
-                            decoration: BoxDecoration(
-                              color: scheme.secondaryContainer,
-                              borderRadius: BorderRadius.circular(20),
+                            onPressed: _updatingCampaign != null
+                                ? null
+                                : () => _toggleCampaignStatus(
+                                      res,
+                                      rec,
+                                      'complete',
+                                    ),
+                            icon: isUpdatingThis
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.check_circle_outline_rounded,
+                                    size: 16,
+                                  ),
+                            label: const Text('Mark Complete'),
+                          )
+                        else
+                          OutlinedButton.icon(
+                            key: ValueKey(
+                              'toggle_recall_status_${rec.campaignNumber}',
                             ),
-                            child: Text(
-                              'OTA Software Remedy',
-                              style: textTheme.labelSmall?.copyWith(
-                                color: scheme.onSecondaryContainer,
-                                fontWeight: FontWeight.w700,
-                              ),
+                            onPressed: _updatingCampaign != null
+                                ? null
+                                : () => _toggleCampaignStatus(
+                                      res,
+                                      rec,
+                                      'incomplete',
+                                    ),
+                            icon: isUpdatingThis
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.replay_rounded, size: 16),
+                            label: const Text('Mark Incomplete'),
+                          ),
+                        if (rec.isManualOverride)
+                          TextButton(
+                            key: ValueKey(
+                              'reset_recall_status_${rec.campaignNumber}',
                             ),
+                            onPressed: _updatingCampaign != null
+                                ? null
+                                : () => _toggleCampaignStatus(res, rec, 'auto'),
+                            child: const Text('Reset'),
                           ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    Text(
-                      rec.component,
-                      style: textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    if (rec.geminiNote.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(Icons.auto_awesome,
-                              size: 15, color: scheme.primary),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              rec.geminiNote,
-                              style: textTheme.bodySmall?.copyWith(
-                                color: scheme.primary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (rec.summary.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      _campaignDetailBlock(
-                        context,
-                        label: 'Summary',
-                        body: rec.summary,
-                      ),
-                    ],
-                    if (rec.consequence.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      _campaignDetailBlock(
-                        context,
-                        label: 'Safety Risk',
-                        body: rec.consequence,
-                      ),
-                    ],
-                    if (rec.remedy.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      _campaignDetailBlock(
-                        context,
-                        label: 'Dealer Remedy',
-                        body: rec.remedy,
-                      ),
-                    ],
-                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                rec.component,
+                style: textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
                 ),
               ),
-            ),
-          );
-        }),
-      ],
+              if (rec.vinStatusNote.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: isComplete
+                        ? const Color(0xFFE6F4EA)
+                        : isIncomplete
+                            ? const Color(0xFFFFF3DA)
+                            : scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        isComplete
+                            ? Icons.verified_rounded
+                            : Icons.fact_check_outlined,
+                        size: 15,
+                        color: isComplete
+                            ? const Color(0xFF146C2E)
+                            : const Color(0xFF7A4100),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          rec.vinStatusNote,
+                          style: textTheme.bodySmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            color: isComplete
+                                ? const Color(0xFF0F5223)
+                                : const Color(0xFF5F3200),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (rec.geminiNote.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.auto_awesome, size: 15, color: scheme.primary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        rec.geminiNote,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (rec.summary.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                _campaignDetailBlock(
+                  context,
+                  label: 'Summary',
+                  body: rec.summary,
+                ),
+              ],
+              if (rec.consequence.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                _campaignDetailBlock(
+                  context,
+                  label: 'Safety Risk',
+                  body: rec.consequence,
+                ),
+              ],
+              if (rec.remedy.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                _campaignDetailBlock(
+                  context,
+                  label: 'Dealer Remedy',
+                  body: rec.remedy,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1039,20 +1467,21 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
             ),
             const SizedBox(height: 10),
             ..._recentChecks.take(8).map((entry) {
+              final hasOpen = entry.incompleteCount > 0;
               return ListTile(
                 contentPadding: EdgeInsets.zero,
                 dense: true,
                 leading: CircleAvatar(
                   radius: 17,
-                  backgroundColor: entry.hasRecalls
+                  backgroundColor: hasOpen
                       ? const Color(0xFFFFE8B3)
                       : const Color(0xFFC4EED0),
                   child: Icon(
-                    entry.hasRecalls
+                    hasOpen
                         ? Icons.warning_amber_rounded
                         : Icons.verified_rounded,
                     size: 18,
-                    color: entry.hasRecalls
+                    color: hasOpen
                         ? const Color(0xFF7A4100)
                         : const Color(0xFF146C2E),
                   ),
@@ -1072,12 +1501,12 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                     children: [
                       CopyableIdentifierBadge.vin(entry.vin, compact: true),
                       Text(
-                        entry.hasRecalls
-                            ? '${entry.recallCount} recall(s)'
-                            : '0 recalls',
+                        '${entry.incompleteCount} incomplete • ${entry.completeCount} complete',
                         style: textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                          fontWeight: FontWeight.w600,
+                          color: hasOpen
+                              ? const Color(0xFF7A4100)
+                              : const Color(0xFF146C2E),
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ],

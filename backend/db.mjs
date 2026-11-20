@@ -154,9 +154,19 @@ db.exec(`
     vehicle_title TEXT DEFAULT '',
     has_recalls INTEGER DEFAULT 0,
     recall_count INTEGER DEFAULT 0,
+    incomplete_count INTEGER DEFAULT 0,
+    complete_count INTEGER DEFAULT 0,
     verdict_headline TEXT DEFAULT '',
     result_json TEXT NOT NULL,
     checked_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS vin_recall_overrides (
+    vin TEXT NOT NULL,
+    campaign_number TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (vin, campaign_number)
   );
 
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
@@ -179,6 +189,8 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN scheduled_call_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
+  `ALTER TABLE vin_recall_checks ADD COLUMN incomplete_count INTEGER DEFAULT 0`,
+  `ALTER TABLE vin_recall_checks ADD COLUMN complete_count INTEGER DEFAULT 0`,
 ]) {
   try {
     db.exec(ddl);

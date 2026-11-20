@@ -1951,7 +1951,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('vin_recall_verdict_card')), findsOneWidget);
-    expect(find.text('1 NHTSA RECALL FOUND'), findsOneWidget);
+    expect(find.text('1 INCOMPLETE RECALL FOUND'), findsOneWidget);
     expect(
       find.text('1 NHTSA Recall Campaign Found for 2024 Ford F-150 XLT'),
       findsOneWidget,
@@ -2432,6 +2432,274 @@ void main() {
     // Drain 700ms GoogleDriveSyncService.scheduleAutoSave debounce timer
     await tester.pump(const Duration(seconds: 1));
 
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  test(
+      'NhtsaRecallService differentiates Complete vs. Incomplete recalls per VIN (UTF-16LE Base64, OEM recall extraction, HTML parsing, and reconciliation)',
+      () {
+    // 1. UTF-16LE Base64 VIN encoding matches Node Buffer.from(vin, 'utf16le').toString('base64')
+    expect(
+      NhtsaRecallService.encodeVinUtf16LeBase64('1FM5K8B80HGA84949'),
+      'MQBGAE0ANQBLADgAQgA4ADAAaABnAGEAOAA0ADkANAA5AA=='
+          .replaceAll('aABnAGEA', 'SABHAEEA'),
+    );
+    expect(
+      NhtsaRecallService.extractOemRecallNumber([
+        "Dealers will inspect and replace the molding. Ford's number for this recall is 25S53.",
+      ]),
+      '25S53',
+    );
+    expect(NhtsaRecallService.normalizeNhtsaPrefix('25V347000'), '25V347');
+
+    // 2. Parse 0-open-recall HTML vs 1-open-recall HTML
+    final cleanParsed = NhtsaRecallService.parseVinOpenRecallHtml('''
+      <!-- Open Recall Check-->
+      <div class="card"><p class="large-title">Open Recall Check</p>
+      <div class="card-footer"><span>No Open Recalls</span></div></div>
+    ''');
+    expect(cleanParsed.verified, isTrue);
+    expect(cleanParsed.openRecallCount, 0);
+    expect(cleanParsed.openRecalls, isEmpty);
+
+    final openParsed = NhtsaRecallService.parseVinOpenRecallHtml('''
+      <p class="large-title">Open Recall Check</p>
+      <span>1 Open Recall</span>
+      <div id="recallSection">
+        <div class="rTableBody">
+          <div class="rTableRow">
+            <div class="rTableCell"><span>05/27/2025</span></div>
+            <div class="rTableCell"><span>Safety</span></div>
+            <div class="rTableCell"><span>25V347 / 25S53</span></div>
+            <div class="rTableCell w-40">
+              <span>Safety Recall: EXTERIOR B-PILLAR APPLIQUE MOLDING INSPECTION</span><br/><span>Status: Remedy Not Available</span>
+            </div>
+          </div>
+        </div>
+        <!-- Mobile -->
+        <div class="rTableRow"><div class="rTableCell">Duplicate mobile row ignored</div></div>
+      </div>
+    ''');
+    expect(openParsed.verified, isTrue);
+    expect(openParsed.openRecallCount, 1);
+    expect(openParsed.openRecalls.length, 1);
+    expect(openParsed.openRecalls.first.nhtsaPrefix, '25V347');
+    expect(openParsed.openRecalls.first.oemRecallNumber, '25S53');
+    expect(openParsed.openRecalls.first.statusText, 'Remedy Not Available');
+
+    // 3. Reconcile 3 model-level NHTSA recalls against the 1 open VIN recall -> 1 Incomplete + 2 Complete
+    const decoded = DecodedVinVehicle(
+      vin: '1FM5K8B80HGA84949',
+      year: 2017,
+      make: 'Ford',
+      model: 'Explorer',
+    );
+    final reconciled = NhtsaRecallService.reconcileVinRecallCompletion(
+      decoded: decoded,
+      vinOpenCheck: openParsed,
+      recalls: const [
+        NhtsaRecallCampaign(
+          campaignNumber: '24V100000',
+          component: 'REAR SUSPENSION TOE LINK',
+          reportDate: 'Feb 12, 2024',
+          reportIsoDate: '2024-02-12',
+          remedy: "Dealers will replace toe links. Ford's number for this recall is 24S11.",
+        ),
+        NhtsaRecallCampaign(
+          campaignNumber: '25V347000',
+          component: 'EXTERIOR B-PILLAR APPLIQUE MOLDING',
+          reportDate: 'May 27, 2025',
+          reportIsoDate: '2025-05-27',
+          remedy: "Remedy is currently under development. Ford's number for this recall is 25S53.",
+        ),
+        NhtsaRecallCampaign(
+          campaignNumber: '23V200000',
+          component: 'REAR VIEW CAMERA',
+          reportDate: 'Mar 10, 2023',
+          reportIsoDate: '2023-03-10',
+          remedy: "Dealers will update software. Ford's number for this recall is 23S22.",
+        ),
+      ],
+    );
+
+    expect(reconciled.vinCompletionVerified, isTrue);
+    expect(reconciled.incompleteCount, 1);
+    expect(reconciled.completeCount, 2);
+    // Incomplete recall is sorted first
+    expect(reconciled.recalls.first.campaignNumber, '25V347000');
+    expect(reconciled.recalls.first.oemRecallNumber, '25S53');
+    expect(reconciled.recalls.first.completionStatus, 'incomplete_no_remedy');
+    expect(reconciled.recalls.first.isIncomplete, isTrue);
+    expect(reconciled.recalls[1].isComplete, isTrue);
+    expect(reconciled.recalls[2].isComplete, isTrue);
+  });
+
+  testWidgets(
+      'VinRecallScreen differentiates Incomplete vs. Complete recalls, filters by status, and toggles Mark Complete / Mark Incomplete',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'recallChecks': [],
+      'recallStatusOverrides': {},
+      'recallResultsByVin': {},
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    NhtsaRecallService.mockCheckHandler = (vin) async {
+      return VinRecallCheckResult(
+        id: 'recall-explorer-mix',
+        vin: vin,
+        nhtsaUrl: 'https://www.nhtsa.gov/recalls?vin=$vin',
+        nhtsaSiteReachable: true,
+        vinCompletionVerified: true,
+        checkedAt: '2026-11-20T16:30:00Z',
+        agentMode: 'gemini (gemini-2.5-flash)',
+        vehicleTitle: '2017 Ford Explorer Base',
+        vehicle: DecodedVinVehicle(
+          vin: vin,
+          year: 2017,
+          make: 'Ford',
+          model: 'Explorer',
+          trim: 'Base',
+        ),
+        queriedModels: const ['EXPLORER'],
+        hasRecalls: true,
+        recallCount: 1,
+        incompleteCount: 1,
+        completeCount: 2,
+        totalModelRecalls: 3,
+        verdictHeadline:
+            '1 Incomplete Recall • 2 Complete Recalls for 2017 Ford Explorer Base',
+        geminiSummary:
+            'VIN $vin has 1 INCOMPLETE (open) recall and 2 COMPLETE (closed) recalls.',
+        recommendedAction:
+            'Schedule Ford Service repair for open campaign 25V347000.',
+        recalls: const [
+          NhtsaRecallCampaign(
+            campaignNumber: '25V347000',
+            oemRecallNumber: '25S53',
+            manufacturer: 'Ford Motor Company',
+            component: 'STRUCTURE: BODY: EXTERIOR MOLDING',
+            reportDate: 'May 27, 2025',
+            reportIsoDate: '2025-05-27',
+            summary: 'B-pillar exterior applique trim may detach.',
+            remedy: 'Dealers will inspect and replace B-pillar molding.',
+            completionStatus: 'incomplete_no_remedy',
+            completionSource: 'vin_live_lookup',
+            remedyAvailable: false,
+            vinStatusNote:
+                'Confirmed INCOMPLETE on this VIN (Remedy Not Available).',
+          ),
+          NhtsaRecallCampaign(
+            campaignNumber: '24V100000',
+            oemRecallNumber: '24S11',
+            manufacturer: 'Ford Motor Company',
+            component: 'SUSPENSION: REAR TOE LINK',
+            reportDate: 'Feb 12, 2024',
+            reportIsoDate: '2024-02-12',
+            summary: 'Rear toe link fracture inspection.',
+            remedy: 'Dealers replaced rear suspension toe links.',
+            completionStatus: 'complete',
+            completionSource: 'vin_live_lookup',
+            remedyAvailable: true,
+            vinStatusNote: 'Confirmed COMPLETE / CLOSED on this VIN.',
+          ),
+          NhtsaRecallCampaign(
+            campaignNumber: '23V200000',
+            oemRecallNumber: '23S22',
+            manufacturer: 'Ford Motor Company',
+            component: 'BACK OVER PREVENTION: CAMERA',
+            reportDate: 'Mar 10, 2023',
+            reportIsoDate: '2023-03-10',
+            summary: 'Rear view camera image blue screen.',
+            remedy: 'Software update completed.',
+            completionStatus: 'complete',
+            completionSource: 'vin_live_lookup',
+            remedyAvailable: true,
+            vinStatusNote: 'Confirmed COMPLETE / CLOSED on this VIN.',
+          ),
+        ],
+      );
+    };
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1400);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: VinRecallScreen(
+            initialVin: '1FM5K8B80HGA84949',
+            autoCheckOnInit: true,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Verify Complete vs. Incomplete KPI cards & badges
+    expect(find.text('1 INCOMPLETE RECALL FOUND'), findsOneWidget);
+    expect(find.text('1 Incomplete (Open)'), findsOneWidget);
+    expect(find.text('2 Complete (Closed)'), findsOneWidget);
+    expect(find.text('INCOMPLETE • REMEDY NOT AVAILABLE'), findsOneWidget);
+    expect(find.text('OEM #25S53'), findsOneWidget);
+    expect(find.text('COMPLETE • CLOSED ON VIN'), findsNWidgets(2));
+    expect(find.text('1 incomplete • 2 complete'), findsOneWidget);
+
+    // Filter to Incomplete (1) only
+    await tester.tap(find.byKey(const ValueKey('filter_incomplete_recalls_chip')));
+    await tester.pumpAndSettle();
+    expect(find.text('NHTSA #25V347000'), findsOneWidget);
+    expect(find.text('NHTSA #24V100000'), findsNothing);
+
+    // Filter to Complete (2) only
+    await tester.tap(find.byKey(const ValueKey('filter_complete_recalls_chip')));
+    await tester.pumpAndSettle();
+    expect(find.text('NHTSA #25V347000'), findsNothing);
+    expect(find.text('NHTSA #24V100000'), findsOneWidget);
+    expect(find.text('NHTSA #23V200000'), findsOneWidget);
+
+    // Switch back to All (3) and click "Mark Complete" on 25V347000
+    await tester.tap(find.byKey(const ValueKey('filter_all_recalls_chip')));
+    await tester.pumpAndSettle();
+    final markCompleteBtn =
+        find.byKey(const ValueKey('toggle_recall_status_25V347000'));
+    await tester.ensureVisible(markCompleteBtn);
+    await tester.tap(markCompleteBtn);
+    await tester.pumpAndSettle();
+
+    // Counts immediately update to 0 Incomplete + 3 Complete!
+    expect(find.text('0 INCOMPLETE RECALLS • 3 COMPLETE'), findsOneWidget);
+    expect(find.text('0 Incomplete (Open)'), findsOneWidget);
+    expect(find.text('3 Complete (Closed)'), findsOneWidget);
+    expect(find.text('0 incomplete • 3 complete'), findsOneWidget);
+
+    NhtsaRecallService.mockCheckHandler = null;
     LocalScoutEngine.cancelSchedulerForTest();
     LocalScoutEngine.resetForTest();
     tester.binding.defaultBinaryMessenger

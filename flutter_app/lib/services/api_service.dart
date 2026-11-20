@@ -812,4 +812,43 @@ class ApiService {
         .toList();
     return (result: result, recent: recent);
   }
+
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      updateVinRecallStatus({
+    required String vin,
+    required String campaignNumber,
+    required String status,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.updateVinRecallStatus(
+        vin: vin,
+        campaignNumber: campaignNumber,
+        status: status,
+      );
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/recalls/status'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{
+        'vin': vin,
+        'campaignNumber': campaignNumber,
+        'status': status,
+      }),
+    );
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to update recall status (${res.statusCode})',
+      );
+    }
+    final result = VinRecallCheckResult.fromJson(
+      Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
+    );
+    final recent = (data['recent'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => RecentVinRecallEntry.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    return (result: result, recent: recent);
+  }
 }

@@ -4,12 +4,45 @@ import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import '../models/models.dart';
 
+class VinOpenRecallRecord {
+  final String recallDate;
+  final String recallType;
+  final String nhtsaPrefix;
+  final String oemRecallNumber;
+  final String description;
+  final String statusText;
+
+  const VinOpenRecallRecord({
+    this.recallDate = '',
+    this.recallType = '',
+    this.nhtsaPrefix = '',
+    this.oemRecallNumber = '',
+    this.description = '',
+    this.statusText = '',
+  });
+}
+
+class VinOpenRecallLookup {
+  final bool verified;
+  final int? openRecallCount;
+  final List<VinOpenRecallRecord> openRecalls;
+
+  const VinOpenRecallLookup({
+    required this.verified,
+    this.openRecallCount,
+    this.openRecalls = const [],
+  });
+}
+
 /// On-device NHTSA (`www.nhtsa.gov/recalls`, `vpic.nhtsa.dot.gov`, `api.nhtsa.gov`)
-/// + Google Gemini (`gemini-2.5-flash`) VIN Recall Check service.
+/// + Live Per-VIN Open Recall Status + Google Gemini (`gemini-2.5-flash`) VIN Recall Check service.
 class NhtsaRecallService {
   static const String vpicBase = 'https://vpic.nhtsa.dot.gov/api/vehicles';
   static const String nhtsaApiBase = 'https://api.nhtsa.gov';
   static const String nhtsaRecallsWebUrl = 'https://www.nhtsa.gov/recalls';
+  static const String prestonAutoCheckUrl =
+      'https://www.prestonmotor.com/autocheck.aspx';
+  static const String prestonAutoCheckAccount = 'NQAyADAAOAA2ADYAOAA%3d';
 
   @visibleForTesting
   static Future<VinRecallCheckResult> Function(String vin)? mockCheckHandler;
@@ -60,6 +93,568 @@ class NhtsaRecallService {
       );
     }
     return (valid: true, vin: cleaned, error: '');
+  }
+
+  /// Encodes a 17-character VIN as UTF-16LE Base64 (matching Node `Buffer.from(vin, 'utf16le').toString('base64')`).
+  static String encodeVinUtf16LeBase64(String vin) {
+    final normalized = vin.trim().toUpperCase();
+    final bytes = Uint8List(normalized.length * 2);
+    for (var i = 0; i < normalized.length; i++) {
+      final code = normalized.codeUnitAt(i);
+      bytes[i * 2] = code & 0xff;
+      bytes[i * 2 + 1] = (code >> 8) & 0xff;
+    }
+    return base64Encode(bytes);
+  }
+
+  /// Normalizes an NHTSA campaign identifier to its 6-character core prefix (e.g. "25V347000" -> "25V347").
+  static String normalizeNhtsaPrefix(String rawCampaign) {
+    final cleaned = rawCampaign
+        .toUpperCase()
+        .replaceAll(RegExp(r'[\s\-]+'), '')
+        .trim();
+    if (cleaned.isEmpty || cleaned == 'NA' || cleaned == 'N/A') return '';
+    if (RegExp(r'^\d{2}[A-Z]\d{3}000$').hasMatch(cleaned)) {
+      return cleaned.substring(0, 6);
+    }
+    return cleaned;
+  }
+
+  /// Extracts manufacturer / OEM recall code from NHTSA Remedy / Summary / Notes text
+  /// (e.g. "Ford's number for this recall is 25S53." -> "25S53").
+  static String extractOemRecallNumber(List<String> texts) {
+    final combined = texts
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .join(' ');
+    if (combined.isEmpty) return '';
+
+    final patterns = <RegExp>[
+      RegExp(
+        r'(?:number\s+for\s+this\s+recall\s+is|recall\s+number\s+(?:for\s+this\s+recall\s+)?is|campaign\s+number\s+is)\s+([A-Z0-9][A-Z0-9\-]{1,14})',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r"manufacturer(?:'s)?\s+recall\s+(?:number|code|id)\s*[:#]?\s*([A-Z0-9][A-Z0-9\-]{1,14})",
+        caseSensitive: false,
+      ),
+    ];
+
+    for (final re in patterns) {
+      final m = re.firstMatch(combined);
+      if (m != null && m.group(1) != null) {
+        final candidate = m
+            .group(1)!
+            .replaceAll(RegExp(r'[.,;:]+$'), '')
+            .toUpperCase()
+            .trim();
+        if (RegExp(r'\d').hasMatch(candidate) && candidate.length >= 2) {
+          return candidate;
+        }
+      }
+    }
+    return '';
+  }
+
+  static bool isRemedyUnavailableText(List<String> texts) {
+    final combined = texts
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .join(' ');
+    return RegExp(
+      r'remedy\s+(?:is\s+)?not\s+(?:yet\s+)?available|remedy\s+(?:is\s+)?currently\s+under\s+development|remedy\s+under\s+development|parts\s+are\s+not\s+(?:yet\s+)?available',
+      caseSensitive: false,
+    ).hasMatch(combined);
+  }
+
+  static String _stripHtmlAndDecodeEntities(String rawHtml) {
+    return rawHtml
+        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), ' | ')
+        .replaceAll(RegExp(r'<[^>]+>'), ' ')
+        .replaceAll(RegExp(r'&nbsp;', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'&amp;', caseSensitive: false), '&')
+        .replaceAll(RegExp(r'&quot;', caseSensitive: false), '"')
+        .replaceAll(RegExp(r'&#39;', caseSensitive: false), "'")
+        .replaceAll(RegExp(r'&lt;', caseSensitive: false), '<')
+        .replaceAll(RegExp(r'&gt;', caseSensitive: false), '>')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static ({String displayDate, String isoDate}) _parseUsMonthDayYearDate(
+    String rawDate,
+  ) {
+    final s = rawDate.trim();
+    final mdy = RegExp(r'^(\d{1,2})/(\d{1,2})/(\d{4})$').firstMatch(s);
+    if (mdy != null) {
+      final month = int.tryParse(mdy.group(1)!) ?? 0;
+      final day = int.tryParse(mdy.group(2)!) ?? 0;
+      final year = int.tryParse(mdy.group(3)!) ?? 0;
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        final dt = DateTime.utc(year, month, day);
+        return (
+          displayDate: DateFormat('MMM d, yyyy').format(dt),
+          isoDate:
+              '${year.toString().padLeft(4, '0')}-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}',
+        );
+      }
+    }
+    return parseNhtsaReportDate(s);
+  }
+
+  /// Parses live VIN-specific Open Recall HTML from Preston's AutoCheck report
+  /// so we differentiate Incomplete (Open) vs Complete (Closed) recalls per VIN.
+  static VinOpenRecallLookup parseVinOpenRecallHtml(String html) {
+    if (html.isEmpty ||
+        (!RegExp(r'Open\s+Recall\s+Check', caseSensitive: false)
+                .hasMatch(html) &&
+            !html.contains('id="recallSection"'))) {
+      return const VinOpenRecallLookup(verified: false);
+    }
+
+    int? declaredCount;
+    if (RegExp(r'\bNo\s+Open\s+Recalls\b', caseSensitive: false)
+            .hasMatch(html) ||
+        RegExp(r'AutoCheck\s+found\s+no\s+open\s+recalls', caseSensitive: false)
+            .hasMatch(html)) {
+      declaredCount = 0;
+    } else {
+      final m = RegExp(
+            r'AutoCheck\s+found\s*<span[^>]*>\s*(\d+)\s*</span>\s*open\s+recall',
+            caseSensitive: false,
+          ).firstMatch(html) ??
+          RegExp(
+            r'<p[^>]*>\s*Open\s+Recall\s+Check\s*</p>[\s\S]{0,1400}?(\d+)\s+Open\s+Recall',
+            caseSensitive: false,
+          ).firstMatch(html) ??
+          RegExp(
+            r'Open\s+Recall\s+Check[\s\S]{0,1600}?(\d+)\s+Open\s+Recall',
+            caseSensitive: false,
+          ).firstMatch(html);
+      if (m != null && m.group(1) != null) {
+        declaredCount = int.tryParse(m.group(1)!);
+      }
+    }
+
+    final openRecalls = <VinOpenRecallRecord>[];
+    final secIdx = html.indexOf('id="recallSection"');
+    if (secIdx >= 0) {
+      final afterSec = html.substring(secIdx);
+      final bodyStart = afterSec.indexOf('<div class="rTableBody">');
+      final mobileMarker = afterSec.indexOf('<!-- Mobile -->');
+      final serviceMarker = afterSec.indexOf('id="serviceHistorySummary"');
+      final endBound = mobileMarker > bodyStart && mobileMarker != -1
+          ? mobileMarker
+          : (serviceMarker > bodyStart && serviceMarker != -1
+              ? serviceMarker
+              : (afterSec.length < 16000 ? afterSec.length : 16000));
+
+      if (bodyStart >= 0 && endBound > bodyStart) {
+        final tableBodyHtml = afterSec.substring(bodyStart, endBound);
+        final rowChunks = tableBodyHtml
+            .split(RegExp(r'<div\s+class="rTableRow">', caseSensitive: false));
+        for (var rIdx = 1; rIdx < rowChunks.length; rIdx++) {
+          final chunk = rowChunks[rIdx];
+          final cells = RegExp(
+            r'<div\s+class="rTableCell[^"]*">([\s\S]*?)</div>',
+            caseSensitive: false,
+          )
+              .allMatches(chunk)
+              .map((m) => _stripHtmlAndDecodeEntities(m.group(1) ?? ''))
+              .toList();
+          if (cells.length < 3) continue;
+
+          final recallDateRaw =
+              cells[0].replaceAll(RegExp(r'\s*\|\s*'), ' ').trim();
+          final recallType =
+              cells[1].replaceAll(RegExp(r'\s*\|\s*'), ' ').trim();
+          final idsRaw =
+              cells[2].replaceAll(RegExp(r'\s*\|\s*'), ' ').trim();
+          final descRaw = cells.length > 3 ? cells[3] : '';
+
+          final idParts = idsRaw.split('/').map((p) => p.trim()).toList();
+          final rawNhtsa = idParts.isNotEmpty ? idParts[0] : '';
+          final rawOem = idParts.length > 1 ? idParts[1] : '';
+          final nhtsaPrefix = normalizeNhtsaPrefix(rawNhtsa);
+          final oemRecallNumber = rawOem.isNotEmpty &&
+                  rawOem.toUpperCase() != 'N/A' &&
+                  rawOem.toUpperCase() != 'NA'
+              ? rawOem.toUpperCase().replaceAll(RegExp(r'\s+'), '')
+              : '';
+
+          final descParts = descRaw
+              .split('|')
+              .map((p) => p.trim())
+              .where((p) => p.isNotEmpty)
+              .toList();
+          String statusText = '';
+          final descSegments = <String>[];
+          for (final seg in descParts) {
+            final stMatch =
+                RegExp(r'^Status:\s*(.+)$', caseSensitive: false).firstMatch(seg);
+            if (stMatch != null) {
+              statusText = (stMatch.group(1) ?? '').trim();
+            } else {
+              descSegments.add(seg);
+            }
+          }
+
+          openRecalls.add(
+            VinOpenRecallRecord(
+              recallDate: recallDateRaw,
+              recallType: recallType,
+              nhtsaPrefix: nhtsaPrefix,
+              oemRecallNumber: oemRecallNumber,
+              description: descSegments.isNotEmpty
+                  ? descSegments.join(' — ')
+                  : descRaw,
+              statusText: statusText,
+            ),
+          );
+        }
+      }
+    }
+
+    final resolvedCount = declaredCount ??
+        (openRecalls.isNotEmpty ? openRecalls.length : null);
+    return VinOpenRecallLookup(
+      verified: resolvedCount != null || openRecalls.isNotEmpty,
+      openRecallCount: resolvedCount ?? openRecalls.length,
+      openRecalls: openRecalls,
+    );
+  }
+
+  static Future<VinOpenRecallLookup> _fetchVinSpecificOpenRecalls(
+    String vin,
+  ) async {
+    if (kIsWeb) {
+      return const VinOpenRecallLookup(verified: false);
+    }
+    try {
+      final sv = Uri.encodeComponent(encodeVinUtf16LeBase64(vin));
+      final uri = Uri.parse(
+        '$prestonAutoCheckUrl?sv=$sv&ac=$prestonAutoCheckAccount',
+      );
+      final res = await http
+          .get(
+            uri,
+            headers: const {
+              'User-Agent':
+                  'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) {
+        return const VinOpenRecallLookup(verified: false);
+      }
+      return parseVinOpenRecallHtml(res.body);
+    } catch (_) {
+      return const VinOpenRecallLookup(verified: false);
+    }
+  }
+
+  static int _completionSortRank(String status) {
+    switch (status) {
+      case 'incomplete':
+        return 0;
+      case 'incomplete_no_remedy':
+        return 1;
+      case 'unverified':
+        return 2;
+      case 'complete':
+        return 3;
+      case 'not_applicable':
+        return 4;
+      default:
+        return 5;
+    }
+  }
+
+  static String buildVerdictHeadline({
+    required String vehicleTitle,
+    required int incompleteCount,
+    required int completeCount,
+    required bool vinCompletionVerified,
+  }) {
+    if (incompleteCount == 0 && completeCount == 0) {
+      return 'No Open or Historical Recalls Found for $vehicleTitle';
+    }
+    if (incompleteCount == 0 && completeCount > 0) {
+      return '0 Incomplete Recalls • $completeCount Complete Recall${completeCount == 1 ? '' : 's'} for $vehicleTitle';
+    }
+    if (incompleteCount > 0 && completeCount > 0) {
+      return '$incompleteCount Incomplete Recall${incompleteCount == 1 ? '' : 's'} • $completeCount Complete Recall${completeCount == 1 ? '' : 's'} for $vehicleTitle';
+    }
+    if (vinCompletionVerified) {
+      return '$incompleteCount Incomplete Recall${incompleteCount == 1 ? '' : 's'} • 0 Complete for $vehicleTitle';
+    }
+    return '$incompleteCount Unverified / Incomplete Recall${incompleteCount == 1 ? '' : 's'} for $vehicleTitle';
+  }
+
+  /// Reconciles NHTSA model-level recall campaigns with live per-VIN open-recall status
+  /// and dealership manual overrides (`'complete'` / `'incomplete'`).
+  static ({
+    List<NhtsaRecallCampaign> recalls,
+    int incompleteCount,
+    int completeCount,
+    bool vinCompletionVerified,
+  }) reconcileVinRecallCompletion({
+    required DecodedVinVehicle decoded,
+    required List<NhtsaRecallCampaign> recalls,
+    required VinOpenRecallLookup vinOpenCheck,
+    Map<String, String> manualOverrides = const {},
+  }) {
+    final openList = vinOpenCheck.openRecalls;
+    final matchedOpenIndices = <int>{};
+
+    final reconciled = recalls.map((rec) {
+      final recPrefix = normalizeNhtsaPrefix(rec.campaignNumber);
+      final recOem = (rec.oemRecallNumber.isNotEmpty
+              ? rec.oemRecallNumber
+              : extractOemRecallNumber([rec.remedy, rec.summary, rec.notes]))
+          .toUpperCase()
+          .trim();
+
+      VinOpenRecallRecord? matchedOpen;
+      for (var i = 0; i < openList.length; i++) {
+        final openItem = openList[i];
+        final prefixMatches = recPrefix.isNotEmpty &&
+            openItem.nhtsaPrefix.isNotEmpty &&
+            recPrefix == openItem.nhtsaPrefix;
+        final oemMatches = recOem.isNotEmpty &&
+            openItem.oemRecallNumber.isNotEmpty &&
+            recOem == openItem.oemRecallNumber;
+        if (prefixMatches || oemMatches) {
+          matchedOpen = openItem;
+          matchedOpenIndices.add(i);
+          break;
+        }
+      }
+
+      final finalOem =
+          recOem.isNotEmpty ? recOem : (matchedOpen?.oemRecallNumber ?? '');
+      final isOther = RegExp(
+        r'other\s+(?:engine|powertrain)',
+        caseSensitive: false,
+      ).hasMatch(rec.applicability);
+      final manualStatus = manualOverrides[rec.campaignNumber];
+      final noRemedy = isRemedyUnavailableText([
+            rec.remedy,
+            matchedOpen?.statusText ?? '',
+          ]) ||
+          !rec.remedyAvailable;
+
+      if (manualStatus == 'complete') {
+        return rec.copyWith(
+          oemRecallNumber: finalOem,
+          remedyAvailable: !noRemedy,
+          completionStatus: 'complete',
+          completionSource: 'dealer_override',
+          vinStatusNote:
+              'Marked Complete by Dealership Service (remedy verified repaired on VIN).',
+        );
+      }
+
+      if (manualStatus == 'incomplete') {
+        return rec.copyWith(
+          oemRecallNumber: finalOem,
+          remedyAvailable: !noRemedy,
+          completionStatus: noRemedy ? 'incomplete_no_remedy' : 'incomplete',
+          completionSource: 'dealer_override',
+          vinStatusNote: noRemedy
+              ? 'Marked Incomplete by Dealership Service • Manufacturer remedy not yet available.'
+              : 'Marked Incomplete (Open) by Dealership Service — requires recall repair.',
+        );
+      }
+
+      if (matchedOpen != null) {
+        final openNoRemedy =
+            isRemedyUnavailableText([rec.remedy, matchedOpen.statusText]);
+        final statusDetail = matchedOpen.statusText.isNotEmpty
+            ? ' (${matchedOpen.statusText})'
+            : '';
+        return rec.copyWith(
+          oemRecallNumber: finalOem,
+          applicability: 'Confirmed Open on This VIN',
+          remedyAvailable: !openNoRemedy,
+          completionStatus:
+              openNoRemedy ? 'incomplete_no_remedy' : 'incomplete',
+          completionSource: 'vin_live_lookup',
+          vinStatusNote: openNoRemedy
+              ? 'Confirmed INCOMPLETE on this VIN$statusDetail — manufacturer remedy/parts not yet available.'
+              : 'Confirmed INCOMPLETE (Open) on this VIN$statusDetail — schedule free dealer recall repair.',
+        );
+      }
+
+      if (isOther) {
+        return rec.copyWith(
+          oemRecallNumber: finalOem,
+          remedyAvailable: !noRemedy,
+          completionStatus: 'not_applicable',
+          completionSource: 'powertrain_mismatch',
+          vinStatusNote:
+              'Applies to a different engine/powertrain configuration than this VIN.',
+        );
+      }
+
+      if (vinOpenCheck.verified) {
+        return rec.copyWith(
+          oemRecallNumber: finalOem,
+          remedyAvailable: true,
+          completionStatus: 'complete',
+          completionSource: 'vin_live_lookup',
+          vinStatusNote:
+              'Confirmed COMPLETE / CLOSED on this VIN (0 open recall status on VIN record).',
+        );
+      }
+
+      return rec.copyWith(
+        oemRecallNumber: finalOem,
+        remedyAvailable: !noRemedy,
+        completionStatus: 'unverified',
+        completionSource: 'model_lookup_only',
+        vinStatusNote:
+            'VIN-specific completion status could not be verified automatically — confirm repair history in OEM warranty/OASIS or on www.nhtsa.gov/recalls.',
+      );
+    }).toList();
+
+    for (var i = 0; i < openList.length; i++) {
+      if (matchedOpenIndices.contains(i)) continue;
+      final openItem = openList[i];
+      final campaignNumber = openItem.nhtsaPrefix.isNotEmpty
+          ? '${openItem.nhtsaPrefix}000'
+          : (openItem.oemRecallNumber.isNotEmpty
+              ? 'OEM-${openItem.oemRecallNumber}'
+              : 'OPEN-${i + 1}');
+      final manualStatus = manualOverrides[campaignNumber];
+      final dates = _parseUsMonthDayYearDate(openItem.recallDate);
+      final openNoRemedy = isRemedyUnavailableText([
+        openItem.statusText,
+        openItem.description,
+      ]);
+      final completionStatus = manualStatus == 'complete'
+          ? 'complete'
+          : (openNoRemedy ? 'incomplete_no_remedy' : 'incomplete');
+
+      reconciled.add(
+        NhtsaRecallCampaign(
+          campaignNumber: campaignNumber,
+          oemRecallNumber: openItem.oemRecallNumber,
+          manufacturer: decoded.manufacturer.isNotEmpty
+              ? decoded.manufacturer
+              : (decoded.make.isNotEmpty ? decoded.make : 'Manufacturer'),
+          component: openItem.description.isNotEmpty
+              ? openItem.description
+              : '${openItem.recallType.isNotEmpty ? openItem.recallType : 'Safety'} Recall Campaign',
+          reportDate: dates.displayDate,
+          reportIsoDate: dates.isoDate,
+          summary: openItem.description.isNotEmpty
+              ? openItem.description
+              : 'Open manufacturer recall reported for this specific VIN.',
+          remedy: openItem.statusText.isNotEmpty
+              ? 'Manufacturer Recall Status: ${openItem.statusText}. Contact an authorized ${decoded.make.isNotEmpty ? decoded.make : 'OEM'} service department for free recall remedy.'
+              : 'Contact an authorized ${decoded.make.isNotEmpty ? decoded.make : 'OEM'} service department for free recall remedy.',
+          nhtsaModelMatched: decoded.model,
+          applicability: 'Confirmed Open on This VIN',
+          geminiNote:
+              'Directly reported as an active open recall on VIN ${decoded.vin}.',
+          completionStatus: completionStatus,
+          completionSource:
+              manualStatus != null ? 'dealer_override' : 'vin_live_lookup',
+          remedyAvailable: !openNoRemedy,
+          vinStatusNote: completionStatus == 'complete'
+              ? 'Marked Complete by Dealership Service (remedy verified repaired on VIN).'
+              : (openNoRemedy
+                  ? 'Confirmed INCOMPLETE on this VIN (${openItem.statusText.isNotEmpty ? openItem.statusText : 'Remedy Not Available'}).'
+                  : 'Confirmed INCOMPLETE (Open) on this VIN${openItem.statusText.isNotEmpty ? ' (${openItem.statusText})' : ''}.'),
+        ),
+      );
+    }
+
+    reconciled.sort((a, b) {
+      final rankDiff = _completionSortRank(a.completionStatus) -
+          _completionSortRank(b.completionStatus);
+      if (rankDiff != 0) return rankDiff;
+      return b.reportIsoDate.compareTo(a.reportIsoDate);
+    });
+
+    final incompleteCount = reconciled.where((r) => r.isIncomplete).length;
+    final completeCount = reconciled.where((r) => r.isComplete).length;
+
+    return (
+      recalls: reconciled,
+      incompleteCount: incompleteCount,
+      completeCount: completeCount,
+      vinCompletionVerified: vinOpenCheck.verified,
+    );
+  }
+
+  /// Applies a manual `'complete'` or `'incomplete'` override to an existing result in memory.
+  static VinRecallCheckResult applyManualOverridesToResult(
+    VinRecallCheckResult current,
+    Map<String, String> overridesForVin,
+  ) {
+    final updatedRecalls = current.recalls.map((rec) {
+      final manualStatus = overridesForVin[rec.campaignNumber];
+      if (manualStatus == null) return rec;
+      final noRemedy =
+          isRemedyUnavailableText([rec.remedy]) && !rec.remedyAvailable;
+      if (manualStatus == 'complete') {
+        return rec.copyWith(
+          completionStatus: 'complete',
+          completionSource: 'dealer_override',
+          vinStatusNote:
+              'Marked Complete by Dealership Service (remedy verified repaired on VIN).',
+        );
+      }
+      return rec.copyWith(
+        completionStatus: noRemedy ? 'incomplete_no_remedy' : 'incomplete',
+        completionSource: 'dealer_override',
+        vinStatusNote: noRemedy
+            ? 'Marked Incomplete by Dealership Service • Manufacturer remedy not yet available.'
+            : 'Marked Incomplete (Open) by Dealership Service — requires recall repair.',
+      );
+    }).toList()
+      ..sort((a, b) {
+        final rankDiff = _completionSortRank(a.completionStatus) -
+            _completionSortRank(b.completionStatus);
+        if (rankDiff != 0) return rankDiff;
+        return b.reportIsoDate.compareTo(a.reportIsoDate);
+      });
+
+    final incompleteCount = updatedRecalls.where((r) => r.isIncomplete).length;
+    final completeCount = updatedRecalls.where((r) => r.isComplete).length;
+    final openRecalls = updatedRecalls.where((r) => r.isIncomplete).toList();
+
+    return VinRecallCheckResult(
+      id: current.id,
+      vin: current.vin,
+      nhtsaUrl: current.nhtsaUrl,
+      nhtsaSiteReachable: current.nhtsaSiteReachable,
+      vinCompletionVerified: current.vinCompletionVerified,
+      checkedAt: DateTime.now().toUtc().toIso8601String(),
+      agentMode: current.agentMode,
+      vehicleTitle: current.vehicleTitle,
+      vehicle: current.vehicle,
+      queriedModels: current.queriedModels,
+      hasRecalls: incompleteCount > 0,
+      recallCount: incompleteCount,
+      incompleteCount: incompleteCount,
+      completeCount: completeCount,
+      totalModelRecalls: updatedRecalls.length,
+      parkItUrgent: openRecalls.any((r) => r.parkIt),
+      parkOutsideWarning: openRecalls.any((r) => r.parkOutSide),
+      verdictHeadline: buildVerdictHeadline(
+        vehicleTitle: current.vehicleTitle,
+        incompleteCount: incompleteCount,
+        completeCount: completeCount,
+        vinCompletionVerified: current.vinCompletionVerified,
+      ),
+      geminiSummary: current.geminiSummary,
+      recommendedAction: current.recommendedAction,
+      recalls: updatedRecalls,
+    );
   }
 
   /// Parses NHTSA's DD/MM/YYYY date format (e.g. "10/05/2024" -> "May 10, 2024" & "2024-05-10").
@@ -114,9 +709,7 @@ class NhtsaRecallService {
         );
   }
 
-  /// Matches a decoded vPIC model against NHTSA's recall-specific model taxonomy
-  /// (e.g., "Bronco" -> ["BRONCO 2DR", "BRONCO 4DR"] without "BRONCO SPORT",
-  /// "Escape" -> ["ESCAPE GAS", ...] filtered by fuel type, "F-250" -> ["F-250 SD"]).
+  /// Matches a decoded vPIC model against NHTSA's recall-specific model taxonomy.
   static List<String> selectMatchingNhtsaRecallModels(
     DecodedVinVehicle decodedVehicle,
     List<String> nhtsaModels,
@@ -250,9 +843,8 @@ class NhtsaRecallService {
     return candidates.toList();
   }
 
-  static Future<({DecodedVinVehicle vehicle, String errorText})> _decodeVinViaVpic(
-    String vin,
-  ) async {
+  static Future<({DecodedVinVehicle vehicle, String errorText})>
+      _decodeVinViaVpic(String vin) async {
     final uri = Uri.parse(
       '$vpicBase/DecodeVinValues/${Uri.encodeComponent(vin)}?format=json',
     );
@@ -261,7 +853,7 @@ class NhtsaRecallService {
           uri,
           headers: const {
             'Accept': 'application/json',
-            'User-Agent': 'PrestonGuestScout/1.9 (NHTSA VIN Recall Checker)',
+            'User-Agent': 'PrestonGuestScout/1.11 (NHTSA VIN Recall Checker)',
           },
         )
         .timeout(const Duration(seconds: 15));
@@ -294,7 +886,8 @@ class NhtsaRecallService {
         .join(' • ');
 
     final dispDouble = double.tryParse(row['DisplacementL']?.toString() ?? '');
-    final dispStr = dispDouble != null ? '${dispDouble.toStringAsFixed(1)}L' : '';
+    final dispStr =
+        dispDouble != null ? '${dispDouble.toStringAsFixed(1)}L' : '';
     final cylRaw = (row['EngineCylinders']?.toString() ?? '').trim();
     final cylStr = cylRaw.isNotEmpty ? '$cylRaw-Cyl' : '';
     final fuel = (row['FuelTypePrimary']?.toString() ?? '').trim();
@@ -382,7 +975,7 @@ class NhtsaRecallService {
                 modelsUri,
                 headers: const {
                   'Accept': 'application/json',
-                  'User-Agent': 'PrestonGuestScout/1.9',
+                  'User-Agent': 'PrestonGuestScout/1.11',
                 },
               )
               .timeout(const Duration(seconds: 12));
@@ -408,7 +1001,8 @@ class NhtsaRecallService {
     await Future.wait(
       modelsToQuery.map((modelName) async {
         try {
-          final uri = Uri.parse('$nhtsaApiBase/recalls/recallsByVehicle').replace(
+          final uri =
+              Uri.parse('$nhtsaApiBase/recalls/recallsByVehicle').replace(
             queryParameters: {
               'make': decoded.make,
               'model': modelName,
@@ -420,13 +1014,14 @@ class NhtsaRecallService {
                 uri,
                 headers: const {
                   'Accept': 'application/json',
-                  'User-Agent': 'PrestonGuestScout/1.9',
+                  'User-Agent': 'PrestonGuestScout/1.11',
                 },
               )
               .timeout(const Duration(seconds: 15));
           if (r.statusCode != 200) return;
           final j = jsonDecode(r.body) as Map<String, dynamic>;
-          final items = (j['results'] ?? j['Results']) as List<dynamic>? ?? const [];
+          final items =
+              (j['results'] ?? j['Results']) as List<dynamic>? ?? const [];
           for (final rawItem in items) {
             if (rawItem is! Map) continue;
             final item = Map<String, dynamic>.from(rawItem);
@@ -436,8 +1031,23 @@ class NhtsaRecallService {
             final dates = parseNhtsaReportDate(
               item['ReportReceivedDate']?.toString() ?? '',
             );
+            final summary = (item['Summary']?.toString() ?? '')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            final consequence = (item['Consequence']?.toString() ?? '')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            final remedy = (item['Remedy']?.toString() ?? '')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            final notes = (item['Notes']?.toString() ?? '')
+                .replaceAll(RegExp(r'\s+'), ' ')
+                .trim();
+            final oemCode = extractOemRecallNumber([remedy, summary, notes]);
+
             byCampaign[campaign] = NhtsaRecallCampaign(
               campaignNumber: campaign,
+              oemRecallNumber: oemCode,
               manufacturer: (item['Manufacturer']?.toString() ??
                       decoded.manufacturer)
                   .trim(),
@@ -446,24 +1056,19 @@ class NhtsaRecallService {
                       .trim(),
               reportDate: dates.displayDate,
               reportIsoDate: dates.isoDate,
-              summary: (item['Summary']?.toString() ?? '')
-                  .replaceAll(RegExp(r'\s+'), ' ')
-                  .trim(),
-              consequence: (item['Consequence']?.toString() ?? '')
-                  .replaceAll(RegExp(r'\s+'), ' ')
-                  .trim(),
-              remedy: (item['Remedy']?.toString() ?? '')
-                  .replaceAll(RegExp(r'\s+'), ' ')
-                  .trim(),
-              notes: (item['Notes']?.toString() ?? '')
-                  .replaceAll(RegExp(r'\s+'), ' ')
-                  .trim(),
+              summary: summary,
+              consequence: consequence,
+              remedy: remedy,
+              notes: notes,
               parkIt: item['parkIt'] == true,
               parkOutSide: item['parkOutSide'] == true,
               overTheAirUpdate: item['overTheAirUpdate'] == true,
               nhtsaModelMatched:
                   (item['Model']?.toString() ?? modelName).trim(),
               applicability: 'Matches Decoded Vehicle',
+              completionStatus: 'unverified',
+              completionSource: 'model_lookup_only',
+              remedyAvailable: !isRemedyUnavailableText([remedy]),
             );
           }
         } catch (_) {}
@@ -503,20 +1108,7 @@ class NhtsaRecallService {
       if (vDisp.isNotEmpty &&
           mentionedDisps.isNotEmpty &&
           !mentionedDisps.contains(vDisp)) {
-        return NhtsaRecallCampaign(
-          campaignNumber: rec.campaignNumber,
-          manufacturer: rec.manufacturer,
-          component: rec.component,
-          reportDate: rec.reportDate,
-          reportIsoDate: rec.reportIsoDate,
-          summary: rec.summary,
-          consequence: rec.consequence,
-          remedy: rec.remedy,
-          notes: rec.notes,
-          parkIt: rec.parkIt,
-          parkOutSide: rec.parkOutSide,
-          overTheAirUpdate: rec.overTheAirUpdate,
-          nhtsaModelMatched: rec.nhtsaModelMatched,
+        return rec.copyWith(
           applicability: 'Other Engine / Equipment Variant',
           geminiNote:
               'Campaign specifically references ${mentionedDisps.join('/')}L engine; this VIN decoded with ${vDisp}L.',
@@ -527,53 +1119,28 @@ class NhtsaRecallService {
           vFuel.isNotEmpty &&
           !vFuel.contains('hybrid') &&
           !vFuel.contains('electric')) {
-        return NhtsaRecallCampaign(
-          campaignNumber: rec.campaignNumber,
-          manufacturer: rec.manufacturer,
-          component: rec.component,
-          reportDate: rec.reportDate,
-          reportIsoDate: rec.reportIsoDate,
-          summary: rec.summary,
-          consequence: rec.consequence,
-          remedy: rec.remedy,
-          notes: rec.notes,
-          parkIt: rec.parkIt,
-          parkOutSide: rec.parkOutSide,
-          overTheAirUpdate: rec.overTheAirUpdate,
-          nhtsaModelMatched: rec.nhtsaModelMatched,
+        return rec.copyWith(
           applicability: 'Other Powertrain Variant',
           geminiNote:
               'Campaign targets Hybrid powertrain; this VIN decoded as ${decoded.fuelType}.',
         );
       }
 
-      return NhtsaRecallCampaign(
-        campaignNumber: rec.campaignNumber,
-        manufacturer: rec.manufacturer,
-        component: rec.component,
-        reportDate: rec.reportDate,
-        reportIsoDate: rec.reportIsoDate,
-        summary: rec.summary,
-        consequence: rec.consequence,
-        remedy: rec.remedy,
-        notes: rec.notes,
-        parkIt: rec.parkIt,
-        parkOutSide: rec.parkOutSide,
-        overTheAirUpdate: rec.overTheAirUpdate,
-        nhtsaModelMatched: rec.nhtsaModelMatched,
+      return rec.copyWith(
         applicability: 'Matches Decoded Vehicle',
         geminiNote:
-            'Matches this VIN\'s decoded model year, make, model, and powertrain.',
+            "Matches this VIN's decoded model year, make, model, and powertrain.",
       );
     }).toList();
   }
 
-  /// Checks `www.nhtsa.gov/recalls` + official NHTSA vPIC/Recalls APIs and analyzes
-  /// recall applicability with Gemini (`gemini-2.5-flash`).
+  /// Checks `www.nhtsa.gov/recalls`, official NHTSA vPIC/Recalls APIs, and live VIN-specific
+  /// recall completion status, then analyzes Complete vs. Incomplete recalls with Gemini.
   static Future<VinRecallCheckResult> checkVinRecalls({
     required String rawVin,
     String geminiApiKey = '',
     String geminiModel = 'gemini-2.5-flash',
+    Map<String, String> manualOverrides = const {},
   }) async {
     final validation = validateAndNormalizeVin(rawVin);
     if (!validation.valid) {
@@ -582,11 +1149,28 @@ class NhtsaRecallService {
 
     final vin = validation.vin;
     if (mockCheckHandler != null) {
-      return mockCheckHandler!(vin);
+      final mocked = await mockCheckHandler!(vin);
+      if (manualOverrides.isNotEmpty) {
+        return applyManualOverridesToResult(mocked, manualOverrides);
+      }
+      return mocked;
     }
 
     final nhtsaUrl = '$nhtsaRecallsWebUrl?vin=${Uri.encodeComponent(vin)}';
-    final (:vehicle, :errorText) = await _decodeVinViaVpic(vin);
+
+    late ({DecodedVinVehicle vehicle, String errorText}) decodedWrap;
+    late VinOpenRecallLookup vinOpenCheck;
+    await Future.wait([
+      () async {
+        decodedWrap = await _decodeVinViaVpic(vin);
+      }(),
+      () async {
+        vinOpenCheck = await _fetchVinSpecificOpenRecalls(vin);
+      }(),
+    ]);
+
+    final vehicle = decodedWrap.vehicle;
+    final errorText = decodedWrap.errorText;
 
     if (vehicle.make.isEmpty || vehicle.year == null) {
       throw Exception(
@@ -596,8 +1180,12 @@ class NhtsaRecallService {
 
     final fetched = await _fetchNhtsaRecallsForVehicle(vehicle);
     final annotated = _annotateDeterministically(vehicle, fetched.recalls);
-    final matchingRecalls =
-        annotated.where((r) => !r.isOtherVariant).toList();
+    var reconciled = reconcileVinRecallCompletion(
+      decoded: vehicle,
+      recalls: annotated,
+      vinOpenCheck: vinOpenCheck,
+      manualOverrides: manualOverrides,
+    );
 
     final vehicleTitle = [
       if (vehicle.year != null) '${vehicle.year}',
@@ -606,53 +1194,90 @@ class NhtsaRecallService {
       vehicle.trim,
     ].where((s) => s.trim().isNotEmpty).join(' ');
 
-    final urgentParkIt = annotated.any((r) => r.parkIt);
-    final urgentParkOutside = annotated.any((r) => r.parkOutSide);
+    ({String summary, String action}) buildFallbackTexts(
+      List<NhtsaRecallCampaign> list,
+      int incCount,
+      int compCount,
+      bool verified,
+    ) {
+      final openRecs = list.where((r) => r.isIncomplete).toList();
+      final openParkIt = openRecs.any((r) => r.parkIt);
+      final openParkOut = openRecs.any((r) => r.parkOutSide);
+      final noRemedyCount =
+          openRecs.where((r) => r.isRemedyUnavailable).length;
 
-    final fallbackSummary = annotated.isEmpty
-        ? 'Checked NHTSA ($nhtsaRecallsWebUrl) for VIN $vin ($vehicleTitle): 0 safety recall campaigns are on file for this vehicle.'
-        : matchingRecalls.isNotEmpty
-            ? 'Checked NHTSA ($nhtsaRecallsWebUrl) for VIN $vin ($vehicleTitle): found ${matchingRecalls.length} matching NHTSA safety recall campaign(s)${annotated.length > matchingRecalls.length ? ' (${annotated.length} total on the ${vehicle.year} ${vehicle.make} ${vehicle.model} line)' : ''}. Confirm VIN-specific repair completion status on NHTSA.gov/recalls or with an authorized ${vehicle.make} service department.'
-            : 'Found ${annotated.length} recall campaign(s) on the ${vehicle.year} ${vehicle.make} ${vehicle.model} model line, though they appear specific to different engine/equipment variants than this VIN (${vehicle.engine.isNotEmpty ? vehicle.engine : 'decoded build'}). Verify exact VIN status on NHTSA.gov/recalls.';
+      String summary;
+      if (incCount == 0 && compCount == 0) {
+        summary =
+            'Checked NHTSA ($nhtsaRecallsWebUrl) and VIN-specific recall status for VIN $vin ($vehicleTitle): 0 incomplete (open) recalls and 0 completed recall campaigns are on file.';
+      } else if (incCount == 0 && compCount > 0) {
+        summary =
+            'Good news for VIN $vin ($vehicleTitle): 0 incomplete (open) recalls remain on this vehicle, and $compCount historical NHTSA recall campaign${compCount == 1 ? ' is' : 's are'} confirmed COMPLETE / closed on this VIN.';
+      } else if (verified) {
+        summary =
+            'VIN $vin ($vehicleTitle) has $incCount INCOMPLETE (open) recall${incCount == 1 ? '' : 's'}${noRemedyCount > 0 ? ' ($noRemedyCount awaiting manufacturer remedy availability)' : ''} and $compCount COMPLETE (closed) recall${compCount == 1 ? '' : 's'} verified against NHTSA ($nhtsaRecallsWebUrl) and live VIN recall records.';
+      } else {
+        summary =
+            'Found $incCount matching NHTSA safety recall campaign${incCount == 1 ? '' : 's'} on file for VIN $vin ($vehicleTitle) via $nhtsaRecallsWebUrl. Verify per-VIN repair completion in ${vehicle.make} warranty history or mark completed campaigns below.';
+      }
 
-    final fallbackAction = annotated.isEmpty
-        ? 'No open NHTSA model-level safety recalls found. You can still tap "Verify on www.nhtsa.gov/recalls" anytime before delivery.'
-        : urgentParkIt
-            ? 'URGENT — DO NOT DRIVE warning present on at least one campaign. Verify immediately on www.nhtsa.gov/recalls and schedule authorized dealer repair before driving.'
-            : urgentParkOutside
-                ? 'IMPORTANT — Park Outside advisory present. Verify VIN repair history on www.nhtsa.gov/recalls and schedule free recall remedy with service.'
-                : 'Verify whether each campaign remedy has already been completed for VIN $vin on www.nhtsa.gov/recalls or in ${vehicle.make} warranty/OASIS history.';
+      String action;
+      if (incCount == 0) {
+        action = compCount > 0
+            ? 'All $compCount applicable NHTSA recall campaign${compCount == 1 ? ' has' : 's have'} been completed/closed for VIN $vin. Ready for guest delivery.'
+            : 'No open safety recalls require service action on this VIN.';
+      } else if (openParkIt) {
+        action =
+            'URGENT — DO NOT DRIVE warning on an INCOMPLETE recall! Hold vehicle immediately and schedule authorized dealer recall repair before driving or delivery.';
+      } else if (openParkOut) {
+        action =
+            'IMPORTANT — Park Outside advisory on an INCOMPLETE recall. Park away from structures and schedule authorized dealer recall repair immediately.';
+      } else if (noRemedyCount == incCount) {
+        action =
+            'Open recall remedy is not yet available from ${vehicle.make}. Advise the guest of the open recall notice and monitor www.nhtsa.gov/recalls for parts release.';
+      } else {
+        action =
+            'Schedule free recall repair with ${vehicle.make} Service for the $incCount INCOMPLETE recall${incCount == 1 ? '' : 's'} before delivery, then tap "Mark Complete" once repaired.';
+      }
+      return (summary: summary, action: action);
+    }
 
     final cleanKey = geminiApiKey.trim();
     final cleanModel =
         geminiModel.trim().isNotEmpty ? geminiModel.trim() : 'gemini-2.5-flash';
 
-    String agentMode = 'nhtsa-smart-analyzer';
-    bool finalHasRecalls = matchingRecalls.isNotEmpty;
-    int finalCount = matchingRecalls.length;
-    String verdictHeadline = finalHasRecalls
-        ? '$finalCount NHTSA Recall Campaign(s) Found for $vehicleTitle'
-        : 'No Matching NHTSA Recalls Found for $vehicleTitle';
-    String geminiSummary = fallbackSummary;
-    String recommendedAction = fallbackAction;
-    List<NhtsaRecallCampaign> finalRecalls = annotated;
+    String agentMode = reconciled.vinCompletionVerified
+        ? 'nhtsa+vin-live-status'
+        : 'nhtsa-smart-analyzer';
+    final fb0 = buildFallbackTexts(
+      reconciled.recalls,
+      reconciled.incompleteCount,
+      reconciled.completeCount,
+      reconciled.vinCompletionVerified,
+    );
+    String geminiSummary = fb0.summary;
+    String recommendedAction = fb0.action;
 
     if (cleanKey.isNotEmpty) {
       final promptPayload = {
         'referenceWebsite': nhtsaUrl,
         'vin': vin,
         'decodedVehicleFromNhtsaVpic': vehicle.toJson(),
-        'nhtsaRecallCampaignsOnFile': annotated
+        'vinCompletionVerified': reconciled.vinCompletionVerified,
+        'incompleteRecallCount': reconciled.incompleteCount,
+        'completeRecallCount': reconciled.completeCount,
+        'recallCampaignsOnFile': reconciled.recalls
             .map(
               (r) => {
                 'campaignNumber': r.campaignNumber,
+                'oemRecallNumber': r.oemRecallNumber,
+                'completionStatus': r.completionStatus,
+                'remedyAvailable': r.remedyAvailable,
                 'reportDate': r.reportDate,
                 'component': r.component,
                 'parkItDoNotDrive': r.parkIt,
                 'parkOutsideWarning': r.parkOutSide,
-                'overTheAirUpdate': r.overTheAirUpdate,
                 'summary': r.summary,
-                'consequence': r.consequence,
                 'remedy': r.remedy,
                 'initialSpecCheck': r.applicability,
               },
@@ -662,9 +1287,9 @@ class NhtsaRecallService {
 
       const systemPrompt =
           'You are the Preston Automotive Group Gemini NHTSA Recall Inspector. '
-          'Check NHTSA recall data from www.nhtsa.gov/recalls and NHTSA\'s official vPIC + Recalls database for a specific 17-character VIN and determine whether the vehicle has any recalls. '
-          'Cross-reference each NHTSA recall campaign against the VIN\'s decoded factory specifications (Model Year, Make, Model, Trim/Series, Body Class, Engine displacement/cylinders/fuel, Drivetrain, Assembly Plant). '
-          'Classify each campaign\'s applicability as "Matches Decoded Vehicle", "Verify Build Date / Equipment", or "Other Engine / Equipment Variant" with a concise 1-sentence geminiNote, and provide verdictHeadline, geminiSummary referencing www.nhtsa.gov/recalls, and recommendedAction.';
+          'Inspect a specific 17-character VIN against www.nhtsa.gov/recalls, official NHTSA vPIC + Recalls records, and live per-VIN recall completion data, clearly differentiating INCOMPLETE (open/unrepaired) recalls from COMPLETE (closed/repaired) recalls. '
+          'Explicitly mention both the INCOMPLETE (open) recall count and the COMPLETE (closed) recall count in geminiSummary. '
+          'Classify each campaign\'s applicability as "Confirmed Open on This VIN", "Matches Decoded Vehicle", or "Other Engine / Equipment Variant" with a concise 1-sentence geminiNote, plus recommendedAction.';
 
       final endpoint = Uri.parse(
         'https://generativelanguage.googleapis.com/v1beta/models/${Uri.encodeComponent(cleanModel)}:generateContent?key=${Uri.encodeComponent(cleanKey)}',
@@ -673,7 +1298,6 @@ class NhtsaRecallService {
       Map<String, dynamic>? parsed;
       bool usedGrounded = false;
 
-      // Attempt 1: Grounded urlContext check on https://www.nhtsa.gov/recalls?vin=<VIN>
       try {
         final r1 = await http
             .post(
@@ -694,7 +1318,7 @@ class NhtsaRecallService {
                     'parts': [
                       {
                         'text':
-                            'Check $nhtsaUrl and analyze these official NHTSA recall records for VIN $vin. Return ONLY valid JSON with keys: hasRecalls (boolean), applicableCount (integer), verdictHeadline (string), geminiSummary (string), recommendedAction (string), campaignAssessments (array of {campaignNumber, applicability, geminiNote}).\n\nData:\n${jsonEncode(promptPayload)}',
+                            'Check $nhtsaUrl and analyze Complete vs. Incomplete recall status for VIN $vin. Return ONLY valid JSON with keys: geminiSummary (string), recommendedAction (string), campaignAssessments (array of {campaignNumber, applicability, geminiNote}).\n\nData:\n${jsonEncode(promptPayload)}',
                       }
                     ],
                   }
@@ -721,7 +1345,6 @@ class NhtsaRecallService {
         }
       } catch (_) {}
 
-      // Attempt 2: Guaranteed structured responseSchema JSON
       if (parsed == null) {
         try {
           final r2 = await http
@@ -748,9 +1371,6 @@ class NhtsaRecallService {
                     'responseSchema': {
                       'type': 'OBJECT',
                       'properties': {
-                        'hasRecalls': {'type': 'BOOLEAN'},
-                        'applicableCount': {'type': 'INTEGER'},
-                        'verdictHeadline': {'type': 'STRING'},
                         'geminiSummary': {'type': 'STRING'},
                         'recommendedAction': {'type': 'STRING'},
                         'campaignAssessments': {
@@ -771,9 +1391,6 @@ class NhtsaRecallService {
                         },
                       },
                       'required': [
-                        'hasRecalls',
-                        'applicableCount',
-                        'verdictHeadline',
                         'geminiSummary',
                         'recommendedAction',
                         'campaignAssessments',
@@ -806,71 +1423,86 @@ class NhtsaRecallService {
           }
         }
 
-        finalRecalls = annotated.map((r) {
+        final enrichedAnnotated = annotated.map((r) {
           final a = assessMap[r.campaignNumber];
           if (a == null) return r;
-          return NhtsaRecallCampaign(
-            campaignNumber: r.campaignNumber,
-            manufacturer: r.manufacturer,
-            component: r.component,
-            reportDate: r.reportDate,
-            reportIsoDate: r.reportIsoDate,
-            summary: r.summary,
-            consequence: r.consequence,
-            remedy: r.remedy,
-            notes: r.notes,
-            parkIt: r.parkIt,
-            parkOutSide: r.parkOutSide,
-            overTheAirUpdate: r.overTheAirUpdate,
-            nhtsaModelMatched: r.nhtsaModelMatched,
+          return r.copyWith(
             applicability:
                 (a['applicability']?.toString() ?? r.applicability).trim(),
             geminiNote: (a['geminiNote']?.toString() ?? r.geminiNote).trim(),
           );
         }).toList();
 
-        finalCount = finalRecalls.where((r) => !r.isOtherVariant).length;
-        finalHasRecalls = finalRecalls.isEmpty
-            ? false
-            : (parsed['hasRecalls'] == true || finalCount > 0);
+        reconciled = reconcileVinRecallCompletion(
+          decoded: vehicle,
+          recalls: enrichedAnnotated,
+          vinOpenCheck: vinOpenCheck,
+          manualOverrides: manualOverrides,
+        );
+
+        final finalWithNotes = reconciled.recalls.map((r) {
+          final a = assessMap[r.campaignNumber];
+          final gn = (a?['geminiNote']?.toString() ?? '').trim();
+          if (gn.isEmpty) return r;
+          return r.copyWith(geminiNote: gn);
+        }).toList();
+
+        reconciled = (
+          recalls: finalWithNotes,
+          incompleteCount: reconciled.incompleteCount,
+          completeCount: reconciled.completeCount,
+          vinCompletionVerified: reconciled.vinCompletionVerified,
+        );
+
         agentMode = usedGrounded
             ? 'gemini-url-context ($cleanModel)'
             : 'gemini ($cleanModel)';
-        final rawHeadline =
-            (parsed['verdictHeadline']?.toString() ?? '').trim();
-        verdictHeadline = rawHeadline.isNotEmpty
-            ? rawHeadline
-            : (finalHasRecalls
-                ? '$finalCount NHTSA Recall Campaign(s) Found for $vehicleTitle'
-                : 'No Matching NHTSA Recalls Found for $vehicleTitle');
+
+        final fb1 = buildFallbackTexts(
+          reconciled.recalls,
+          reconciled.incompleteCount,
+          reconciled.completeCount,
+          reconciled.vinCompletionVerified,
+        );
         final rawSummary = (parsed['geminiSummary']?.toString() ?? '').trim();
-        if (rawSummary.isNotEmpty) geminiSummary = rawSummary;
+        geminiSummary = rawSummary.isNotEmpty ? rawSummary : fb1.summary;
         final rawAction =
             (parsed['recommendedAction']?.toString() ?? '').trim();
-        if (rawAction.isNotEmpty) recommendedAction = rawAction;
+        recommendedAction = rawAction.isNotEmpty ? rawAction : fb1.action;
       }
     }
 
+    final openRecallsOnly =
+        reconciled.recalls.where((r) => r.isIncomplete).toList();
     final checkedAt = DateTime.now().toUtc().toIso8601String();
+
     return VinRecallCheckResult(
       id: 'recall-${DateTime.now().microsecondsSinceEpoch}',
       vin: vin,
       nhtsaUrl: nhtsaUrl,
       nhtsaSiteReachable: fetched.nhtsaSiteReachable,
+      vinCompletionVerified: reconciled.vinCompletionVerified,
       checkedAt: checkedAt,
       agentMode: agentMode,
       vehicleTitle: vehicleTitle,
       vehicle: vehicle,
       queriedModels: fetched.queriedModels,
-      hasRecalls: finalHasRecalls,
-      recallCount: finalCount,
-      totalModelRecalls: finalRecalls.length,
-      parkItUrgent: urgentParkIt,
-      parkOutsideWarning: urgentParkOutside,
-      verdictHeadline: verdictHeadline,
+      hasRecalls: reconciled.incompleteCount > 0,
+      recallCount: reconciled.incompleteCount,
+      incompleteCount: reconciled.incompleteCount,
+      completeCount: reconciled.completeCount,
+      totalModelRecalls: reconciled.recalls.length,
+      parkItUrgent: openRecallsOnly.any((r) => r.parkIt),
+      parkOutsideWarning: openRecallsOnly.any((r) => r.parkOutSide),
+      verdictHeadline: buildVerdictHeadline(
+        vehicleTitle: vehicleTitle,
+        incompleteCount: reconciled.incompleteCount,
+        completeCount: reconciled.completeCount,
+        vinCompletionVerified: reconciled.vinCompletionVerified,
+      ),
       geminiSummary: geminiSummary,
       recommendedAction: recommendedAction,
-      recalls: finalRecalls,
+      recalls: reconciled.recalls,
     );
   }
 }

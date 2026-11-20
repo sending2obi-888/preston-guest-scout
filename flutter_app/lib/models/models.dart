@@ -1217,6 +1217,7 @@ class DecodedVinVehicle {
 
 class NhtsaRecallCampaign {
   final String campaignNumber;
+  final String oemRecallNumber;
   final String manufacturer;
   final String component;
   final String reportDate;
@@ -1231,9 +1232,14 @@ class NhtsaRecallCampaign {
   final String nhtsaModelMatched;
   final String applicability;
   final String geminiNote;
+  final String completionStatus;
+  final String completionSource;
+  final bool remedyAvailable;
+  final String vinStatusNote;
 
   const NhtsaRecallCampaign({
     required this.campaignNumber,
+    this.oemRecallNumber = '',
     this.manufacturer = '',
     this.component = 'Vehicle Safety System',
     this.reportDate = '',
@@ -1248,15 +1254,91 @@ class NhtsaRecallCampaign {
     this.nhtsaModelMatched = '',
     this.applicability = 'Matches Decoded Vehicle',
     this.geminiNote = '',
+    this.completionStatus = 'incomplete',
+    this.completionSource = 'vin_live_lookup',
+    this.remedyAvailable = true,
+    this.vinStatusNote = '',
   });
 
   bool get isOtherVariant =>
+      completionStatus == 'not_applicable' ||
       RegExp(r'other\s+(?:engine|powertrain)', caseSensitive: false)
           .hasMatch(applicability);
 
+  bool get isComplete => completionStatus == 'complete';
+
+  bool get isIncomplete =>
+      !isComplete &&
+      !isOtherVariant &&
+      (completionStatus == 'incomplete' ||
+          completionStatus == 'incomplete_no_remedy' ||
+          completionStatus == 'unverified');
+
+  bool get isRemedyUnavailable =>
+      completionStatus == 'incomplete_no_remedy' || !remedyAvailable;
+
+  bool get isManualOverride => completionSource == 'dealer_override';
+
+  String get completionBadgeLabel {
+    if (isComplete) return 'COMPLETE • CLOSED ON VIN';
+    if (isOtherVariant) return 'OTHER POWERTRAIN VARIANT';
+    if (completionStatus == 'incomplete_no_remedy') {
+      return 'INCOMPLETE • REMEDY NOT AVAILABLE';
+    }
+    if (completionStatus == 'unverified') {
+      return 'INCOMPLETE • VERIFY ON VIN';
+    }
+    return 'INCOMPLETE • OPEN RECALL';
+  }
+
+  NhtsaRecallCampaign copyWith({
+    String? oemRecallNumber,
+    String? applicability,
+    String? geminiNote,
+    String? completionStatus,
+    String? completionSource,
+    bool? remedyAvailable,
+    String? vinStatusNote,
+  }) {
+    return NhtsaRecallCampaign(
+      campaignNumber: campaignNumber,
+      oemRecallNumber: oemRecallNumber ?? this.oemRecallNumber,
+      manufacturer: manufacturer,
+      component: component,
+      reportDate: reportDate,
+      reportIsoDate: reportIsoDate,
+      summary: summary,
+      consequence: consequence,
+      remedy: remedy,
+      notes: notes,
+      parkIt: parkIt,
+      parkOutSide: parkOutSide,
+      overTheAirUpdate: overTheAirUpdate,
+      nhtsaModelMatched: nhtsaModelMatched,
+      applicability: applicability ?? this.applicability,
+      geminiNote: geminiNote ?? this.geminiNote,
+      completionStatus: completionStatus ?? this.completionStatus,
+      completionSource: completionSource ?? this.completionSource,
+      remedyAvailable: remedyAvailable ?? this.remedyAvailable,
+      vinStatusNote: vinStatusNote ?? this.vinStatusNote,
+    );
+  }
+
   factory NhtsaRecallCampaign.fromJson(Map<String, dynamic> json) {
+    final applicabilityStr =
+        json['applicability']?.toString() ?? 'Matches Decoded Vehicle';
+    final isOther = RegExp(
+      r'other\s+(?:engine|powertrain)',
+      caseSensitive: false,
+    ).hasMatch(applicabilityStr);
+    final rawStatus = (json['completionStatus']?.toString() ?? '').trim();
+    final resolvedStatus = rawStatus.isNotEmpty
+        ? rawStatus
+        : (isOther ? 'not_applicable' : 'incomplete');
+
     return NhtsaRecallCampaign(
       campaignNumber: json['campaignNumber']?.toString() ?? '',
+      oemRecallNumber: json['oemRecallNumber']?.toString() ?? '',
       manufacturer: json['manufacturer']?.toString() ?? '',
       component: json['component']?.toString() ?? 'Vehicle Safety System',
       reportDate: json['reportDate']?.toString() ?? '',
@@ -1269,14 +1351,19 @@ class NhtsaRecallCampaign {
       parkOutSide: json['parkOutSide'] == true,
       overTheAirUpdate: json['overTheAirUpdate'] == true,
       nhtsaModelMatched: json['nhtsaModelMatched']?.toString() ?? '',
-      applicability:
-          json['applicability']?.toString() ?? 'Matches Decoded Vehicle',
+      applicability: applicabilityStr,
       geminiNote: json['geminiNote']?.toString() ?? '',
+      completionStatus: resolvedStatus,
+      completionSource:
+          json['completionSource']?.toString() ?? 'vin_live_lookup',
+      remedyAvailable: json['remedyAvailable'] != false,
+      vinStatusNote: json['vinStatusNote']?.toString() ?? '',
     );
   }
 
   Map<String, dynamic> toJson() => {
         'campaignNumber': campaignNumber,
+        'oemRecallNumber': oemRecallNumber,
         'manufacturer': manufacturer,
         'component': component,
         'reportDate': reportDate,
@@ -1291,6 +1378,10 @@ class NhtsaRecallCampaign {
         'nhtsaModelMatched': nhtsaModelMatched,
         'applicability': applicability,
         'geminiNote': geminiNote,
+        'completionStatus': completionStatus,
+        'completionSource': completionSource,
+        'remedyAvailable': remedyAvailable,
+        'vinStatusNote': vinStatusNote,
       };
 }
 
@@ -1299,6 +1390,7 @@ class VinRecallCheckResult {
   final String vin;
   final String nhtsaUrl;
   final bool nhtsaSiteReachable;
+  final bool vinCompletionVerified;
   final String checkedAt;
   final String agentMode;
   final String vehicleTitle;
@@ -1306,6 +1398,8 @@ class VinRecallCheckResult {
   final List<String> queriedModels;
   final bool hasRecalls;
   final int recallCount;
+  final int incompleteCount;
+  final int completeCount;
   final int totalModelRecalls;
   final bool parkItUrgent;
   final bool parkOutsideWarning;
@@ -1314,11 +1408,12 @@ class VinRecallCheckResult {
   final String recommendedAction;
   final List<NhtsaRecallCampaign> recalls;
 
-  const VinRecallCheckResult({
+  VinRecallCheckResult({
     required this.id,
     required this.vin,
     required this.nhtsaUrl,
     this.nhtsaSiteReachable = true,
+    this.vinCompletionVerified = true,
     required this.checkedAt,
     this.agentMode = 'gemini',
     required this.vehicleTitle,
@@ -1326,6 +1421,8 @@ class VinRecallCheckResult {
     this.queriedModels = const [],
     required this.hasRecalls,
     required this.recallCount,
+    int? incompleteCount,
+    int? completeCount,
     this.totalModelRecalls = 0,
     this.parkItUrgent = false,
     this.parkOutsideWarning = false,
@@ -1333,7 +1430,12 @@ class VinRecallCheckResult {
     required this.geminiSummary,
     required this.recommendedAction,
     this.recalls = const [],
-  });
+  })  : incompleteCount = incompleteCount ??
+            (recalls.isNotEmpty
+                ? recalls.where((r) => r.isIncomplete).length
+                : (hasRecalls ? recallCount : 0)),
+        completeCount = completeCount ??
+            recalls.where((r) => r.isComplete).length;
 
   factory VinRecallCheckResult.fromJson(Map<String, dynamic> json) {
     final recallsRaw = (json['recalls'] as List<dynamic>? ?? [])
@@ -1341,12 +1443,24 @@ class VinRecallCheckResult {
         .map((e) => NhtsaRecallCampaign.fromJson(Map<String, dynamic>.from(e)))
         .toList();
     final vinStr = json['vin']?.toString() ?? '';
+    final computedInc = recallsRaw.where((r) => r.isIncomplete).length;
+    final computedComp = recallsRaw.where((r) => r.isComplete).length;
+    final incCount = (json['incompleteCount'] as num?)?.toInt() ??
+        (recallsRaw.isNotEmpty
+            ? computedInc
+            : ((json['hasRecalls'] == true)
+                ? ((json['recallCount'] as num?)?.toInt() ?? 0)
+                : 0));
+    final compCount = (json['completeCount'] as num?)?.toInt() ?? computedComp;
+    final openRecalls = recallsRaw.where((r) => r.isIncomplete).toList();
+
     return VinRecallCheckResult(
       id: json['id']?.toString() ?? '',
       vin: vinStr,
       nhtsaUrl: json['nhtsaUrl']?.toString() ??
           'https://www.nhtsa.gov/recalls?vin=${Uri.encodeComponent(vinStr)}',
       nhtsaSiteReachable: json['nhtsaSiteReachable'] != false,
+      vinCompletionVerified: json['vinCompletionVerified'] != false,
       checkedAt: json['checkedAt']?.toString() ?? '',
       agentMode: json['agentMode']?.toString() ?? 'gemini',
       vehicleTitle: json['vehicleTitle']?.toString() ?? vinStr,
@@ -1357,14 +1471,18 @@ class VinRecallCheckResult {
           .map((e) => e.toString())
           .where((s) => s.isNotEmpty)
           .toList(),
-      hasRecalls: json['hasRecalls'] == true,
-      recallCount: (json['recallCount'] as num?)?.toInt() ?? recallsRaw.length,
+      hasRecalls: json['hasRecalls'] != null
+          ? json['hasRecalls'] == true
+          : incCount > 0,
+      recallCount: (json['recallCount'] as num?)?.toInt() ?? incCount,
+      incompleteCount: incCount,
+      completeCount: compCount,
       totalModelRecalls:
           (json['totalModelRecalls'] as num?)?.toInt() ?? recallsRaw.length,
-      parkItUrgent:
-          json['parkItUrgent'] == true || recallsRaw.any((r) => r.parkIt),
+      parkItUrgent: json['parkItUrgent'] == true ||
+          openRecalls.any((r) => r.parkIt),
       parkOutsideWarning: json['parkOutsideWarning'] == true ||
-          recallsRaw.any((r) => r.parkOutSide),
+          openRecalls.any((r) => r.parkOutSide),
       verdictHeadline: json['verdictHeadline']?.toString() ?? '',
       geminiSummary: json['geminiSummary']?.toString() ?? '',
       recommendedAction: json['recommendedAction']?.toString() ?? '',
@@ -1377,6 +1495,7 @@ class VinRecallCheckResult {
         'vin': vin,
         'nhtsaUrl': nhtsaUrl,
         'nhtsaSiteReachable': nhtsaSiteReachable,
+        'vinCompletionVerified': vinCompletionVerified,
         'checkedAt': checkedAt,
         'agentMode': agentMode,
         'vehicleTitle': vehicleTitle,
@@ -1384,6 +1503,8 @@ class VinRecallCheckResult {
         'queriedModels': queriedModels,
         'hasRecalls': hasRecalls,
         'recallCount': recallCount,
+        'incompleteCount': incompleteCount,
+        'completeCount': completeCount,
         'totalModelRecalls': totalModelRecalls,
         'parkItUrgent': parkItUrgent,
         'parkOutsideWarning': parkOutsideWarning,
@@ -1399,6 +1520,8 @@ class RecentVinRecallEntry {
   final String vehicleTitle;
   final bool hasRecalls;
   final int recallCount;
+  final int incompleteCount;
+  final int completeCount;
   final String verdictHeadline;
   final String checkedAt;
 
@@ -1407,17 +1530,24 @@ class RecentVinRecallEntry {
     required this.vehicleTitle,
     required this.hasRecalls,
     required this.recallCount,
+    int? incompleteCount,
+    this.completeCount = 0,
     this.verdictHeadline = '',
     required this.checkedAt,
-  });
+  }) : incompleteCount = incompleteCount ?? (hasRecalls ? recallCount : 0);
 
   factory RecentVinRecallEntry.fromJson(Map<String, dynamic> json) {
     final vinStr = json['vin']?.toString() ?? '';
+    final hasRec = json['hasRecalls'] == true;
+    final recCount = (json['recallCount'] as num?)?.toInt() ?? 0;
     return RecentVinRecallEntry(
       vin: vinStr,
       vehicleTitle: json['vehicleTitle']?.toString() ?? vinStr,
-      hasRecalls: json['hasRecalls'] == true,
-      recallCount: (json['recallCount'] as num?)?.toInt() ?? 0,
+      hasRecalls: hasRec,
+      recallCount: recCount,
+      incompleteCount:
+          (json['incompleteCount'] as num?)?.toInt() ?? (hasRec ? recCount : 0),
+      completeCount: (json['completeCount'] as num?)?.toInt() ?? 0,
       verdictHeadline: json['verdictHeadline']?.toString() ?? '',
       checkedAt: json['checkedAt']?.toString() ?? '',
     );
@@ -1428,6 +1558,8 @@ class RecentVinRecallEntry {
         'vehicleTitle': vehicleTitle,
         'hasRecalls': hasRecalls,
         'recallCount': recallCount,
+        'incompleteCount': incompleteCount,
+        'completeCount': completeCount,
         'verdictHeadline': verdictHeadline,
         'checkedAt': checkedAt,
       };

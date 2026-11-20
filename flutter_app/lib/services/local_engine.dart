@@ -35,6 +35,8 @@ class LocalScoutEngine {
   static List<Map<String, dynamic>> _calendarEvents = [];
   static List<Map<String, dynamic>> _backups = [];
   static List<Map<String, dynamic>> _recallChecks = [];
+  static Map<String, String> _recallStatusOverrides = {};
+  static Map<String, Map<String, dynamic>> _recallResultsByVin = {};
   static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
@@ -98,6 +100,22 @@ class LocalScoutEngine {
             .map((e) => Map<String, dynamic>.from(e))
             .take(15)
             .toList();
+        if (decoded['recallStatusOverrides'] is Map) {
+          _recallStatusOverrides =
+              (decoded['recallStatusOverrides'] as Map).map(
+            (k, v) => MapEntry(k.toString(), v.toString()),
+          );
+        }
+        if (decoded['recallResultsByVin'] is Map) {
+          final rawMap = decoded['recallResultsByVin'] as Map;
+          _recallResultsByVin = <String, Map<String, dynamic>>{};
+          for (final entry in rawMap.entries) {
+            if (entry.value is Map) {
+              _recallResultsByVin[entry.key.toString()] =
+                  Map<String, dynamic>.from(entry.value as Map);
+            }
+          }
+        }
         if (decoded['deletedGuestIds'] is Map) {
           _deletedGuestIds = (decoded['deletedGuestIds'] as Map).map(
             (k, v) => MapEntry(k.toString(), v.toString()),
@@ -169,6 +187,22 @@ class LocalScoutEngine {
             .map((e) => Map<String, dynamic>.from(e))
             .take(15)
             .toList();
+      }
+      if (decoded['recallStatusOverrides'] is Map) {
+        _recallStatusOverrides =
+            (decoded['recallStatusOverrides'] as Map).map(
+          (k, v) => MapEntry(k.toString(), v.toString()),
+        );
+      }
+      if (decoded['recallResultsByVin'] is Map) {
+        final rawMap = decoded['recallResultsByVin'] as Map;
+        _recallResultsByVin = <String, Map<String, dynamic>>{};
+        for (final entry in rawMap.entries) {
+          if (entry.value is Map) {
+            _recallResultsByVin[entry.key.toString()] =
+                Map<String, dynamic>.from(entry.value as Map);
+          }
+        }
       }
       MatchNotificationService.instance.hydratePersistedNotifications(
         _notifications.map(MatchAlertNotification.fromJson).toList(),
@@ -337,6 +371,8 @@ class LocalScoutEngine {
         'calendarEvents': _calendarEvents,
         'backups': _backups,
         'recallChecks': _recallChecks,
+        'recallStatusOverrides': _recallStatusOverrides,
+        'recallResultsByVin': _recallResultsByVin,
         'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
@@ -3490,24 +3526,29 @@ class LocalScoutEngine {
         .toList();
   }
 
-  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
-      checkVinRecalls(String rawVin) async {
-    await ensureInitialized();
-    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
-    final model = (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash')
-        .trim();
+  static Map<String, String> _getRecallOverridesForVin(String vin) {
+    final cleanVin = vin.trim().toUpperCase();
+    final prefix = '$cleanVin::';
+    final out = <String, String>{};
+    for (final entry in _recallStatusOverrides.entries) {
+      if (entry.key.startsWith(prefix)) {
+        out[entry.key.substring(prefix.length)] = entry.value;
+      }
+    }
+    return out;
+  }
 
-    final result = await NhtsaRecallService.checkVinRecalls(
-      rawVin: rawVin,
-      geminiApiKey: apiKey,
-      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
-    );
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      _saveAndReturnRecallResult(VinRecallCheckResult result) async {
+    _recallResultsByVin[result.vin] = result.toJson();
 
     final entry = RecentVinRecallEntry(
       vin: result.vin,
       vehicleTitle: result.vehicleTitle,
       hasRecalls: result.hasRecalls,
       recallCount: result.recallCount,
+      incompleteCount: result.incompleteCount,
+      completeCount: result.completeCount,
       verdictHeadline: result.verdictHeadline,
       checkedAt: result.checkedAt,
     ).toJson();
@@ -3517,7 +3558,12 @@ class LocalScoutEngine {
     );
     _recallChecks.insert(0, entry);
     if (_recallChecks.length > 15) {
+      final keepVins = _recallChecks
+          .take(15)
+          .map((r) => (r['vin']?.toString() ?? '').toUpperCase())
+          .toSet();
       _recallChecks = _recallChecks.take(15).toList();
+      _recallResultsByVin.removeWhere((k, _) => !keepVins.contains(k));
     }
     await _persist();
 
@@ -3525,6 +3571,62 @@ class LocalScoutEngine {
         .map((r) => RecentVinRecallEntry.fromJson(r))
         .toList();
     return (result: result, recent: recent);
+  }
+
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      checkVinRecalls(String rawVin) async {
+    await ensureInitialized();
+    final validation = NhtsaRecallService.validateAndNormalizeVin(rawVin);
+    if (!validation.valid) {
+      throw Exception(validation.error);
+    }
+    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+    final model = (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash')
+        .trim();
+    final manualOverrides = _getRecallOverridesForVin(validation.vin);
+
+    final result = await NhtsaRecallService.checkVinRecalls(
+      rawVin: validation.vin,
+      geminiApiKey: apiKey,
+      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
+      manualOverrides: manualOverrides,
+    );
+
+    return _saveAndReturnRecallResult(result);
+  }
+
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      updateVinRecallStatus({
+    required String vin,
+    required String campaignNumber,
+    required String status,
+  }) async {
+    await ensureInitialized();
+    final validation = NhtsaRecallService.validateAndNormalizeVin(vin);
+    if (!validation.valid) {
+      throw Exception(validation.error);
+    }
+    final cleanCampaign = campaignNumber.trim();
+    final cleanStatus = status.trim().toLowerCase();
+    final key = '${validation.vin}::$cleanCampaign';
+
+    if (cleanStatus == 'auto' || cleanStatus == 'reset') {
+      _recallStatusOverrides.remove(key);
+      return checkVinRecalls(validation.vin);
+    }
+
+    _recallStatusOverrides[key] = cleanStatus;
+    final cachedJson = _recallResultsByVin[validation.vin];
+    if (cachedJson == null) {
+      return checkVinRecalls(validation.vin);
+    }
+
+    final current = VinRecallCheckResult.fromJson(cachedJson);
+    final updated = NhtsaRecallService.applyManualOverridesToResult(
+      current,
+      {cleanCampaign: cleanStatus},
+    );
+    return _saveAndReturnRecallResult(updated);
   }
 
   @visibleForTesting
@@ -3544,6 +3646,8 @@ class LocalScoutEngine {
     _calendarEvents = [];
     _backups = [];
     _recallChecks = [];
+    _recallStatusOverrides = {};
+    _recallResultsByVin = {};
     _deletedGuestIds = {};
     _settings['calendarPermissionGranted'] = false;
     _settings['calendarPromptDismissed'] = false;
