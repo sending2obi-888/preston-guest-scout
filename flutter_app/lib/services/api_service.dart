@@ -269,6 +269,7 @@ class ApiService {
     String make = '',
     String model = '',
     String trim = '',
+    String bedLength = '',
     double? maxPrice,
     int? maxMileage,
     String drivetrain = 'Any',
@@ -285,6 +286,7 @@ class ApiService {
         make: make,
         model: model,
         trim: trim,
+        bedLength: bedLength,
         maxPrice: maxPrice,
         maxMileage: maxMileage,
         drivetrain: drivetrain,
@@ -304,6 +306,7 @@ class ApiService {
         'make': make,
         'model': model,
         'trim': trim,
+        'bedLength': bedLength,
         'maxPrice': maxPrice,
         'maxMileage': maxMileage,
         'drivetrain': drivetrain,
@@ -331,6 +334,87 @@ class ApiService {
           .toList(),
       summary: result?['summary']?.toString() ??
           'Added vehicle criteria and searched prestonmotor.com.',
+    );
+  }
+
+  static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
+      updateVehicleOnGuest({
+    required String guestId,
+    required String targetId,
+    String condition = 'Any',
+    int? minYear,
+    int? maxYear,
+    String make = '',
+    String model = '',
+    String trim = '',
+    String bedLength = '',
+    double? maxPrice,
+    int? maxMileage,
+    String drivetrain = 'Any',
+    String exteriorColor = '',
+    List<String> features = const [],
+    String notes = '',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.updateVehicleTargetOnGuest(
+        guestId: guestId,
+        targetId: targetId,
+        condition: condition,
+        minYear: minYear,
+        maxYear: maxYear,
+        make: make,
+        model: model,
+        trim: trim,
+        bedLength: bedLength,
+        maxPrice: maxPrice,
+        maxMileage: maxMileage,
+        drivetrain: drivetrain,
+        exteriorColor: exteriorColor,
+        features: features,
+        notes: notes,
+      );
+    }
+
+    final res = await http.put(
+      Uri.parse(
+        '$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/vehicles/${Uri.encodeComponent(targetId)}',
+      ),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'bedLength': bedLength,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'runImmediateSearch': true,
+      }),
+    );
+
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to update search criteria');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final result = data['result'] as Map<String, dynamic>?;
+    await fetchLauncherWidgetGuests();
+    await fetchCalendarStatus();
+
+    return (
+      guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
+      matches: (data['matches'] as List<dynamic>? ?? [])
+          .map((e) => VehicleMatch.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      summary: result?['summary']?.toString() ??
+          'Updated search criteria and re-searched prestonmotor.com.',
     );
   }
 

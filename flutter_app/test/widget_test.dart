@@ -2289,6 +2289,154 @@ void main() {
 
     LocalScoutEngine.resetForTest();
   });
+
+  testWidgets(
+      'Search criteria can be edited inside the Vehicle Matches page after initial search, clearing stale matches and re-evaluating',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final mockInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FTFW3L87RKF10001',
+        'stockNumber': 'K1001',
+        'title': '2025 Ford F-150 XLT',
+        'year': 2025,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'bedLength': '5.5',
+        'condition': 'New',
+        'price': 49900.0,
+        'location': 'Preston Ford of Hurlock',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Oxford White',
+      },
+      {
+        'vin': '1FTFW5L89RKF20002',
+        'stockNumber': 'K2002',
+        'title': '2025 Ford F-150 Lariat',
+        'year': 2025,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'Lariat',
+        'bedLength': '6.5',
+        'condition': 'New',
+        'price': 59500.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Antimatter Blue Metallic',
+      },
+    ];
+
+    // 1. Run initial search for Ford F-150 XLT under $55,000 -> matches ONLY K1001 (XLT)
+    final initial = await LocalScoutEngine.createGuest(
+      name: 'Morgan Hayes',
+      make: 'Ford',
+      model: 'F-150',
+      trim: 'XLT',
+      maxPrice: 55000,
+      exteriorColor: 'White',
+      mockCandidatesOverride: mockInventory,
+    );
+    expect(initial.matchesFound, 1);
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1000);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    // 2. Open GuestMatchesScreen after initial search and verify Edit Search buttons & pre-populated dialog
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: initial.guest.id,
+          onDataChanged: () {},
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('appbar_edit_search_button')), findsOneWidget);
+    final targetId = initial.guest.effectiveTargets.first.id;
+    final cardEditBtn = find.byKey(ValueKey('edit_vehicle_target_$targetId'));
+    expect(cardEditBtn, findsOneWidget);
+    expect(find.text('2025 Ford F-150 XLT'), findsOneWidget);
+
+    // Tap Edit Search inside the Vehicle Matches page
+    await tester.tap(cardEditBtn);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Edit Search Criteria for Morgan Hayes'),
+      findsOneWidget,
+    );
+    expect(find.text('Save Changes & Re-Search'), findsOneWidget);
+
+    // Verify existing criteria are pre-populated in the Edit Search dialog
+    final trimField = tester.widget<TextField>(
+      find.byKey(const ValueKey('dialog_trim_input')),
+    );
+    expect(trimField.controller?.text, 'XLT');
+    expect(find.text('1 selected (matches any)'), findsOneWidget);
+
+    // Close dialog cleanly, then verify engine updateVehicleTargetOnGuest replaces XLT with Lariat 6.5ft Blue
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    final updated = await LocalScoutEngine.updateVehicleTargetOnGuest(
+      guestId: initial.guest.id,
+      targetId: targetId,
+      condition: 'New',
+      make: 'Ford',
+      model: 'F-150',
+      trim: 'Lariat',
+      bedLength: '6.5',
+      maxPrice: 62000,
+      drivetrain: '4WD',
+      exteriorColor: 'Blue, Gray',
+      mockCandidatesOverride: mockInventory,
+    );
+
+    // Stale XLT match (1FTFW3L87RKF10001) is removed; only Lariat 6.5ft Blue (1FTFW5L89RKF20002) remains!
+    expect(updated.guest.trim, 'Lariat');
+    expect(updated.guest.bedLength, '6.5');
+    expect(updated.guest.exteriorColor, 'Blue, Gray');
+    expect(updated.matches.length, 1);
+    expect(updated.matches.first.vin, '1FTFW5L89RKF20002');
+    expect(updated.matches.first.title, '2025 Ford F-150 Lariat');
+
+    // Drain 700ms GoogleDriveSyncService.scheduleAutoSave debounce timer
+    await tester.pump(const Duration(seconds: 1));
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
 }
 
 

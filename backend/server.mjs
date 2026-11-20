@@ -674,6 +674,8 @@ const server = http.createServer(async (req, res) => {
           newTarget.make ||
             newTarget.model ||
             newTarget.trim ||
+            newTarget.bedLength ||
+            newTarget.exteriorColor ||
             newTarget.maxPrice ||
             newTarget.minYear ||
             newTarget.maxYear ||
@@ -684,7 +686,7 @@ const server = http.createServer(async (req, res) => {
         );
         if (!hasAnyCriteria) {
           return sendJson(res, 400, {
-            error: 'Please enter at least a make, model, budget, or requirement for the vehicle.',
+            error: 'Please enter at least a make, model, budget, color, or requirement for the vehicle.',
           });
         }
 
@@ -738,6 +740,134 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 201, {
           ok: true,
           addedTarget: newTarget,
+          result,
+          guest: mapGuestRow(row),
+          matches: matchRows.map(mapMatchRow),
+        });
+      }
+
+      // Edit an existing vehicle search target on a guest after initial search & immediately re-search prestonmotor.com
+      if (
+        subResource === 'vehicles' &&
+        subId &&
+        (req.method === 'PUT' || req.method === 'PATCH')
+      ) {
+        const existingRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existingRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const currentGuest = mapGuestRow(existingRow);
+        const currentTargets = [...(currentGuest.vehicleTargets || [])];
+        let targetIdx = currentTargets.findIndex((t) => t.id === subId);
+        if (targetIdx === -1 && currentTargets.length === 1) {
+          targetIdx = 0;
+        }
+        if (targetIdx === -1) {
+          return sendJson(res, 404, { error: 'Vehicle target not found on guest.' });
+        }
+
+        const existingTarget = currentTargets[targetIdx];
+        const body = await readJsonBody(req);
+        const nowIso = new Date().toISOString();
+
+        const updatedTarget = buildNormalizedVehicleTarget(
+          {
+            ...body,
+            id: existingTarget.id,
+            createdAt: existingTarget.createdAt || currentGuest.createdAt,
+          },
+          existingTarget.id,
+          existingTarget.createdAt || nowIso
+        );
+
+        const hasAnyCriteria = Boolean(
+          updatedTarget.make ||
+            updatedTarget.model ||
+            updatedTarget.trim ||
+            updatedTarget.bedLength ||
+            updatedTarget.exteriorColor ||
+            updatedTarget.maxPrice ||
+            updatedTarget.minYear ||
+            updatedTarget.maxYear ||
+            updatedTarget.notes ||
+            (updatedTarget.features && updatedTarget.features.length > 0) ||
+            updatedTarget.condition !== 'Any' ||
+            updatedTarget.drivetrain !== 'Any'
+        );
+        if (!hasAnyCriteria) {
+          return sendJson(res, 400, {
+            error: 'Please enter at least a make, model, budget, color, or requirement for the vehicle.',
+          });
+        }
+
+        currentTargets[targetIdx] = updatedTarget;
+        const primary = currentTargets[0];
+
+        // Clear stale matches belonging to this edited target (including legacy blank target_id when editing primary target)
+        if (targetIdx === 0) {
+          db.prepare(
+            `DELETE FROM matches
+             WHERE guest_id = ? AND (target_id = ? OR target_id IS NULL OR target_id = '')`
+          ).run(guestId, existingTarget.id);
+        } else {
+          db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
+            guestId,
+            existingTarget.id
+          );
+        }
+
+        db.prepare(
+          `UPDATE guests SET
+             condition = ?, min_year = ?, max_year = ?, make = ?, model = ?, trim = ?,
+             max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
+             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?
+           WHERE id = ?`
+        ).run(
+          primary.condition || 'Any',
+          primary.minYear,
+          primary.maxYear,
+          primary.make || '',
+          primary.model || '',
+          primary.trim || '',
+          primary.maxPrice,
+          primary.maxMileage,
+          primary.drivetrain || 'Any',
+          primary.exteriorColor || '',
+          JSON.stringify(primary.features || []),
+          primary.notes || '',
+          JSON.stringify(currentTargets),
+          nowIso,
+          guestId
+        );
+
+        let result = null;
+        if (body.runImmediateSearch !== false) {
+          result = await runSearchForGuest(
+            guestId,
+            `Edited Search (${formatVehicleTargetLabel(updatedTarget)})`,
+            {
+              onlyTargetId: existingTarget.id,
+              isInitialSearch: true,
+              isSeedSearch: false,
+              calendarAccessToken: bearerToken,
+            }
+          );
+        }
+
+        recordServerBackup({
+          label: `Auto-Backup • Edited Search (${currentGuest.name})`,
+        });
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        const matchRows = db
+          .prepare(
+            'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
+          )
+          .all(guestId);
+
+        return sendJson(res, 200, {
+          ok: true,
+          updatedTarget,
           result,
           guest: mapGuestRow(row),
           matches: matchRows.map(mapMatchRow),

@@ -836,6 +836,7 @@ class LocalScoutEngine {
     String make = '',
     String model = '',
     String trim = '',
+    String bedLength = '',
     double? maxPrice,
     int? maxMileage,
     String drivetrain = 'Any',
@@ -862,6 +863,7 @@ class LocalScoutEngine {
         'make': make,
         'model': model,
         'trim': trim,
+        'bedLength': bedLength,
         'maxPrice': maxPrice,
         'maxMileage': maxMileage,
         'drivetrain': drivetrain,
@@ -878,6 +880,8 @@ class LocalScoutEngine {
     final hasAnyCriteria = newTargetModel.make.isNotEmpty ||
         newTargetModel.model.isNotEmpty ||
         newTargetModel.trim.isNotEmpty ||
+        newTargetModel.bedLength.isNotEmpty ||
+        newTargetModel.exteriorColor.isNotEmpty ||
         newTargetModel.maxPrice != null ||
         newTargetModel.minYear != null ||
         newTargetModel.maxYear != null ||
@@ -887,7 +891,7 @@ class LocalScoutEngine {
         newTargetModel.drivetrain != 'Any';
     if (!hasAnyCriteria) {
       throw Exception(
-        'Please enter at least a make, model, budget, or requirement for the vehicle.',
+        'Please enter at least a make, model, budget, color, or requirement for the vehicle.',
       );
     }
 
@@ -929,6 +933,134 @@ class LocalScoutEngine {
     );
     _recordBackupSnapshotSync(
       label: 'Auto-Backup • Added Vehicle (${currentHydrated.name})',
+    );
+    await _persist();
+    return res;
+  }
+
+  static Future<
+      ({
+        GuestProfile guest,
+        List<VehicleMatch> matches,
+        String summary,
+      })> updateVehicleTargetOnGuest({
+    required String guestId,
+    required String targetId,
+    String condition = 'Any',
+    int? minYear,
+    int? maxYear,
+    String make = '',
+    String model = '',
+    String trim = '',
+    String bedLength = '',
+    double? maxPrice,
+    int? maxMileage,
+    String drivetrain = 'Any',
+    String exteriorColor = '',
+    List<String> features = const [],
+    String notes = '',
+    @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
+  }) async {
+    await ensureInitialized();
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final currentHydrated = _hydrateGuest(_guests[idx]);
+    final existingTargets = List<Map<String, dynamic>>.from(
+      (_guests[idx]['vehicleTargets'] as List<dynamic>? ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map)),
+    );
+
+    var targetIdx = existingTargets.indexWhere(
+      (t) => t['id']?.toString() == targetId,
+    );
+    if (targetIdx == -1 && existingTargets.length == 1) {
+      targetIdx = 0;
+    }
+    if (targetIdx == -1) {
+      throw Exception('Vehicle target not found on guest.');
+    }
+
+    final oldTarget = existingTargets[targetIdx];
+    final resolvedId = (oldTarget['id']?.toString() ?? '').isNotEmpty
+        ? oldTarget['id'].toString()
+        : targetId;
+    final preservedCreatedAt =
+        (oldTarget['createdAt']?.toString() ?? '').isNotEmpty
+            ? oldTarget['createdAt'].toString()
+            : currentHydrated.createdAt;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    final updatedTargetMap = _normalizeTargetMap(
+      <String, dynamic>{
+        'id': resolvedId,
+        'condition': condition,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'bedLength': bedLength,
+        'maxPrice': maxPrice,
+        'maxMileage': maxMileage,
+        'drivetrain': drivetrain,
+        'exteriorColor': exteriorColor,
+        'features': features,
+        'notes': notes,
+        'createdAt': preservedCreatedAt,
+      },
+      fallbackId: resolvedId,
+      fallbackCreatedAt: preservedCreatedAt,
+    );
+
+    final updatedTargetModel = VehicleSearchTarget.fromJson(updatedTargetMap);
+    final hasAnyCriteria = updatedTargetModel.make.isNotEmpty ||
+        updatedTargetModel.model.isNotEmpty ||
+        updatedTargetModel.trim.isNotEmpty ||
+        updatedTargetModel.bedLength.isNotEmpty ||
+        updatedTargetModel.exteriorColor.isNotEmpty ||
+        updatedTargetModel.maxPrice != null ||
+        updatedTargetModel.minYear != null ||
+        updatedTargetModel.maxYear != null ||
+        updatedTargetModel.notes.isNotEmpty ||
+        updatedTargetModel.features.isNotEmpty ||
+        updatedTargetModel.condition != 'Any' ||
+        updatedTargetModel.drivetrain != 'Any';
+    if (!hasAnyCriteria) {
+      throw Exception(
+        'Please enter at least a make, model, budget, color, or requirement for the vehicle.',
+      );
+    }
+
+    existingTargets[targetIdx] = updatedTargetMap;
+
+    // Remove stale matches belonging to the edited target (and legacy blank targetId if editing primary target)
+    _matches.removeWhere((m) {
+      if (m['guestId']?.toString() != guestId) return false;
+      final mTid = (m['targetId']?.toString() ?? '').trim();
+      if (mTid == resolvedId || mTid == targetId) return true;
+      if (targetIdx == 0 && mTid.isEmpty) return true;
+      return false;
+    });
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'vehicleTargets': existingTargets,
+      'updatedAt': nowIso,
+    });
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+
+    final res = await runSearchForSingleGuest(
+      guestId,
+      slotLabel: 'Edited Search (${updatedTargetModel.label})',
+      onlyTargetId: resolvedId,
+      isInitialSearch: true,
+      mockCandidatesOverride: mockCandidatesOverride,
+    );
+    _recordBackupSnapshotSync(
+      label: 'Auto-Backup • Edited Search (${currentHydrated.name})',
     );
     await _persist();
     return res;

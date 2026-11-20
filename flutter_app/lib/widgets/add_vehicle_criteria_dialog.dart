@@ -7,10 +7,12 @@ import 'exterior_color_selector.dart';
 
 class AddVehicleCriteriaDialog extends StatefulWidget {
   final GuestProfile guest;
+  final VehicleSearchTarget? existingTarget;
 
   const AddVehicleCriteriaDialog({
     super.key,
     required this.guest,
+    this.existingTarget,
   });
 
   @override
@@ -32,10 +34,18 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
 
   String _condition = 'Any';
   String _drivetrain = 'Any';
+  String _bedLength = '';
   List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
   bool _submitting = false;
   String? _errorText;
+
+  String _lastNoteSyncedMake = '';
+  String _lastNoteSyncedModel = '';
+  String _lastNoteSyncedTrim = '';
+  String _lastNoteSyncedBed = '';
+
+  bool get _isEditing => widget.existingTarget != null;
 
   static const List<String> _prestonMakes = [
     'Ford',
@@ -46,6 +56,14 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     'Chevrolet',
     'Jeep',
     'Ram',
+  ];
+
+  static const List<(String, String)> _bedLengthOptions = [
+    ('', 'Any Bed'),
+    ('5.5', '5.5 ft Bed'),
+    ('6.5', '6.5 ft Bed'),
+    ('6.75', '6.75 ft Bed'),
+    ('8', '8 ft Bed'),
   ];
 
   static const List<String> _commonFeatures = [
@@ -65,6 +83,43 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    final t = widget.existingTarget;
+    if (t != null) {
+      const validConditions = {'Any', 'New', 'Pre-Owned', 'CPO'};
+      const validDrivetrains = {'Any', '4WD', 'AWD', 'FWD', 'RWD'};
+      _condition = validConditions.contains(t.condition) ? t.condition : 'Any';
+      _drivetrain =
+          validDrivetrains.contains(t.drivetrain) ? t.drivetrain : 'Any';
+      _bedLength = t.bedLength;
+      _makeCtrl.text = t.make;
+      _modelCtrl.text = t.model;
+      _trimCtrl.text = t.trim;
+      if (t.minYear != null) _minYearCtrl.text = '${t.minYear}';
+      if (t.maxYear != null) _maxYearCtrl.text = '${t.maxYear}';
+      if (t.maxPrice != null) {
+        _maxPriceCtrl.text = t.maxPrice!.toStringAsFixed(0);
+      }
+      if (t.maxMileage != null) _maxMileageCtrl.text = '${t.maxMileage}';
+      _selectedColors =
+          NaturalLanguageVehicleParser.parseExteriorColors(t.exteriorColor);
+      _selectedFeatures.addAll(t.features);
+      _notesCtrl.text = t.notes;
+
+      if (t.notes.trim().isNotEmpty) {
+        final noteParsed = NaturalLanguageVehicleParser.parseCriteriaMap({
+          'notes': t.notes,
+        });
+        _lastNoteSyncedMake = noteParsed['make']?.toString() ?? '';
+        _lastNoteSyncedModel = noteParsed['model']?.toString() ?? '';
+        _lastNoteSyncedTrim = noteParsed['trim']?.toString() ?? '';
+        _lastNoteSyncedBed = noteParsed['bedLength']?.toString() ?? '';
+      }
+    }
+  }
+
+  @override
   void dispose() {
     _minYearCtrl.dispose();
     _maxYearCtrl.dispose();
@@ -77,6 +132,38 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     _customFeatureCtrl.dispose();
     _notesCtrl.dispose();
     super.dispose();
+  }
+
+  void _handleNotesChanged(String val) {
+    if (_isEditing) {
+      final noteParsed = NaturalLanguageVehicleParser.parseCriteriaMap({
+        'notes': val,
+      });
+      final newMake = noteParsed['make']?.toString() ?? '';
+      final newModel = noteParsed['model']?.toString() ?? '';
+      final newTrim = noteParsed['trim']?.toString() ?? '';
+      final newBed = noteParsed['bedLength']?.toString() ?? '';
+
+      if (_makeCtrl.text.trim() == _lastNoteSyncedMake && newMake.isNotEmpty) {
+        _makeCtrl.text = newMake;
+        _lastNoteSyncedMake = newMake;
+      }
+      if (_modelCtrl.text.trim() == _lastNoteSyncedModel &&
+          newModel.isNotEmpty) {
+        _modelCtrl.text = newModel;
+        _lastNoteSyncedModel = newModel;
+      }
+      if (_trimCtrl.text.trim() == _lastNoteSyncedTrim &&
+          newTrim != _lastNoteSyncedTrim) {
+        _trimCtrl.text = newTrim;
+        _lastNoteSyncedTrim = newTrim;
+      }
+      if (_bedLength == _lastNoteSyncedBed && newBed != _lastNoteSyncedBed) {
+        _bedLength = newBed;
+        _lastNoteSyncedBed = newBed;
+      }
+    }
+    setState(() {});
   }
 
   void _addCustomFeature() {
@@ -105,7 +192,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     final make = _makeCtrl.text.trim();
     final model = _modelCtrl.text.trim();
     final trim = _trimCtrl.text.trim();
-    final notes = _notesCtrl.text.trim();
+    var notes = _notesCtrl.text.trim();
     final minYear = int.tryParse(_minYearCtrl.text.trim());
     final maxYear = int.tryParse(_maxYearCtrl.text.trim());
     final maxPrice = _parseMaxPrice(_maxPriceCtrl.text);
@@ -117,9 +204,38 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       _exteriorColorCtrl.text,
     );
 
+    // When editing an existing target, if the user explicitly cleared Trim or Bed Length,
+    // strip the old token from raw notes so natural-language parsing doesn't re-apply it.
+    if (_isEditing) {
+      final prev = widget.existingTarget!;
+      if (trim.isEmpty && prev.trim.isNotEmpty && notes.isNotEmpty) {
+        notes = notes
+            .replaceAll(
+              RegExp('\\b${RegExp.escape(prev.trim)}\\b[.,;]*',
+                  caseSensitive: false),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (_bedLength.isEmpty && prev.bedLength.isNotEmpty && notes.isNotEmpty) {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'\b(?:5\.5|5\s*1/2|6\.5|6\s*1/2|6\.75|6\s*3/4|8(?:\.0)?)\s*(?:ft|foot|feet|\x27)\s*(?:bed|box)?[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+    }
+
     final hasAnyCriteria = make.isNotEmpty ||
         model.isNotEmpty ||
         trim.isNotEmpty ||
+        _bedLength.isNotEmpty ||
         notes.isNotEmpty ||
         combinedColors.isNotEmpty ||
         maxPrice != null ||
@@ -132,7 +248,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     if (!hasAnyCriteria) {
       setState(() {
         _errorText =
-            'Enter a make, model, max budget, color, or requirement for the additional vehicle.';
+            'Enter a make, model, max budget, color, or requirement for the vehicle.';
       });
       return;
     }
@@ -143,21 +259,44 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     });
 
     try {
-      final res = await ApiService.addVehicleToGuest(
-        guestId: widget.guest.id,
-        condition: _condition,
-        minYear: minYear,
-        maxYear: maxYear,
-        make: make,
-        model: model,
-        trim: trim,
-        maxPrice: maxPrice,
-        maxMileage: maxMileage,
-        drivetrain: _drivetrain,
-        exteriorColor: combinedColors,
-        features: _selectedFeatures.toList(),
-        notes: notes,
-      );
+      final ({GuestProfile guest, List<VehicleMatch> matches, String summary})
+          res;
+      if (_isEditing) {
+        res = await ApiService.updateVehicleOnGuest(
+          guestId: widget.guest.id,
+          targetId: widget.existingTarget!.id,
+          condition: _condition,
+          minYear: minYear,
+          maxYear: maxYear,
+          make: make,
+          model: model,
+          trim: trim,
+          bedLength: _bedLength,
+          maxPrice: maxPrice,
+          maxMileage: maxMileage,
+          drivetrain: _drivetrain,
+          exteriorColor: combinedColors,
+          features: _selectedFeatures.toList(),
+          notes: notes,
+        );
+      } else {
+        res = await ApiService.addVehicleToGuest(
+          guestId: widget.guest.id,
+          condition: _condition,
+          minYear: minYear,
+          maxYear: maxYear,
+          make: make,
+          model: model,
+          trim: trim,
+          bedLength: _bedLength,
+          maxPrice: maxPrice,
+          maxMileage: maxMileage,
+          drivetrain: _drivetrain,
+          exteriorColor: combinedColors,
+          features: _selectedFeatures.toList(),
+          notes: notes,
+        );
+      }
       if (!mounted) return;
       Navigator.of(context).pop(res);
     } catch (e) {
@@ -178,7 +317,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 680, maxHeight: 780),
+        constraints: const BoxConstraints(maxWidth: 700, maxHeight: 800),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -199,7 +338,9 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                   CircleAvatar(
                     backgroundColor: scheme.primaryContainer,
                     foregroundColor: scheme.onPrimaryContainer,
-                    child: const Icon(Icons.add_road_rounded),
+                    child: Icon(
+                      _isEditing ? Icons.edit_road_rounded : Icons.add_road_rounded,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -207,13 +348,17 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Add Another Vehicle for ${widget.guest.name}',
+                          _isEditing
+                              ? 'Edit Search Criteria for ${widget.guest.name}'
+                              : 'Add Another Vehicle for ${widget.guest.name}',
                           style: textTheme.titleMedium?.copyWith(
                             fontWeight: FontWeight.w700,
                           ),
                         ),
                         Text(
-                          'Searches prestonmotor.com immediately & at 7:30 AM and 2:00 PM daily alongside existing criteria',
+                          _isEditing
+                              ? 'Update vehicle specs, colors, budget, or natural-language criteria and re-search prestonmotor.com immediately'
+                              : 'Searches prestonmotor.com immediately & at 7:30 AM and 2:00 PM daily alongside existing criteria',
                           style: textTheme.bodySmall?.copyWith(
                             color: scheme.onSurfaceVariant,
                           ),
@@ -238,7 +383,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Existing Vehicles Context Banner
+                    // Existing Vehicles / Active Edit Context Banner
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -251,12 +396,19 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Icon(Icons.directions_car_filled_outlined,
-                              size: 18, color: scheme.primary),
+                          Icon(
+                            _isEditing
+                                ? Icons.tune_rounded
+                                : Icons.directions_car_filled_outlined,
+                            size: 18,
+                            color: scheme.primary,
+                          ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'Currently monitoring (${existingTargets.length}): ${existingTargets.map((t) => t.label).join('  •  ')}',
+                              _isEditing
+                                  ? 'Editing active search: ${widget.existingTarget!.label}'
+                                  : 'Currently monitoring (${existingTargets.length}): ${existingTargets.map((t) => t.label).join('  •  ')}',
                               style: textTheme.labelMedium?.copyWith(
                                 color: scheme.onSurface,
                                 fontWeight: FontWeight.w600,
@@ -335,6 +487,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       children: [
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_make_input'),
                             controller: _makeCtrl,
                             onChanged: (_) => setState(() {}),
                             decoration: const InputDecoration(
@@ -346,9 +499,11 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_model_input'),
                             controller: _modelCtrl,
+                            onChanged: (_) => setState(() {}),
                             decoration: const InputDecoration(
-                              labelText: 'Model (e.g. Navigator, Explorer)',
+                              labelText: 'Model (e.g. F-150, Navigator, Explorer)',
                               prefixIcon: Icon(Icons.badge_outlined),
                             ),
                           ),
@@ -362,9 +517,11 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         Expanded(
                           flex: 2,
                           child: TextField(
+                            key: const ValueKey('dialog_trim_input'),
                             controller: _trimCtrl,
+                            onChanged: (_) => setState(() {}),
                             decoration: const InputDecoration(
-                              labelText: 'Trim (Optional, e.g. Reserve, XLT)',
+                              labelText: 'Trim (Optional, e.g. Reserve, XLT, Lariat)',
                               prefixIcon: Icon(Icons.tune_outlined),
                             ),
                           ),
@@ -372,8 +529,10 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         const SizedBox(width: 10),
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_min_year_input'),
                             controller: _minYearCtrl,
                             keyboardType: TextInputType.number,
+                            onChanged: (_) => setState(() {}),
                             inputFormatters: [
                               FilteringTextInputFormatter.digitsOnly
                             ],
@@ -385,8 +544,10 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         const SizedBox(width: 10),
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_max_year_input'),
                             controller: _maxYearCtrl,
                             keyboardType: TextInputType.number,
+                            onChanged: (_) => setState(() {}),
                             inputFormatters: [
                               FilteringTextInputFormatter.digitsOnly
                             ],
@@ -403,8 +564,10 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       children: [
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_max_price_input'),
                             controller: _maxPriceCtrl,
                             keyboardType: TextInputType.number,
+                            onChanged: (_) => setState(() {}),
                             decoration: const InputDecoration(
                               labelText: 'Max Price Budget',
                               prefixText: '\$ ',
@@ -415,8 +578,10 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: TextField(
+                            key: const ValueKey('dialog_max_mileage_input'),
                             controller: _maxMileageCtrl,
                             keyboardType: TextInputType.number,
+                            onChanged: (_) => setState(() {}),
                             inputFormatters: [
                               FilteringTextInputFormatter.digitsOnly
                             ],
@@ -448,6 +613,30 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       onChanged: (v) {
                         if (v != null) setState(() => _drivetrain = v);
                       },
+                    ),
+
+                    const SizedBox(height: 12),
+                    Text(
+                      'Truck Bed Length (Optional)',
+                      style: textTheme.labelLarge
+                          ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _bedLengthOptions.map((opt) {
+                        final selected = _bedLength == opt.$1;
+                        return ChoiceChip(
+                          key: ValueKey(
+                            'dialog_bed_chip_${opt.$1.isEmpty ? 'any' : opt.$1}',
+                          ),
+                          label: Text(opt.$2),
+                          selected: selected,
+                          onSelected: (_) =>
+                              setState(() => _bedLength = opt.$1),
+                        );
+                      }).toList(),
                     ),
 
                     const SizedBox(height: 14),
@@ -529,7 +718,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       key: const ValueKey('dialog_natural_language_search_input'),
                       controller: _notesCtrl,
                       maxLines: 2,
-                      onChanged: (_) => setState(() {}),
+                      onChanged: _handleNotesChanged,
                       decoration: const InputDecoration(
                         labelText:
                             'Natural-Language Search / Additional Criteria (Optional)',
@@ -538,7 +727,9 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                         alignLabelWithHint: true,
                       ),
                     ),
-                    if (_notesCtrl.text.trim().isNotEmpty) ...[
+                    if (_notesCtrl.text.trim().isNotEmpty ||
+                        _selectedColors.isNotEmpty ||
+                        _isEditing) ...[
                       const SizedBox(height: 10),
                       Builder(
                         builder: (context) {
@@ -550,6 +741,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                             'make': _makeCtrl.text.trim(),
                             'model': _modelCtrl.text.trim(),
                             'trim': _trimCtrl.text.trim(),
+                            'bedLength': _bedLength,
                             'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
                             'maxMileage': int.tryParse(
                               _maxMileageCtrl.text.replaceAll(',', '').trim(),
@@ -663,6 +855,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                     child: const Text('Cancel'),
                   ),
                   FilledButton.icon(
+                    key: const ValueKey('submit_vehicle_criteria_button'),
                     onPressed: _submitting ? null : _submit,
                     icon: _submitting
                         ? const SizedBox(
@@ -673,11 +866,17 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                               color: Colors.white,
                             ),
                           )
-                        : const Icon(Icons.auto_awesome),
+                        : Icon(
+                            _isEditing
+                                ? Icons.save_as_rounded
+                                : Icons.auto_awesome,
+                          ),
                     label: Text(
                       _submitting
                           ? 'Searching prestonmotor.com...'
-                          : 'Add Vehicle & Search Now',
+                          : (_isEditing
+                              ? 'Save Changes & Re-Search'
+                              : 'Add Vehicle & Search Now'),
                     ),
                   ),
                 ],

@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/natural_language_parser.dart';
 import '../widgets/add_vehicle_criteria_dialog.dart';
 import '../widgets/copyable_identifier_badge.dart';
 
@@ -117,6 +118,48 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(res.summary)),
+    );
+  }
+
+  Future<void> _openEditVehicleDialog([
+    VehicleSearchTarget? targetOverride,
+  ]) async {
+    final g = _guest;
+    if (g == null) return;
+    final targets = g.effectiveTargets;
+    if (targets.isEmpty) return;
+
+    VehicleSearchTarget targetToEdit = targetOverride ?? targets.first;
+    if (targetOverride == null && _selectedTargetId != _allVehiclesFilter) {
+      for (final t in targets) {
+        if (t.id == _selectedTargetId) {
+          targetToEdit = t;
+          break;
+        }
+      }
+    }
+
+    final res = await showDialog<
+        ({GuestProfile guest, List<VehicleMatch> matches, String summary})>(
+      context: context,
+      builder: (_) => AddVehicleCriteriaDialog(
+        guest: g,
+        existingTarget: targetToEdit,
+      ),
+    );
+
+    if (res == null || !mounted) return;
+    widget.onDataChanged();
+    setState(() {
+      _guest = res.guest;
+      _matches = res.matches;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Updated search for ${res.guest.name} • ${res.summary}',
+        ),
+      ),
     );
   }
 
@@ -356,7 +399,16 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
             ? '${_guest!.name} • Vehicle Matches'
             : 'Guest Vehicle Matches'),
         actions: [
-          if (_guest != null)
+          if (_guest != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: OutlinedButton.icon(
+                key: const ValueKey('appbar_edit_search_button'),
+                onPressed: _searchingNow ? null : () => _openEditVehicleDialog(),
+                icon: const Icon(Icons.edit_outlined, size: 17),
+                label: const Text('Edit Search'),
+              ),
+            ),
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: OutlinedButton.icon(
@@ -365,6 +417,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                 label: const Text('Add Vehicle'),
               ),
             ),
+          ],
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: FilledButton.tonalIcon(
@@ -1127,6 +1180,22 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                               ),
                             ),
                           ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            key: ValueKey('edit_vehicle_target_${t.id}'),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                            ),
+                            onPressed: _searchingNow
+                                ? null
+                                : () => _openEditVehicleDialog(t),
+                            icon: const Icon(Icons.edit_outlined, size: 15),
+                            label: const Text('Edit Search'),
+                          ),
                           if (targets.length > 1) ...[
                             const SizedBox(width: 4),
                             IconButton(
@@ -1147,6 +1216,20 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                         spacing: 8,
                         runSpacing: 6,
                         children: [
+                          if (t.bedLength.isNotEmpty)
+                            _specChip(
+                              Icons.straighten_rounded,
+                              NaturalLanguageVehicleParser.formatBedLengthLabel(
+                                t.bedLength,
+                              ),
+                              scheme,
+                            ),
+                          if (t.cabStyle.isNotEmpty)
+                            _specChip(
+                              Icons.airline_seat_recline_normal_rounded,
+                              t.cabStyle,
+                              scheme,
+                            ),
                           if (t.drivetrain != 'Any')
                             _specChip(
                                 Icons.settings_outlined, t.drivetrain, scheme),
@@ -1254,11 +1337,31 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Our Gemini Agent will continue checking prestonmotor.com automatically at 7:30 AM and 2:00 PM every day — or tap "Add Another Vehicle" above to monitor an additional make & model for this guest.',
+              'Our Gemini Agent will continue checking prestonmotor.com automatically at 7:30 AM and 2:00 PM every day — or edit your search criteria or add another vehicle below.',
               textAlign: TextAlign.center,
               style: textTheme.bodyMedium?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                FilledButton.tonalIcon(
+                  key: const ValueKey('zero_matches_edit_search_button'),
+                  onPressed:
+                      _searchingNow ? null : () => _openEditVehicleDialog(),
+                  icon: const Icon(Icons.edit_outlined, size: 17),
+                  label: const Text('Edit Search Criteria'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _searchingNow ? null : _openAddVehicleDialog,
+                  icon: const Icon(Icons.add_circle_outline, size: 17),
+                  label: const Text('Add Another Vehicle'),
+                ),
+              ],
             ),
           ],
         ),
