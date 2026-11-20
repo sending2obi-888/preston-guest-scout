@@ -34,6 +34,10 @@ import {
   inspectServerBackupConflicts,
   restoreServerBackup,
 } from './backups.mjs';
+import {
+  checkVinRecallsWithGemini,
+  listRecentVinRecallChecks,
+} from './nhtsa_recall_agent.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_BUILD_DIR = path.resolve(__dirname, '../flutter_app/build/web');
@@ -895,6 +899,32 @@ const server = http.createServer(async (req, res) => {
         match: mapMatchRow(row),
         guest: mapGuestRow(guestRow),
       });
+    }
+
+    // NHTSA + Gemini VIN Recall Check endpoints (www.nhtsa.gov/recalls)
+    if (pathname === '/api/recalls/recent' && req.method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true,
+        recent: listRecentVinRecallChecks(),
+      });
+    }
+
+    if (pathname === '/api/recalls/check' && (req.method === 'POST' || req.method === 'GET')) {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const vin = String(body.vin || parsedUrl.searchParams.get('vin') || '').trim();
+      try {
+        const result = await checkVinRecallsWithGemini(vin);
+        return sendJson(res, 200, {
+          ok: true,
+          result,
+          recent: listRecentVinRecallChecks(),
+        });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error: err.message || 'Unable to complete NHTSA VIN recall check.',
+        });
+      }
     }
 
     // Safe image proxy strictly for prestonmotor.com vehicle photos (for Flutter Web CanvasKit CORS)

@@ -149,12 +149,23 @@ db.exec(`
     created_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS vin_recall_checks (
+    vin TEXT PRIMARY KEY,
+    vehicle_title TEXT DEFAULT '',
+    has_recalls INTEGER DEFAULT 0,
+    recall_count INTEGER DEFAULT 0,
+    verdict_headline TEXT DEFAULT '',
+    result_json TEXT NOT NULL,
+    checked_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_guests_created_at ON guests(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_matches_guest_id ON matches(guest_id, match_score DESC, found_at DESC);
   CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON match_notifications(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_calendar_events_start_at ON calendar_call_events(start_at DESC);
   CREATE INDEX IF NOT EXISTS idx_runs_slot_key ON search_runs(slot_key);
   CREATE INDEX IF NOT EXISTS idx_backups_created_at ON backups(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_vin_recalls_checked_at ON vin_recall_checks(checked_at DESC);
 `);
 
 // Safe migrations for existing databases

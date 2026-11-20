@@ -6,6 +6,7 @@ import 'screens/guest_list_screen.dart';
 import 'screens/guest_matches_screen.dart';
 import 'screens/home_intake_screen.dart';
 import 'screens/match_detail_screen.dart';
+import 'screens/vin_recall_screen.dart';
 import 'services/api_service.dart';
 import 'services/calendar_service.dart';
 import 'services/google_drive_sync_service.dart';
@@ -386,6 +387,10 @@ class _MainShellScreenState extends State<MainShellScreen>
         onSelectGuest: _openGuestMatches,
         onSwitchToIntake: () => setState(() => _selectedPageIndex = 0),
       ),
+      VinRecallScreen(
+        status: _status,
+        onOpenSettings: _openSettingsDialog,
+      ),
     ];
 
     return Scaffold(
@@ -457,8 +462,8 @@ class _MainShellScreenState extends State<MainShellScreen>
                       : const Icon(Icons.cloud_done_outlined, size: 18),
                   label: Text(
                     wideChromebook
-                        ? '$shortName • Drive Synced'
-                        : (compactMobile ? 'Synced' : shortName),
+                      ? '$shortName • Drive Synced'
+                      : (compactMobile ? 'Synced' : shortName),
                   ),
                 ),
               );
@@ -553,6 +558,9 @@ class _MainShellScreenState extends State<MainShellScreen>
               children: [
                 NavigationRail(
                   extended: MediaQuery.of(context).size.width >= 1120,
+                  labelType: MediaQuery.of(context).size.width >= 1120
+                      ? NavigationRailLabelType.none
+                      : NavigationRailLabelType.all,
                   selectedIndex: _selectedPageIndex,
                   onDestinationSelected: (idx) {
                     setState(() => _selectedPageIndex = idx);
@@ -576,6 +584,11 @@ class _MainShellScreenState extends State<MainShellScreen>
                         child: const Icon(Icons.fact_check),
                       ),
                       label: const Text('Monitored Guests'),
+                    ),
+                    const NavigationRailDestination(
+                      icon: Icon(Icons.verified_user_outlined),
+                      selectedIcon: Icon(Icons.verified_user_rounded),
+                      label: Text('VIN Recall Check'),
                     ),
                   ],
                 ),
@@ -611,6 +624,11 @@ class _MainShellScreenState extends State<MainShellScreen>
                     child: const Icon(Icons.fact_check),
                   ),
                   label: 'Monitored Guests',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.verified_user_outlined),
+                  selectedIcon: Icon(Icons.verified_user_rounded),
+                  label: 'VIN Recalls',
                 ),
               ],
             ),

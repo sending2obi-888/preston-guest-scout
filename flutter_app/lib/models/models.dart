@@ -1140,3 +1140,296 @@ class BackupRestoreResult {
         'summary': summary,
       };
 }
+
+class DecodedVinVehicle {
+  final String vin;
+  final int? year;
+  final String make;
+  final String model;
+  final String trim;
+  final String series;
+  final String bodyClass;
+  final String driveType;
+  final String engine;
+  final String displacementL;
+  final String cylinders;
+  final String fuelType;
+  final String doors;
+  final String plant;
+  final String manufacturer;
+
+  const DecodedVinVehicle({
+    required this.vin,
+    this.year,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.series = '',
+    this.bodyClass = '',
+    this.driveType = '',
+    this.engine = '',
+    this.displacementL = '',
+    this.cylinders = '',
+    this.fuelType = '',
+    this.doors = '',
+    this.plant = '',
+    this.manufacturer = '',
+  });
+
+  factory DecodedVinVehicle.fromJson(Map<String, dynamic> json) {
+    return DecodedVinVehicle(
+      vin: json['vin']?.toString() ?? '',
+      year: (json['year'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      series: json['series']?.toString() ?? '',
+      bodyClass: json['bodyClass']?.toString() ?? '',
+      driveType: json['driveType']?.toString() ?? '',
+      engine: json['engine']?.toString() ?? '',
+      displacementL: json['displacementL']?.toString() ?? '',
+      cylinders: json['cylinders']?.toString() ?? '',
+      fuelType: json['fuelType']?.toString() ?? '',
+      doors: json['doors']?.toString() ?? '',
+      plant: json['plant']?.toString() ?? '',
+      manufacturer: json['manufacturer']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'series': series,
+        'bodyClass': bodyClass,
+        'driveType': driveType,
+        'engine': engine,
+        'displacementL': displacementL,
+        'cylinders': cylinders,
+        'fuelType': fuelType,
+        'doors': doors,
+        'plant': plant,
+        'manufacturer': manufacturer,
+      };
+}
+
+class NhtsaRecallCampaign {
+  final String campaignNumber;
+  final String manufacturer;
+  final String component;
+  final String reportDate;
+  final String reportIsoDate;
+  final String summary;
+  final String consequence;
+  final String remedy;
+  final String notes;
+  final bool parkIt;
+  final bool parkOutSide;
+  final bool overTheAirUpdate;
+  final String nhtsaModelMatched;
+  final String applicability;
+  final String geminiNote;
+
+  const NhtsaRecallCampaign({
+    required this.campaignNumber,
+    this.manufacturer = '',
+    this.component = 'Vehicle Safety System',
+    this.reportDate = '',
+    this.reportIsoDate = '',
+    this.summary = '',
+    this.consequence = '',
+    this.remedy = '',
+    this.notes = '',
+    this.parkIt = false,
+    this.parkOutSide = false,
+    this.overTheAirUpdate = false,
+    this.nhtsaModelMatched = '',
+    this.applicability = 'Matches Decoded Vehicle',
+    this.geminiNote = '',
+  });
+
+  bool get isOtherVariant =>
+      RegExp(r'other\s+(?:engine|powertrain)', caseSensitive: false)
+          .hasMatch(applicability);
+
+  factory NhtsaRecallCampaign.fromJson(Map<String, dynamic> json) {
+    return NhtsaRecallCampaign(
+      campaignNumber: json['campaignNumber']?.toString() ?? '',
+      manufacturer: json['manufacturer']?.toString() ?? '',
+      component: json['component']?.toString() ?? 'Vehicle Safety System',
+      reportDate: json['reportDate']?.toString() ?? '',
+      reportIsoDate: json['reportIsoDate']?.toString() ?? '',
+      summary: json['summary']?.toString() ?? '',
+      consequence: json['consequence']?.toString() ?? '',
+      remedy: json['remedy']?.toString() ?? '',
+      notes: json['notes']?.toString() ?? '',
+      parkIt: json['parkIt'] == true,
+      parkOutSide: json['parkOutSide'] == true,
+      overTheAirUpdate: json['overTheAirUpdate'] == true,
+      nhtsaModelMatched: json['nhtsaModelMatched']?.toString() ?? '',
+      applicability:
+          json['applicability']?.toString() ?? 'Matches Decoded Vehicle',
+      geminiNote: json['geminiNote']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'campaignNumber': campaignNumber,
+        'manufacturer': manufacturer,
+        'component': component,
+        'reportDate': reportDate,
+        'reportIsoDate': reportIsoDate,
+        'summary': summary,
+        'consequence': consequence,
+        'remedy': remedy,
+        'notes': notes,
+        'parkIt': parkIt,
+        'parkOutSide': parkOutSide,
+        'overTheAirUpdate': overTheAirUpdate,
+        'nhtsaModelMatched': nhtsaModelMatched,
+        'applicability': applicability,
+        'geminiNote': geminiNote,
+      };
+}
+
+class VinRecallCheckResult {
+  final String id;
+  final String vin;
+  final String nhtsaUrl;
+  final bool nhtsaSiteReachable;
+  final String checkedAt;
+  final String agentMode;
+  final String vehicleTitle;
+  final DecodedVinVehicle vehicle;
+  final List<String> queriedModels;
+  final bool hasRecalls;
+  final int recallCount;
+  final int totalModelRecalls;
+  final bool parkItUrgent;
+  final bool parkOutsideWarning;
+  final String verdictHeadline;
+  final String geminiSummary;
+  final String recommendedAction;
+  final List<NhtsaRecallCampaign> recalls;
+
+  const VinRecallCheckResult({
+    required this.id,
+    required this.vin,
+    required this.nhtsaUrl,
+    this.nhtsaSiteReachable = true,
+    required this.checkedAt,
+    this.agentMode = 'gemini',
+    required this.vehicleTitle,
+    required this.vehicle,
+    this.queriedModels = const [],
+    required this.hasRecalls,
+    required this.recallCount,
+    this.totalModelRecalls = 0,
+    this.parkItUrgent = false,
+    this.parkOutsideWarning = false,
+    required this.verdictHeadline,
+    required this.geminiSummary,
+    required this.recommendedAction,
+    this.recalls = const [],
+  });
+
+  factory VinRecallCheckResult.fromJson(Map<String, dynamic> json) {
+    final recallsRaw = (json['recalls'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => NhtsaRecallCampaign.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    final vinStr = json['vin']?.toString() ?? '';
+    return VinRecallCheckResult(
+      id: json['id']?.toString() ?? '',
+      vin: vinStr,
+      nhtsaUrl: json['nhtsaUrl']?.toString() ??
+          'https://www.nhtsa.gov/recalls?vin=${Uri.encodeComponent(vinStr)}',
+      nhtsaSiteReachable: json['nhtsaSiteReachable'] != false,
+      checkedAt: json['checkedAt']?.toString() ?? '',
+      agentMode: json['agentMode']?.toString() ?? 'gemini',
+      vehicleTitle: json['vehicleTitle']?.toString() ?? vinStr,
+      vehicle: DecodedVinVehicle.fromJson(
+        Map<String, dynamic>.from(json['vehicle'] as Map? ?? {'vin': vinStr}),
+      ),
+      queriedModels: (json['queriedModels'] as List<dynamic>? ?? [])
+          .map((e) => e.toString())
+          .where((s) => s.isNotEmpty)
+          .toList(),
+      hasRecalls: json['hasRecalls'] == true,
+      recallCount: (json['recallCount'] as num?)?.toInt() ?? recallsRaw.length,
+      totalModelRecalls:
+          (json['totalModelRecalls'] as num?)?.toInt() ?? recallsRaw.length,
+      parkItUrgent:
+          json['parkItUrgent'] == true || recallsRaw.any((r) => r.parkIt),
+      parkOutsideWarning: json['parkOutsideWarning'] == true ||
+          recallsRaw.any((r) => r.parkOutSide),
+      verdictHeadline: json['verdictHeadline']?.toString() ?? '',
+      geminiSummary: json['geminiSummary']?.toString() ?? '',
+      recommendedAction: json['recommendedAction']?.toString() ?? '',
+      recalls: recallsRaw,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'vin': vin,
+        'nhtsaUrl': nhtsaUrl,
+        'nhtsaSiteReachable': nhtsaSiteReachable,
+        'checkedAt': checkedAt,
+        'agentMode': agentMode,
+        'vehicleTitle': vehicleTitle,
+        'vehicle': vehicle.toJson(),
+        'queriedModels': queriedModels,
+        'hasRecalls': hasRecalls,
+        'recallCount': recallCount,
+        'totalModelRecalls': totalModelRecalls,
+        'parkItUrgent': parkItUrgent,
+        'parkOutsideWarning': parkOutsideWarning,
+        'verdictHeadline': verdictHeadline,
+        'geminiSummary': geminiSummary,
+        'recommendedAction': recommendedAction,
+        'recalls': recalls.map((r) => r.toJson()).toList(),
+      };
+}
+
+class RecentVinRecallEntry {
+  final String vin;
+  final String vehicleTitle;
+  final bool hasRecalls;
+  final int recallCount;
+  final String verdictHeadline;
+  final String checkedAt;
+
+  const RecentVinRecallEntry({
+    required this.vin,
+    required this.vehicleTitle,
+    required this.hasRecalls,
+    required this.recallCount,
+    this.verdictHeadline = '',
+    required this.checkedAt,
+  });
+
+  factory RecentVinRecallEntry.fromJson(Map<String, dynamic> json) {
+    final vinStr = json['vin']?.toString() ?? '';
+    return RecentVinRecallEntry(
+      vin: vinStr,
+      vehicleTitle: json['vehicleTitle']?.toString() ?? vinStr,
+      hasRecalls: json['hasRecalls'] == true,
+      recallCount: (json['recallCount'] as num?)?.toInt() ?? 0,
+      verdictHeadline: json['verdictHeadline']?.toString() ?? '',
+      checkedAt: json['checkedAt']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'vehicleTitle': vehicleTitle,
+        'hasRecalls': hasRecalls,
+        'recallCount': recallCount,
+        'verdictHeadline': verdictHeadline,
+        'checkedAt': checkedAt,
+      };
+}
+

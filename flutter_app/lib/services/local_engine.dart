@@ -7,6 +7,7 @@ import '../models/models.dart';
 import 'calendar_service.dart';
 import 'match_notification_service.dart';
 import 'natural_language_parser.dart';
+import 'nhtsa_recall_service.dart';
 import 'widget_sync_service.dart';
 
 /// Self-contained on-device engine for the Android / Googlebook APK.
@@ -33,6 +34,7 @@ class LocalScoutEngine {
   static List<Map<String, dynamic>> _notifications = [];
   static List<Map<String, dynamic>> _calendarEvents = [];
   static List<Map<String, dynamic>> _backups = [];
+  static List<Map<String, dynamic>> _recallChecks = [];
   static Map<String, String> _deletedGuestIds = {};
   static Map<String, dynamic> _settings = {
     'geminiApiKey': '',
@@ -90,6 +92,11 @@ class LocalScoutEngine {
             .whereType<Map>()
             .map((e) => Map<String, dynamic>.from(e))
             .take(maxBackups)
+            .toList();
+        _recallChecks = (decoded['recallChecks'] as List<dynamic>? ?? [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .take(15)
             .toList();
         if (decoded['deletedGuestIds'] is Map) {
           _deletedGuestIds = (decoded['deletedGuestIds'] as Map).map(
@@ -154,6 +161,13 @@ class LocalScoutEngine {
             .whereType<Map>()
             .map((e) => Map<String, dynamic>.from(e))
             .take(maxBackups)
+            .toList();
+      }
+      if (decoded['recallChecks'] is List) {
+        _recallChecks = (decoded['recallChecks'] as List<dynamic>)
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .take(15)
             .toList();
       }
       MatchNotificationService.instance.hydratePersistedNotifications(
@@ -322,6 +336,7 @@ class LocalScoutEngine {
         'notifications': _notifications,
         'calendarEvents': _calendarEvents,
         'backups': _backups,
+        'recallChecks': _recallChecks,
         'deletedGuestIds': _deletedGuestIds,
         'settings': _settings,
       });
@@ -3328,6 +3343,55 @@ class LocalScoutEngine {
     );
   }
 
+  static Future<List<RecentVinRecallEntry>> getRecentVinRecallChecks() async {
+    await ensureInitialized();
+    final sorted = [..._recallChecks]..sort(
+        (a, b) => (b['checkedAt']?.toString() ?? '')
+            .compareTo(a['checkedAt']?.toString() ?? ''),
+      );
+    return sorted
+        .take(15)
+        .map((r) => RecentVinRecallEntry.fromJson(r))
+        .toList();
+  }
+
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      checkVinRecalls(String rawVin) async {
+    await ensureInitialized();
+    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+    final model = (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash')
+        .trim();
+
+    final result = await NhtsaRecallService.checkVinRecalls(
+      rawVin: rawVin,
+      geminiApiKey: apiKey,
+      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
+    );
+
+    final entry = RecentVinRecallEntry(
+      vin: result.vin,
+      vehicleTitle: result.vehicleTitle,
+      hasRecalls: result.hasRecalls,
+      recallCount: result.recallCount,
+      verdictHeadline: result.verdictHeadline,
+      checkedAt: result.checkedAt,
+    ).toJson();
+
+    _recallChecks.removeWhere(
+      (r) => (r['vin']?.toString() ?? '').toUpperCase() == result.vin,
+    );
+    _recallChecks.insert(0, entry);
+    if (_recallChecks.length > 15) {
+      _recallChecks = _recallChecks.take(15).toList();
+    }
+    await _persist();
+
+    final recent = _recallChecks
+        .map((r) => RecentVinRecallEntry.fromJson(r))
+        .toList();
+    return (result: result, recent: recent);
+  }
+
   @visibleForTesting
   static void cancelSchedulerForTest() {
     _scheduleTimer?.cancel();
@@ -3344,6 +3408,7 @@ class LocalScoutEngine {
     _notifications = [];
     _calendarEvents = [];
     _backups = [];
+    _recallChecks = [];
     _deletedGuestIds = {};
     _settings['calendarPermissionGranted'] = false;
     _settings['calendarPromptDismissed'] = false;

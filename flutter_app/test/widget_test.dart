@@ -2,15 +2,18 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:preston_guest_scout/main.dart';
 import 'package:preston_guest_scout/models/models.dart';
 import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/home_intake_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
+import 'package:preston_guest_scout/screens/vin_recall_screen.dart';
 import 'package:preston_guest_scout/services/calendar_service.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
 import 'package:preston_guest_scout/services/natural_language_parser.dart';
+import 'package:preston_guest_scout/services/nhtsa_recall_service.dart';
 import 'package:preston_guest_scout/widgets/calendar_events_dialog.dart';
 import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
 import 'package:preston_guest_scout/widgets/settings_and_chromebook_dialog.dart';
@@ -1772,4 +1775,213 @@ void main() {
 
     await tester.binding.setSurfaceSize(null);
   });
+
+  test(
+      'NhtsaRecallService validates 17-character VINs, parses DD/MM/YYYY NHTSA dates, and disambiguates NHTSA recall model taxonomy',
+      () {
+    final ok = NhtsaRecallService.validateAndNormalizeVin('1ftfw3l87rkf38272');
+    expect(ok.valid, isTrue);
+    expect(ok.vin, '1FTFW3L87RKF38272');
+
+    final shortVin = NhtsaRecallService.validateAndNormalizeVin('1FTFW3L87');
+    expect(shortVin.valid, isFalse);
+    expect(shortVin.error, contains('17 characters'));
+
+    final badLetter =
+        NhtsaRecallService.validateAndNormalizeVin('1FTFW3L87RKFO8272');
+    expect(badLetter.valid, isFalse);
+    expect(badLetter.error, contains('I, O, or Q'));
+
+    final parsedDate = NhtsaRecallService.parseNhtsaReportDate('10/05/2024');
+    expect(parsedDate.isoDate, '2024-05-10');
+    expect(parsedDate.displayDate, 'May 10, 2024');
+
+    const decodedBronco4Dr = DecodedVinVehicle(
+      vin: '1FMDE5BH0SLA10001',
+      year: 2025,
+      make: 'Ford',
+      model: 'Bronco',
+      doors: '4',
+      fuelType: 'Gasoline',
+    );
+    final broncoModels = NhtsaRecallService.selectMatchingNhtsaRecallModels(
+      decodedBronco4Dr,
+      const ['BRONCO 2DR', 'BRONCO 4DR', 'BRONCO SPORT'],
+    );
+    expect(broncoModels, contains('BRONCO 4DR'));
+    expect(broncoModels, isNot(contains('BRONCO 2DR')));
+    expect(broncoModels, isNot(contains('BRONCO SPORT')));
+  });
+
+  testWidgets(
+      'MainShellScreen exposes Page 3 (VIN Recall Check) and VinRecallScreen checks www.nhtsa.gov/recalls via Gemini',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'recallChecks': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    NhtsaRecallService.mockCheckHandler = (vin) async {
+      if (vin == '1FTFW3L87RKF38272') {
+        return VinRecallCheckResult(
+          id: 'test-recall-1',
+          vin: vin,
+          nhtsaUrl: 'https://www.nhtsa.gov/recalls?vin=$vin',
+          nhtsaSiteReachable: true,
+          checkedAt: '2026-11-20T15:00:00Z',
+          agentMode: 'gemini (gemini-2.5-flash)',
+          vehicleTitle: '2024 Ford F-150 XLT',
+          vehicle: DecodedVinVehicle(
+            vin: vin,
+            year: 2024,
+            make: 'Ford',
+            model: 'F-150',
+            trim: 'XLT',
+            bodyClass: 'Pickup • Crew Cab',
+            driveType: '4WD',
+            engine: '5.0L 8-Cyl Gasoline',
+            fuelType: 'Gasoline',
+            plant: 'Dearborn, Michigan, United States',
+          ),
+          queriedModels: const ['F-150'],
+          hasRecalls: true,
+          recallCount: 1,
+          totalModelRecalls: 1,
+          verdictHeadline: '1 NHTSA Recall Campaign Found for 2024 Ford F-150 XLT',
+          geminiSummary:
+              'Gemini checked www.nhtsa.gov/recalls for VIN 1FTFW3L87RKF38272 and identified 1 applicable NHTSA safety recall campaign.',
+          recommendedAction:
+              'Verify VIN repair completion on www.nhtsa.gov/recalls or with Ford service.',
+          recalls: const [
+            NhtsaRecallCampaign(
+              campaignNumber: '25V011000',
+              manufacturer: 'Ford Motor Company',
+              component: 'ELECTRICAL SYSTEM: INSTRUMENT CLUSTER',
+              reportDate: 'Jan 15, 2025',
+              reportIsoDate: '2025-01-15',
+              summary: 'Instrument panel cluster software may blank out while driving.',
+              consequence: 'Loss of speedometer display increases risk of a crash.',
+              remedy: 'Dealers will update the IPC software free of charge.',
+              overTheAirUpdate: true,
+              applicability: 'Matches Decoded Vehicle',
+              geminiNote: 'Applies to 2024 Ford F-150 XLT builds.',
+            ),
+          ],
+        );
+      }
+      return VinRecallCheckResult(
+        id: 'test-recall-clean',
+        vin: vin,
+        nhtsaUrl: 'https://www.nhtsa.gov/recalls?vin=$vin',
+        nhtsaSiteReachable: true,
+        checkedAt: '2026-11-20T15:05:00Z',
+        agentMode: 'gemini (gemini-2.5-flash)',
+        vehicleTitle: '2026 Ford F-250 XL',
+        vehicle: DecodedVinVehicle(
+          vin: vin,
+          year: 2026,
+          make: 'Ford',
+          model: 'F-250',
+          trim: 'XL',
+        ),
+        queriedModels: const ['F-250 SD'],
+        hasRecalls: false,
+        recallCount: 0,
+        totalModelRecalls: 0,
+        verdictHeadline: 'No Matching NHTSA Recalls Found for 2026 Ford F-250 XL',
+        geminiSummary:
+            'Checked www.nhtsa.gov/recalls for VIN $vin: 0 safety recall campaigns are on file.',
+        recommendedAction: 'No open NHTSA recalls found.',
+        recalls: const [],
+      );
+    };
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1100);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MainShellScreen(
+          themeMode: ThemeMode.light,
+          onToggleTheme: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Verify Page 3 navigation tab exists and switches to VinRecallScreen
+    expect(find.text('VIN Recall Check'), findsOneWidget);
+    await tester.tap(find.text('VIN Recall Check'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(VinRecallScreen), findsOneWidget);
+    expect(find.text('Gemini NHTSA VIN Recall Checker'), findsOneWidget);
+    expect(find.byKey(const ValueKey('vin_recall_input')), findsOneWidget);
+
+    // 1. Check a VIN that has an active NHTSA recall campaign
+    await tester.enterText(
+      find.byKey(const ValueKey('vin_recall_input')),
+      '1ftfw3l87rkf38272',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('check_vin_recalls_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('vin_recall_verdict_card')), findsOneWidget);
+    expect(find.text('1 NHTSA RECALL FOUND'), findsOneWidget);
+    expect(
+      find.text('1 NHTSA Recall Campaign Found for 2024 Ford F-150 XLT'),
+      findsOneWidget,
+    );
+    expect(find.text('NHTSA #25V011000'), findsOneWidget);
+    expect(
+      find.text('ELECTRICAL SYSTEM: INSTRUMENT CLUSTER'),
+      findsOneWidget,
+    );
+
+    // 2. Check a VIN with 0 recalls
+    await tester.enterText(
+      find.byKey(const ValueKey('vin_recall_input')),
+      '1FT7X2BA0TED12345',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('check_vin_recalls_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('0 MATCHING NHTSA RECALLS'), findsOneWidget);
+    expect(
+      find.text('No Matching NHTSA Recalls Found for 2026 Ford F-250 XL'),
+      findsOneWidget,
+    );
+
+    NhtsaRecallService.mockCheckHandler = null;
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
 }
+

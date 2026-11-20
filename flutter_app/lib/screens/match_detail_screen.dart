@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import 'vin_recall_screen.dart';
 
 class MatchDetailScreen extends StatelessWidget {
   final VehicleMatch match;
@@ -18,6 +19,22 @@ class MatchDetailScreen extends StatelessWidget {
     final dt = DateTime.tryParse(iso)?.toLocal();
     if (dt == null) return iso;
     return DateFormat('EEEE, MMMM d, yyyy • h:mm a').format(dt);
+  }
+
+  void _openVinRecallCheck(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(
+            title: Text('NHTSA Recall Check • ${match.vin}'),
+          ),
+          body: VinRecallScreen(
+            initialVin: match.vin,
+            autoCheckOnInit: true,
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _openPrestonListing(BuildContext context) async {
@@ -45,6 +62,15 @@ class MatchDetailScreen extends StatelessWidget {
       appBar: AppBar(
         title: Text(match.title),
         actions: [
+          if (match.vin.trim().length == 17)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilledButton.tonalIcon(
+                onPressed: () => _openVinRecallCheck(context),
+                icon: const Icon(Icons.verified_user_outlined, size: 18),
+                label: const Text('Check NHTSA Recalls'),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: FilledButton.icon(

@@ -680,4 +680,52 @@ class ApiService {
       Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
     );
   }
+
+  static Future<List<RecentVinRecallEntry>> fetchRecentVinRecallChecks() async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.getRecentVinRecallChecks();
+    }
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/recalls/recent'),
+        headers: _headers(),
+      );
+      if (res.statusCode != 200) return const [];
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return (data['recent'] as List<dynamic>? ?? [])
+          .whereType<Map>()
+          .map(
+              (e) => RecentVinRecallEntry.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<({VinRecallCheckResult result, List<RecentVinRecallEntry> recent})>
+      checkVinRecalls(String vin) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.checkVinRecalls(vin);
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/recalls/check'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{'vin': vin}),
+    );
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to check recalls on www.nhtsa.gov/recalls (${res.statusCode})',
+      );
+    }
+    final result = VinRecallCheckResult.fromJson(
+      Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
+    );
+    final recent = (data['recent'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((e) => RecentVinRecallEntry.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    return (result: result, recent: recent);
+  }
 }
