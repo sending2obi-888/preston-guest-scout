@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/match_notification_service.dart';
+import 'copyable_identifier_badge.dart';
 
 class MatchNotificationsDialog extends StatelessWidget {
   final void Function(String guestId) onSelectGuest;
@@ -296,18 +297,34 @@ class MatchNotificationsDialog extends StatelessWidget {
                                       : FontWeight.w700,
                                 ),
                               ),
-                              subtitle: subtitleParts.isEmpty
+                              subtitle: (subtitleParts.isEmpty &&
+                                      item.vin.trim().isEmpty)
                                   ? null
                                   : Padding(
-                                      padding: const EdgeInsets.only(top: 3),
-                                      child: Text(
-                                        subtitleParts.join(' • '),
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.copyWith(
-                                              color: scheme.onSurfaceVariant,
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          if (subtitleParts.isNotEmpty)
+                                            Text(
+                                              subtitleParts.join(' • '),
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .bodySmall
+                                                  ?.copyWith(
+                                                    color:
+                                                        scheme.onSurfaceVariant,
+                                                  ),
                                             ),
+                                          if (item.vin.trim().isNotEmpty) ...[
+                                            const SizedBox(height: 4),
+                                            CopyableIdentifierBadge.vin(
+                                              item.vin,
+                                              compact: true,
+                                            ),
+                                          ],
+                                        ],
                                       ),
                                     ),
                               trailing:

@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/nhtsa_recall_service.dart';
+import '../widgets/copyable_identifier_badge.dart';
 
 class _UppercaseVinFormatter extends TextInputFormatter {
   @override
@@ -344,6 +345,18 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                           suffixIcon: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              if (currentVin.isNotEmpty)
+                                IconButton(
+                                  tooltip: 'Copy VIN to clipboard',
+                                  onPressed: () =>
+                                      CopyableIdentifierBadge.copyToClipboard(
+                                    context,
+                                    kindLabel: 'VIN',
+                                    rawValue: currentVin,
+                                  ),
+                                  icon: const Icon(Icons.content_copy_rounded,
+                                      size: 18),
+                                ),
                               IconButton(
                                 tooltip: 'Paste VIN from clipboard',
                                 onPressed:
@@ -600,14 +613,21 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                 fontWeight: FontWeight.w800,
               ),
             ),
-            const SizedBox(height: 6),
-            Text(
-              'VIN: ${res.vin}  •  Checked ${_formatCheckedTimestamp(res.checkedAt)}',
-              style: textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                fontWeight: FontWeight.w600,
-                color: scheme.onSurfaceVariant,
-              ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                CopyableIdentifierBadge.vin(res.vin),
+                Text(
+                  'Checked ${_formatCheckedTimestamp(res.checkedAt)}',
+                  style: textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 14),
             Container(
@@ -1043,11 +1063,24 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                subtitle: Text(
-                  '${entry.vin} • ${entry.hasRecalls ? '${entry.recallCount} recall(s)' : '0 recalls'}',
-                  style: textTheme.bodySmall?.copyWith(
-                    fontFamily: 'monospace',
-                    color: scheme.onSurfaceVariant,
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      CopyableIdentifierBadge.vin(entry.vin, compact: true),
+                      Text(
+                        entry.hasRecalls
+                            ? '${entry.recallCount} recall(s)'
+                            : '0 recalls',
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 trailing: TextButton.icon(

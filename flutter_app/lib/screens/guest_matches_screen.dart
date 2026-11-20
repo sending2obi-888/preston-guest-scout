@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../widgets/add_vehicle_criteria_dialog.dart';
+import '../widgets/copyable_identifier_badge.dart';
 
 class GuestMatchesScreen extends StatefulWidget {
   final String guestId;
@@ -1425,41 +1426,52 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                     }).toList(),
                   ),
                   const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Flexible(
-                        child: Text(
+                      if (match.vin.trim().isNotEmpty)
+                        CopyableIdentifierBadge.vin(
+                          match.vin,
+                          compact: true,
+                        ),
+                      if (match.stockNumber.trim().isNotEmpty)
+                        CopyableIdentifierBadge.stock(
+                          match.stockNumber,
+                          compact: true,
+                        ),
+                      if (match.mileage > 0 || match.condition.isNotEmpty)
+                        Text(
                           [
-                            if (match.stockNumber.isNotEmpty)
-                              'Stock #${match.stockNumber}',
                             if (match.mileage > 0)
                               '${NumberFormat.decimalPattern().format(match.mileage)} mi',
                             if (match.condition.isNotEmpty) match.condition,
                           ].join(' • '),
-                          overflow: TextOverflow.ellipsis,
                           style: textTheme.labelSmall?.copyWith(
                             color: scheme.onSurfaceVariant,
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'View Match Details',
-                            style: textTheme.labelMedium?.copyWith(
-                              color: scheme.primary,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(width: 4),
-                          Icon(Icons.arrow_forward,
-                              size: 16, color: scheme.primary),
-                        ],
-                      ),
                     ],
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'View Match Details',
+                          style: textTheme.labelMedium?.copyWith(
+                            color: scheme.primary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(Icons.arrow_forward,
+                            size: 16, color: scheme.primary),
+                      ],
+                    ),
                   ),
                 ],
               );

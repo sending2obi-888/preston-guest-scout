@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../widgets/copyable_identifier_badge.dart';
 import 'vin_recall_screen.dart';
 
 class MatchDetailScreen extends StatelessWidget {
@@ -181,18 +182,22 @@ class MatchDetailScreen extends StatelessWidget {
                                 fontWeight: FontWeight.w800,
                               ),
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              [
-                                if (match.vin.isNotEmpty) 'VIN: ${match.vin}',
-                                if (match.stockNumber.isNotEmpty)
-                                  'Stock #${match.stockNumber}',
-                              ].join('  •  '),
-                              style: textTheme.bodySmall?.copyWith(
-                                color: scheme.onSurfaceVariant,
-                                fontFamily: 'monospace',
+                            if (match.vin.isNotEmpty ||
+                                match.stockNumber.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  if (match.vin.isNotEmpty)
+                                    CopyableIdentifierBadge.vin(match.vin),
+                                  if (match.stockNumber.isNotEmpty)
+                                    CopyableIdentifierBadge.stock(
+                                      match.stockNumber,
+                                    ),
+                                ],
                               ),
-                            ),
+                            ],
                             const SizedBox(height: 14),
                             Wrap(
                               spacing: 12,

@@ -1983,5 +1983,152 @@ void main() {
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
   });
+
+  testWidgets(
+      'Clicking a VIN number or Stock number immediately copies the clean value to clipboard with one click',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String clipboardText = '';
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          final args = call.arguments as Map?;
+          clipboardText = args?['text']?.toString() ?? '';
+          return null;
+        }
+        if (call.method == 'Clipboard.getData') {
+          return <String, dynamic>{'text': clipboardText};
+        }
+        return null;
+      },
+    );
+
+    final persistedStore = jsonEncode({
+      'guests': [
+        {
+          'id': 'guest-copy-1',
+          'name': 'Taylor Reed',
+          'make': 'Ford',
+          'model': 'F-150',
+          'createdAt': '2026-11-20T12:00:00Z',
+          'initialSearchCompleted': true,
+        }
+      ],
+      'matches': [
+        {
+          'id': 'match-copy-1',
+          'guestId': 'guest-copy-1',
+          'vin': '1FTFW3L87RKF38272',
+          'stockNumber': 'K60421',
+          'title': '2024 Ford F-150 XLT',
+          'price': 48990.0,
+          'location': 'Preston Ford of Hurlock',
+          'mileage': 15,
+          'condition': 'New',
+          'foundAt': '2026-11-20T12:05:00Z',
+          'lastSeenAt': '2026-11-20T12:05:00Z',
+        }
+      ],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        return true;
+      },
+    );
+
+    int cardOpenCount = 0;
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1100, 900);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    // 1. Test 1-click copy on GuestMatchesScreen match card without triggering card open
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: 'guest-copy-1',
+          onDataChanged: () {},
+          onSelectMatch: (_, _) => cardOpenCount++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('VIN: 1FTFW3L87RKF38272'), findsOneWidget);
+    expect(find.text('Stock #K60421'), findsOneWidget);
+
+    await tester.tap(find.text('VIN: 1FTFW3L87RKF38272'));
+    await tester.pump();
+    expect(clipboardText, '1FTFW3L87RKF38272');
+    expect(cardOpenCount, 0);
+    expect(
+      find.text('Copied VIN to clipboard: 1FTFW3L87RKF38272'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Stock #K60421'));
+    await tester.pump();
+    expect(clipboardText, 'K60421');
+    expect(cardOpenCount, 0);
+    expect(
+      find.text('Copied Stock # to clipboard: K60421'),
+      findsOneWidget,
+    );
+
+    // Drain badge reset timer
+    await tester.pump(const Duration(seconds: 3));
+
+    // 2. Test 1-click copy on MatchDetailScreen
+    const guest = GuestProfile(
+      id: 'guest-copy-1',
+      name: 'Taylor Reed',
+      createdAt: '2026-11-20T12:00:00Z',
+    );
+    const detailMatch = VehicleMatch(
+      id: 'match-copy-2',
+      guestId: 'guest-copy-1',
+      vin: '2LMPJ8KP3LBL00851',
+      stockNumber: 'GLM26149A',
+      title: '2020 Lincoln Nautilus Reserve',
+      price: 19500,
+      location: 'Boulevard Ford of Millsboro',
+      foundAt: '2026-11-20T12:05:00Z',
+      lastSeenAt: '2026-11-20T12:05:00Z',
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: MatchDetailScreen(match: detailMatch, guest: guest),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('VIN: 2LMPJ8KP3LBL00851'));
+    await tester.pump();
+    expect(clipboardText, '2LMPJ8KP3LBL00851');
+
+    await tester.tap(find.text('Stock #GLM26149A'));
+    await tester.pump();
+    expect(clipboardText, 'GLM26149A');
+
+    await tester.pump(const Duration(seconds: 3));
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null);
+  });
 }
+
 
