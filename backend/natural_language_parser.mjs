@@ -636,34 +636,81 @@ export function extractEngineSpecFromText(rawText) {
   return '';
 }
 
+export function parseExteriorColors(rawColors) {
+  const rawItems = Array.isArray(rawColors)
+    ? rawColors.map((c) => String(c || ''))
+    : [String(rawColors || '')];
+
+  const seen = new Set();
+  const result = [];
+
+  for (const rawItem of rawItems) {
+    const parts = rawItem
+      .split(/[,;|/]+|\b(?:or|and)\b/gi)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    for (const p of parts) {
+      const lower = p.toLowerCase();
+      if (lower === 'any' || lower === 'any color' || lower === 'all') continue;
+      const canonical =
+        lower === 'grey'
+          ? 'Gray'
+          : p
+              .split(/\s+/)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(' ');
+      const dedupeKey = canonical.toLowerCase();
+      if (!seen.has(dedupeKey)) {
+        seen.add(dedupeKey);
+        result.push(canonical);
+      }
+    }
+  }
+
+  return result;
+}
+
 function extractColorFromStrictNotes(strictText) {
   if (!strictText) return '';
   // Remove package/program names containing color words so "Black Appearance Package",
   // "Black Label", "BlueCruise", "Blue Advantage", "Gold Certified" never trigger exterior color filters!
-  const cleaned = strictText
+  let cleaned = strictText
     .toLowerCase()
     .replace(
       /\b(?:black\s+appearance|black\s+label|black\s+widow|black\s+diamond|blue\s*cruise|blue\s+advantage|gold\s+certified|silver\s+certified|red\s+carpet|green\s+vehicle|dark\s+horse|dark\s+slate|medium\s+dark\s+slate|black\s+interior|gray\s+interior|tan\s+interior)\b/gi,
       ' '
     );
 
+  const found = [];
+  const seenLower = new Set();
+
   for (const sc of SPECIFIC_COLORS) {
     if (cleaned.includes(sc)) {
-      return sc
+      const formatted = sc
         .split(' ')
         .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
         .join(' ');
+      if (!seenLower.has(formatted.toLowerCase())) {
+        seenLower.add(formatted.toLowerCase());
+        found.push(formatted);
+      }
+      // Blank out matched specific color phrase so e.g. "oxford white" doesn't also add "White"
+      cleaned = cleaned.split(sc).join(' ');
     }
   }
 
   for (const bc of BASIC_COLORS) {
     if (new RegExp(`\\b${bc}\\b`, 'i').test(cleaned)) {
       const normalized = bc === 'grey' ? 'Gray' : bc.charAt(0).toUpperCase() + bc.slice(1);
-      return normalized;
+      if (!seenLower.has(normalized.toLowerCase())) {
+        seenLower.add(normalized.toLowerCase());
+        found.push(normalized);
+      }
     }
   }
 
-  return '';
+  return found.join(', ');
 }
 
 export function normalizeModelInput(rawMake, rawModel) {
@@ -899,11 +946,18 @@ export function parseNaturalLanguageCriteria(guest = {}) {
     }
   }
 
-  // 9. Exterior Color
-  let exteriorColor = String(guest.exteriorColor || '').trim();
-  if (!exteriorColor && strictNotes) {
-    exteriorColor = extractColorFromStrictNotes(strictNotes);
-  }
+  // 9. Exterior Color(s) — supports single or multiple chosen colors
+  const explicitColors = parseExteriorColors(
+    Array.isArray(guest.exteriorColors) && guest.exteriorColors.length > 0
+      ? guest.exteriorColors
+      : guest.exteriorColor
+  );
+  const parsedNoteColors =
+    explicitColors.length === 0 && strictNotes
+      ? parseExteriorColors(extractColorFromStrictNotes(strictNotes))
+      : [];
+  const exteriorColors = explicitColors.length > 0 ? explicitColors : parsedNoteColors;
+  const exteriorColor = exteriorColors.join(', ');
 
   // 10. Dealership Location Hints
   const locationHints = LOCATION_KEYWORDS.filter((loc) => lowerAll.includes(loc));
@@ -928,6 +982,7 @@ export function parseNaturalLanguageCriteria(guest = {}) {
     maxPrice,
     maxMileage,
     exteriorColor,
+    exteriorColors,
     features: featuresList,
     notes: rawNotes,
     locationHints,
@@ -1132,15 +1187,121 @@ export function doesVehicleMatchEngine(targetEngineSpec, vehicle) {
   return hay.includes(spec);
 }
 
+function doesSingleColorMatchVehicle(singleColorLower, vColorLower) {
+  if (!singleColorLower) return true;
+  if (singleColorLower === 'gray' || singleColorLower === 'grey') {
+    return (
+      vColorLower.includes('gray') ||
+      vColorLower.includes('grey') ||
+      vColorLower.includes('slate') ||
+      vColorLower.includes('magnetic') ||
+      vColorLower.includes('carbonized') ||
+      vColorLower.includes('charcoal') ||
+      vColorLower.includes('graphite')
+    );
+  }
+  if (singleColorLower === 'white') {
+    return (
+      vColorLower.includes('white') ||
+      vColorLower.includes('ivory') ||
+      vColorLower.includes('pearl') ||
+      vColorLower.includes('oxford')
+    );
+  }
+  if (singleColorLower === 'black') {
+    return (
+      vColorLower.includes('black') ||
+      vColorLower.includes('ebony') ||
+      vColorLower.includes('onyx') ||
+      vColorLower.includes('obsidian') ||
+      vColorLower.includes('agate')
+    );
+  }
+  if (singleColorLower === 'silver') {
+    return (
+      vColorLower.includes('silver') ||
+      vColorLower.includes('ingot') ||
+      vColorLower.includes('billet') ||
+      vColorLower.includes('aluminum')
+    );
+  }
+  if (singleColorLower === 'blue') {
+    return (
+      vColorLower.includes('blue') ||
+      vColorLower.includes('navy') ||
+      vColorLower.includes('azure') ||
+      vColorLower.includes('cobalt') ||
+      vColorLower.includes('sapphire') ||
+      vColorLower.includes('antimatter') ||
+      vColorLower.includes('velocity')
+    );
+  }
+  if (singleColorLower === 'red') {
+    return (
+      vColorLower.includes('red') ||
+      vColorLower.includes('crimson') ||
+      vColorLower.includes('ruby') ||
+      vColorLower.includes('scarlet') ||
+      vColorLower.includes('maroon') ||
+      vColorLower.includes('burgundy')
+    );
+  }
+  if (singleColorLower === 'burgundy') {
+    return (
+      vColorLower.includes('burgundy') ||
+      vColorLower.includes('maroon') ||
+      vColorLower.includes('crimson') ||
+      vColorLower.includes('wine') ||
+      vColorLower.includes('merlot')
+    );
+  }
+  if (singleColorLower === 'green') {
+    return (
+      vColorLower.includes('green') ||
+      vColorLower.includes('olive') ||
+      vColorLower.includes('emerald') ||
+      vColorLower.includes('forest') ||
+      vColorLower.includes('sage') ||
+      vColorLower.includes('eruption')
+    );
+  }
+  if (singleColorLower === 'brown') {
+    return (
+      vColorLower.includes('brown') ||
+      vColorLower.includes('bronze') ||
+      vColorLower.includes('copper') ||
+      vColorLower.includes('mocha') ||
+      vColorLower.includes('espresso') ||
+      vColorLower.includes('kodiak') ||
+      vColorLower.includes('mahogany')
+    );
+  }
+  if (singleColorLower === 'tan') {
+    return (
+      vColorLower.includes('tan') ||
+      vColorLower.includes('beige') ||
+      vColorLower.includes('sand') ||
+      vColorLower.includes('dune') ||
+      vColorLower.includes('cashmere') ||
+      vColorLower.includes('terrain')
+    );
+  }
+  if (singleColorLower === 'gold') {
+    return (
+      vColorLower.includes('gold') ||
+      vColorLower.includes('champagne') ||
+      vColorLower.includes('amber')
+    );
+  }
+  return vColorLower.includes(singleColorLower);
+}
+
 export function doesVehicleMatchColor(targetColor, vehicle) {
-  const clean = String(targetColor || '').trim().toLowerCase();
-  if (!clean) return true;
+  const colors = parseExteriorColors(targetColor);
+  if (colors.length === 0) return true;
   const vColor = String(vehicle?.exteriorColor || '').toLowerCase();
   if (!vColor) return false;
-  if (clean === 'gray' || clean === 'grey') {
-    return vColor.includes('gray') || vColor.includes('grey') || vColor.includes('slate') || vColor.includes('magnetic') || vColor.includes('carbonized');
-  }
-  return vColor.includes(clean);
+  return colors.some((c) => doesSingleColorMatchVehicle(c.toLowerCase(), vColor));
 }
 
 export function doesVehicleMatchStrictPackages(strictPackages, vehicle) {

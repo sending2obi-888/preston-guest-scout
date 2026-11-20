@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/natural_language_parser.dart';
+import 'exterior_color_selector.dart';
 
 class AddVehicleCriteriaDialog extends StatefulWidget {
   final GuestProfile guest;
@@ -31,6 +32,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
 
   String _condition = 'Any';
   String _drivetrain = 'Any';
+  List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
   bool _submitting = false;
   String? _errorText;
@@ -110,10 +112,16 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     final maxMileage =
         int.tryParse(_maxMileageCtrl.text.replaceAll(',', '').trim());
 
+    final combinedColors = ExteriorColorSelector.combineSelectedAndTyped(
+      _selectedColors,
+      _exteriorColorCtrl.text,
+    );
+
     final hasAnyCriteria = make.isNotEmpty ||
         model.isNotEmpty ||
         trim.isNotEmpty ||
         notes.isNotEmpty ||
+        combinedColors.isNotEmpty ||
         maxPrice != null ||
         minYear != null ||
         maxYear != null ||
@@ -124,7 +132,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     if (!hasAnyCriteria) {
       setState(() {
         _errorText =
-            'Enter a make, model, max budget, or requirement for the additional vehicle.';
+            'Enter a make, model, max budget, color, or requirement for the additional vehicle.';
       });
       return;
     }
@@ -146,7 +154,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
         maxPrice: maxPrice,
         maxMileage: maxMileage,
         drivetrain: _drivetrain,
-        exteriorColor: _exteriorColorCtrl.text.trim(),
+        exteriorColor: combinedColors,
         features: _selectedFeatures.toList(),
         notes: notes,
       );
@@ -422,43 +430,34 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                     ),
 
                     const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DropdownButtonFormField<String>(
-                            initialValue: _drivetrain,
-                            decoration: const InputDecoration(
-                              labelText: 'Drivetrain',
-                              prefixIcon: Icon(Icons.settings_outlined),
-                            ),
-                            items: const [
-                              DropdownMenuItem(
-                                  value: 'Any', child: Text('Any Drivetrain')),
-                              DropdownMenuItem(
-                                  value: '4WD', child: Text('4WD / 4x4')),
-                              DropdownMenuItem(
-                                  value: 'AWD', child: Text('AWD')),
-                              DropdownMenuItem(
-                                  value: 'FWD', child: Text('FWD')),
-                              DropdownMenuItem(
-                                  value: 'RWD', child: Text('RWD')),
-                            ],
-                            onChanged: (v) {
-                              if (v != null) setState(() => _drivetrain = v);
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: TextField(
-                            controller: _exteriorColorCtrl,
-                            decoration: const InputDecoration(
-                              labelText: 'Exterior Color (Optional)',
-                              prefixIcon: Icon(Icons.palette_outlined),
-                            ),
-                          ),
-                        ),
+                    DropdownButtonFormField<String>(
+                      initialValue: _drivetrain,
+                      decoration: const InputDecoration(
+                        labelText: 'Drivetrain',
+                        prefixIcon: Icon(Icons.settings_outlined),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'Any', child: Text('Any Drivetrain')),
+                        DropdownMenuItem(
+                            value: '4WD', child: Text('4WD / 4x4')),
+                        DropdownMenuItem(value: 'AWD', child: Text('AWD')),
+                        DropdownMenuItem(value: 'FWD', child: Text('FWD')),
+                        DropdownMenuItem(value: 'RWD', child: Text('RWD')),
                       ],
+                      onChanged: (v) {
+                        if (v != null) setState(() => _drivetrain = v);
+                      },
+                    ),
+
+                    const SizedBox(height: 14),
+                    ExteriorColorSelector(
+                      selectedColors: _selectedColors,
+                      customColorController: _exteriorColorCtrl,
+                      compact: true,
+                      onChanged: (colors) {
+                        setState(() => _selectedColors = colors);
+                      },
                     ),
 
                     const SizedBox(height: 16),
@@ -556,7 +555,11 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                               _maxMileageCtrl.text.replaceAll(',', '').trim(),
                             ),
                             'drivetrain': _drivetrain,
-                            'exteriorColor': _exteriorColorCtrl.text.trim(),
+                            'exteriorColor':
+                                ExteriorColorSelector.combineSelectedAndTyped(
+                              _selectedColors,
+                              _exteriorColorCtrl.text,
+                            ),
                             'features': _selectedFeatures.toList(),
                             'notes': _notesCtrl.text.trim(),
                           });

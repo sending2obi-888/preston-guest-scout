@@ -2129,6 +2129,166 @@ void main() {
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
   });
+
+  testWidgets(
+      'HomeIntakeScreen allows choosing multiple colors on initial search and matches vehicles in any selected color',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1100, 1200);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HomeIntakeScreen(
+            status: const SystemStatus(geminiConfigured: true),
+            onGuestCreated: () {},
+            onOpenGuestMatches: (_) {},
+            onOpenSettings: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('multi_exterior_color_selector')),
+      findsOneWidget,
+    );
+    expect(find.text('Any Color'), findsOneWidget);
+
+    // Select 3 colors: White, Blue, and Gray
+    await tester.tap(find.byKey(const ValueKey('color_chip_white')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('color_chip_blue')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('color_chip_gray')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('3 selected (matches any)'), findsOneWidget);
+    expect(find.text('Colors: White, Blue, Gray'), findsOneWidget);
+
+    // Also add a custom OEM paint color ("Rapid Red")
+    await tester.enterText(
+      find.byKey(const ValueKey('custom_exterior_color_input')),
+      'Rapid Red',
+    );
+    await tester.tap(find.byKey(const ValueKey('add_custom_color_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('4 selected (matches any)'), findsOneWidget);
+    expect(find.text('Colors: White, Blue, Gray, Rapid Red'), findsOneWidget);
+
+    // Verify engine evaluation matches ANY of the chosen colors (including OEM paint names
+    // like Oxford White, Velocity Blue, Carbonized Gray Metallic, Rapid Red) and excludes Black/Green
+    final multiColorGuest = GuestProfile.fromJson(
+      LocalScoutEngine.normalizeSpecsForTest({
+        'id': 'guest-multicolor',
+        'name': 'Casey Morgan',
+        'make': 'Ford',
+        'model': 'F-150',
+        'exteriorColor': 'White, Blue, Gray, Rapid Red',
+        'createdAt': '2026-11-20T16:00:00Z',
+      }),
+    );
+
+    final sampleInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FTFW1E50TFA10001',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 51000.0,
+        'location': 'Preston Ford of Hurlock',
+        'exteriorColor': 'Oxford White',
+      },
+      {
+        'vin': '1FTFW1E50TFA10002',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 52000.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'exteriorColor': 'Antimatter Blue Metallic',
+      },
+      {
+        'vin': '1FTFW1E50TFA10003',
+        'title': '2026 Ford F-150 Lariat',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'Lariat',
+        'condition': 'New',
+        'price': 56000.0,
+        'location': 'Preston Ford of Denton',
+        'exteriorColor': 'Carbonized Gray Metallic',
+      },
+      {
+        'vin': '1FTFW1E50TFA10004',
+        'title': '2026 Ford F-150 Lariat',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'Lariat',
+        'condition': 'New',
+        'price': 56500.0,
+        'location': 'Preston Ford of Keller',
+        'exteriorColor': 'Rapid Red Metallic Tinted Clearcoat',
+      },
+      {
+        'vin': '1FTFW1E50TFA10005',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 50500.0,
+        'location': 'Preston Ford of Hurlock',
+        'exteriorColor': 'Agate Black Metallic',
+      },
+      {
+        'vin': '1FTFW1E50TFA10006',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 50900.0,
+        'location': 'Preston Ford of Hurlock',
+        'exteriorColor': 'Eruption Green Metallic',
+      },
+    ];
+
+    final matches =
+        LocalScoutEngine.evaluateAllForTest(multiColorGuest, sampleInventory);
+    final matchedVins =
+        matches.map((m) => (m['vehicle'] as Map)['vin'].toString()).toSet();
+
+    expect(matches.length, 4);
+    expect(matchedVins, containsAll([
+      '1FTFW1E50TFA10001',
+      '1FTFW1E50TFA10002',
+      '1FTFW1E50TFA10003',
+      '1FTFW1E50TFA10004',
+    ]));
+    expect(matchedVins, isNot(contains('1FTFW1E50TFA10005')));
+    expect(matchedVins, isNot(contains('1FTFW1E50TFA10006')));
+
+    LocalScoutEngine.resetForTest();
+  });
 }
 
 

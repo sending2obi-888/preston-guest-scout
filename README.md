@@ -9,7 +9,7 @@ A **Material Design 3** multi-platform **Flutter (Android + Web)** application a
 1. **Material Design 3 Experience (`useMaterial3: true`)**
    - Adaptive navigation (`NavigationRail` on Googlebook/Chromebook widescreen, `NavigationBar` on compact screens) with light and dark tonal palettes.
 2. **Three Core Pages + Match Drill-Down**
-   - **Page 1 — Home (Guest & Vehicle Intake)**: Input a guest's name and target vehicle requirements using both structured specifications (Condition, Year range, Make, Model, Trim, Max Price, Max Mileage, Drivetrain, Color) and free-form Must-Have Features & Notes. Supports **unlimited guest inputs**.
+   - **Page 1 — Home (Guest & Vehicle Intake)**: Input a guest's name and target vehicle requirements using both structured specifications (Condition, Year range, Make, Model, Trim, Max Price, Max Mileage, Drivetrain, **multi-select Exterior Colors** with paint swatches & custom OEM colors matching any selected color) and free-form Must-Have Features & Notes. Supports **unlimited guest inputs**.
    - **Page 2 — Monitored Guests**: Displays every guest whose requirements are being searched twice daily (`7:30 AM` & `2:00 PM`).
      - **Clicking a guest** opens their **Vehicle Matches** screen (`GuestMatchesScreen`).
      - **Client Notes Dropdown Above Target Vehicles**: Directly above each guest's Target Vehicles section, a **Client Notes** dropdown displays the **most recent note** immediately without opening the dropdown, includes an input field to save new notes, and expands to show every saved note with the exact date & time it was added.

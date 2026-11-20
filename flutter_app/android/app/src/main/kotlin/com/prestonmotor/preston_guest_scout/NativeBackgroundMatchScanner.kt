@@ -701,6 +701,32 @@ object NativeBackgroundMatchScanner {
             }
             if (!ok) return false
         }
+
+        val rawTargetColor = target.optString("exteriorColor", "").trim()
+        if (rawTargetColor.isNotEmpty() && !rawTargetColor.equals("Any", ignoreCase = true)) {
+            val wantedColors = rawTargetColor
+                .split(Regex("[,;|/]+|\\b(?:or|and)\\b", RegexOption.IGNORE_CASE))
+                .map { it.trim().lowercase(Locale.US) }
+                .filter { it.isNotEmpty() && it != "any" && it != "any color" }
+            if (wantedColors.isNotEmpty()) {
+                val vColor = v.optString("exteriorColor", "").lowercase(Locale.US)
+                if (vColor.isEmpty()) return false
+                val anyColorMatches = wantedColors.any { c ->
+                    when (c) {
+                        "gray", "grey" -> vColor.contains("gray") || vColor.contains("grey") || vColor.contains("slate") || vColor.contains("magnetic") || vColor.contains("carbonized") || vColor.contains("charcoal")
+                        "white" -> vColor.contains("white") || vColor.contains("ivory") || vColor.contains("pearl") || vColor.contains("oxford")
+                        "black" -> vColor.contains("black") || vColor.contains("ebony") || vColor.contains("onyx") || vColor.contains("agate")
+                        "silver" -> vColor.contains("silver") || vColor.contains("ingot") || vColor.contains("billet")
+                        "blue" -> vColor.contains("blue") || vColor.contains("navy") || vColor.contains("azure") || vColor.contains("antimatter") || vColor.contains("velocity")
+                        "red" -> vColor.contains("red") || vColor.contains("ruby") || vColor.contains("crimson") || vColor.contains("burgundy")
+                        "brown" -> vColor.contains("brown") || vColor.contains("bronze") || vColor.contains("copper") || vColor.contains("mocha") || vColor.contains("kodiak")
+                        "tan" -> vColor.contains("tan") || vColor.contains("beige") || vColor.contains("sand") || vColor.contains("dune") || vColor.contains("terrain")
+                        else -> vColor.contains(c)
+                    }
+                }
+                if (!anyColorMatches) return false
+            }
+        }
         return true
     }
 

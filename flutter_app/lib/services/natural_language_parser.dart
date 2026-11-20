@@ -1350,9 +1350,45 @@ class NaturalLanguageVehicleParser {
     return '';
   }
 
+  static List<String> parseExteriorColors(Object? rawColors) {
+    final rawItems = rawColors is List
+        ? rawColors.map((c) => c?.toString() ?? '').toList()
+        : <String>[rawColors?.toString() ?? ''];
+
+    final seen = <String>{};
+    final result = <String>[];
+
+    for (final rawItem in rawItems) {
+      final parts = rawItem
+          .split(RegExp(r'[,;|/]+|\b(?:or|and)\b', caseSensitive: false))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty);
+
+      for (final p in parts) {
+        final lower = p.toLowerCase();
+        if (lower == 'any' || lower == 'any color' || lower == 'all') continue;
+        final canonical = lower == 'grey'
+            ? 'Gray'
+            : p
+                .split(RegExp(r'\s+'))
+                .where((w) => w.isNotEmpty)
+                .map(
+                  (w) => '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}',
+                )
+                .join(' ');
+        final key = canonical.toLowerCase();
+        if (seen.add(key)) {
+          result.add(canonical);
+        }
+      }
+    }
+
+    return result;
+  }
+
   static String _extractColorFromStrictNotes(String strictText) {
     if (strictText.trim().isEmpty) return '';
-    final cleaned = strictText.toLowerCase().replaceAll(
+    var cleaned = strictText.toLowerCase().replaceAll(
           RegExp(
             r'\b(?:black\s+appearance|black\s+label|black\s+widow|black\s+diamond|blue\s*cruise|blue\s+advantage|gold\s+certified|silver\s+certified|red\s+carpet|green\s+vehicle|dark\s+horse|dark\s+slate|medium\s+dark\s+slate|black\s+interior|gray\s+interior|tan\s+interior)\b',
             caseSensitive: false,
@@ -1360,21 +1396,31 @@ class NaturalLanguageVehicleParser {
           ' ',
         );
 
+    final found = <String>[];
+    final seenLower = <String>{};
+
     for (final sc in _specificColors) {
       if (cleaned.contains(sc)) {
-        return sc
+        final formatted = sc
             .split(' ')
             .map((w) => '${w[0].toUpperCase()}${w.substring(1)}')
             .join(' ');
+        if (seenLower.add(formatted.toLowerCase())) {
+          found.add(formatted);
+        }
+        cleaned = cleaned.replaceAll(sc, ' ');
       }
     }
     for (final bc in _basicColors) {
       if (RegExp('\\b$bc\\b', caseSensitive: false).hasMatch(cleaned)) {
-        if (bc == 'grey') return 'Gray';
-        return '${bc[0].toUpperCase()}${bc.substring(1)}';
+        final normalized =
+            bc == 'grey' ? 'Gray' : '${bc[0].toUpperCase()}${bc.substring(1)}';
+        if (seenLower.add(normalized.toLowerCase())) {
+          found.add(normalized);
+        }
       }
     }
-    return '';
+    return found.join(', ');
   }
 
   static ({String make, String model}) normalizeModelInput(
@@ -1650,10 +1696,19 @@ class NaturalLanguageVehicleParser {
       }
     }
 
-    String exteriorColor = (raw['exteriorColor']?.toString() ?? '').trim();
-    if (exteriorColor.isEmpty && strictNotes.isNotEmpty) {
-      exteriorColor = _extractColorFromStrictNotes(strictNotes);
-    }
+    final explicitColors = parseExteriorColors(
+      (raw['exteriorColors'] is List &&
+              (raw['exteriorColors'] as List).isNotEmpty)
+          ? raw['exteriorColors']
+          : raw['exteriorColor'],
+    );
+    final parsedNoteColors =
+        explicitColors.isEmpty && strictNotes.isNotEmpty
+            ? parseExteriorColors(_extractColorFromStrictNotes(strictNotes))
+            : const <String>[];
+    final exteriorColors =
+        explicitColors.isNotEmpty ? explicitColors : parsedNoteColors;
+    final exteriorColor = exteriorColors.join(', ');
 
     final locationHints =
         locationKeywords.where((loc) => lowerAll.contains(loc)).toList();
@@ -1677,6 +1732,7 @@ class NaturalLanguageVehicleParser {
       'maxMileage': maxMileage,
       'drivetrain': drivetrain,
       'exteriorColor': exteriorColor,
+      'exteriorColors': exteriorColors,
       'features': featuresList,
       'notes': rawNotes,
       'locationHints': locationHints,
@@ -1726,8 +1782,12 @@ class NaturalLanguageVehicleParser {
     final engine = parsed['engineSpec']?.toString() ?? '';
     if (engine.isNotEmpty) chips.add('Engine: $engine');
 
-    final color = parsed['exteriorColor']?.toString() ?? '';
-    if (color.isNotEmpty) chips.add('Color: $color');
+    final colorsList = parseExteriorColors(parsed['exteriorColors'] ?? parsed['exteriorColor']);
+    if (colorsList.length == 1) {
+      chips.add('Color: ${colorsList.first}');
+    } else if (colorsList.length > 1) {
+      chips.add('Colors: ${colorsList.join(', ')}');
+    }
 
     final maxP = parsed['maxPrice'] as double?;
     if (maxP != null && maxP > 0) {
@@ -1976,22 +2036,107 @@ class NaturalLanguageVehicleParser {
     return hay.contains(spec);
   }
 
+  static bool _doesSingleColorMatchVehicle(
+    String singleColorLower,
+    String vColorLower,
+  ) {
+    if (singleColorLower.isEmpty) return true;
+    if (singleColorLower == 'gray' || singleColorLower == 'grey') {
+      return vColorLower.contains('gray') ||
+          vColorLower.contains('grey') ||
+          vColorLower.contains('slate') ||
+          vColorLower.contains('magnetic') ||
+          vColorLower.contains('carbonized') ||
+          vColorLower.contains('charcoal') ||
+          vColorLower.contains('graphite');
+    }
+    if (singleColorLower == 'white') {
+      return vColorLower.contains('white') ||
+          vColorLower.contains('ivory') ||
+          vColorLower.contains('pearl') ||
+          vColorLower.contains('oxford');
+    }
+    if (singleColorLower == 'black') {
+      return vColorLower.contains('black') ||
+          vColorLower.contains('ebony') ||
+          vColorLower.contains('onyx') ||
+          vColorLower.contains('obsidian') ||
+          vColorLower.contains('agate');
+    }
+    if (singleColorLower == 'silver') {
+      return vColorLower.contains('silver') ||
+          vColorLower.contains('ingot') ||
+          vColorLower.contains('billet') ||
+          vColorLower.contains('aluminum');
+    }
+    if (singleColorLower == 'blue') {
+      return vColorLower.contains('blue') ||
+          vColorLower.contains('navy') ||
+          vColorLower.contains('azure') ||
+          vColorLower.contains('cobalt') ||
+          vColorLower.contains('sapphire') ||
+          vColorLower.contains('antimatter') ||
+          vColorLower.contains('velocity');
+    }
+    if (singleColorLower == 'red') {
+      return vColorLower.contains('red') ||
+          vColorLower.contains('crimson') ||
+          vColorLower.contains('ruby') ||
+          vColorLower.contains('scarlet') ||
+          vColorLower.contains('maroon') ||
+          vColorLower.contains('burgundy');
+    }
+    if (singleColorLower == 'burgundy') {
+      return vColorLower.contains('burgundy') ||
+          vColorLower.contains('maroon') ||
+          vColorLower.contains('crimson') ||
+          vColorLower.contains('wine') ||
+          vColorLower.contains('merlot');
+    }
+    if (singleColorLower == 'green') {
+      return vColorLower.contains('green') ||
+          vColorLower.contains('olive') ||
+          vColorLower.contains('emerald') ||
+          vColorLower.contains('forest') ||
+          vColorLower.contains('sage') ||
+          vColorLower.contains('eruption');
+    }
+    if (singleColorLower == 'brown') {
+      return vColorLower.contains('brown') ||
+          vColorLower.contains('bronze') ||
+          vColorLower.contains('copper') ||
+          vColorLower.contains('mocha') ||
+          vColorLower.contains('espresso') ||
+          vColorLower.contains('kodiak') ||
+          vColorLower.contains('mahogany');
+    }
+    if (singleColorLower == 'tan') {
+      return vColorLower.contains('tan') ||
+          vColorLower.contains('beige') ||
+          vColorLower.contains('sand') ||
+          vColorLower.contains('dune') ||
+          vColorLower.contains('cashmere') ||
+          vColorLower.contains('terrain');
+    }
+    if (singleColorLower == 'gold') {
+      return vColorLower.contains('gold') ||
+          vColorLower.contains('champagne') ||
+          vColorLower.contains('amber');
+    }
+    return vColorLower.contains(singleColorLower);
+  }
+
   static bool doesVehicleMatchColor(
-    String targetColor,
+    Object? targetColor,
     Map<String, dynamic> vehicle,
   ) {
-    final clean = targetColor.trim().toLowerCase();
-    if (clean.isEmpty) return true;
+    final colors = parseExteriorColors(targetColor);
+    if (colors.isEmpty) return true;
     final vColor = (vehicle['exteriorColor']?.toString() ?? '').toLowerCase();
     if (vColor.isEmpty) return false;
-    if (clean == 'gray' || clean == 'grey') {
-      return vColor.contains('gray') ||
-          vColor.contains('grey') ||
-          vColor.contains('slate') ||
-          vColor.contains('magnetic') ||
-          vColor.contains('carbonized');
-    }
-    return vColor.contains(clean);
+    return colors.any(
+      (c) => _doesSingleColorMatchVehicle(c.toLowerCase(), vColor),
+    );
   }
 
   static bool doesVehicleMatchDrivetrain(

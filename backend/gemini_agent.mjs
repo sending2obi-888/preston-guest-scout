@@ -426,6 +426,7 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     maxMileage: guest.maxMileage,
     drivetrain: guest.drivetrain,
     exteriorColor: guest.exteriorColor,
+    exteriorColors: guest.exteriorColors || [],
     strictPackages: guest.strictPackages || [],
     mustHaveFeatures: guest.features,
     additionalNotesAndSpecs: guest.notes,
@@ -434,7 +435,7 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
   const systemPrompt = `You are the Preston Automotive Group Gemini Inventory Scout Agent.
 Evaluate live vehicle listings from prestonmotor.com against the guest's exact target vehicle specifications and natural-language requirements.
 Rules:
-1. Only include vehicles that strictly satisfy EVERY specified requirement (make, exact model, exact trim, bedLength if specified, cabStyle if specified, drivetrain if specified, price cap if specified, and strict packages).
+1. Only include vehicles that strictly satisfy EVERY specified requirement (make, exact model, exact trim, bedLength if specified, cabStyle if specified, drivetrain if specified, price cap if specified, exteriorColor/exteriorColors if specified — when multiple exteriorColors are listed, a vehicle matches if its exterior color matches ANY of the listed colors — and strict packages).
 2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's specs (e.g., "6.5 ft Bed (Verified)", "XLT Trim Package", "4WD Drivetrain", "Oxford White Exterior").
 3. Provide a concise, helpful 1-2 sentence "agentSummary" explaining why this specific unit at its Preston dealership location fits the guest.`;
 

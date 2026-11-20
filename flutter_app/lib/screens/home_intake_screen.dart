@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../services/natural_language_parser.dart';
+import '../widgets/exterior_color_selector.dart';
 
 class HomeIntakeScreen extends StatefulWidget {
   final SystemStatus status;
@@ -41,6 +42,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
 
   String _condition = 'Any';
   String _drivetrain = 'Any';
+  List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
   bool _isSubmitting = false;
 
@@ -116,8 +118,16 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     setState(() {
       _condition = 'Any';
       _drivetrain = 'Any';
+      _selectedColors = [];
       _selectedFeatures.clear();
     });
+  }
+
+  String _effectiveExteriorColorString() {
+    return ExteriorColorSelector.combineSelectedAndTyped(
+      _selectedColors,
+      _exteriorColorCtrl.text,
+    );
   }
 
   double? _parseMaxPrice(String raw) {
@@ -136,17 +146,19 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
   Future<void> _submitIntake() async {
     if (!_formKey.currentState!.validate()) return;
 
+    final combinedColors = _effectiveExteriorColorString();
     final hasAnyVehicleSpec = _makeCtrl.text.trim().isNotEmpty ||
         _modelCtrl.text.trim().isNotEmpty ||
         _maxPriceCtrl.text.trim().isNotEmpty ||
         _notesCtrl.text.trim().isNotEmpty ||
+        combinedColors.isNotEmpty ||
         _selectedFeatures.isNotEmpty;
 
     if (!hasAnyVehicleSpec) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              'Please enter at least a Make, Model, Max Price, or Requirements note for the Gemini Agent.'),
+              'Please enter at least a Make, Model, Max Price, Color, or Requirements note for the Gemini Agent.'),
         ),
       );
       return;
@@ -168,7 +180,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         maxMileage: int.tryParse(
             _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), '')),
         drivetrain: _drivetrain,
-        exteriorColor: _exteriorColorCtrl.text.trim(),
+        exteriorColor: combinedColors,
         features: _selectedFeatures.toList(),
         notes: _notesCtrl.text.trim(),
       );
@@ -531,10 +543,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                         ),
                         const SizedBox(height: 14),
 
-                        // Min Year / Max Year / Max Price / Max Mileage / Color
+                        // Min Year / Max Year / Max Price / Max Mileage
                         LayoutBuilder(
                           builder: (context, constraints) {
-                            final wide = constraints.maxWidth > 720;
+                            final wide = constraints.maxWidth > 680;
                             final minYearField = TextFormField(
                               controller: _minYearCtrl,
                               keyboardType: TextInputType.number,
@@ -587,14 +599,6 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 prefixIcon: Icon(Icons.speed_outlined),
                               ),
                             );
-                            final colorField = TextFormField(
-                              controller: _exteriorColorCtrl,
-                              decoration: const InputDecoration(
-                                labelText: 'Exterior Color (Opt.)',
-                                hintText: 'White, Blue, Gray...',
-                                prefixIcon: Icon(Icons.palette_outlined),
-                              ),
-                            );
 
                             if (wide) {
                               return Row(
@@ -606,8 +610,6 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                   Expanded(flex: 3, child: maxPriceField),
                                   const SizedBox(width: 10),
                                   Expanded(flex: 3, child: maxMilesField),
-                                  const SizedBox(width: 10),
-                                  Expanded(flex: 3, child: colorField),
                                 ],
                               );
                             }
@@ -628,10 +630,18 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                     Expanded(child: maxMilesField),
                                   ],
                                 ),
-                                const SizedBox(height: 12),
-                                colorField,
                               ],
                             );
+                          },
+                        ),
+                        const SizedBox(height: 16),
+
+                        // Multi-Select Exterior Colors Picker
+                        ExteriorColorSelector(
+                          selectedColors: _selectedColors,
+                          customColorController: _exteriorColorCtrl,
+                          onChanged: (colors) {
+                            setState(() => _selectedColors = colors);
                           },
                         ),
                       ],
@@ -744,7 +754,8 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             ),
                           ),
                         ),
-                        if (_notesCtrl.text.trim().isNotEmpty) ...[
+                        if (_notesCtrl.text.trim().isNotEmpty ||
+                            _selectedColors.isNotEmpty) ...[
                           const SizedBox(height: 12),
                           _buildParsedCriteriaBanner(scheme, textTheme),
                         ],
@@ -836,7 +847,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), ''),
       ),
       'drivetrain': _drivetrain,
-      'exteriorColor': _exteriorColorCtrl.text.trim(),
+      'exteriorColor': _effectiveExteriorColorString(),
       'features': _selectedFeatures.toList(),
       'notes': _notesCtrl.text.trim(),
     });

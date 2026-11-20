@@ -2199,7 +2199,7 @@ class LocalScoutEngine {
                   'parts': [
                     {
                       'text':
-                          'Evaluate live prestonmotor.com vehicles against the guest\'s exact requirements (make, exact model, exact trim, bedLength, cabStyle, drivetrain, budget). Only include vehicles that satisfy every specified criterion. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
+                          'Evaluate live prestonmotor.com vehicles against the guest\'s exact requirements (make, exact model, exact trim, bedLength, cabStyle, drivetrain, exteriorColors — matching ANY listed color when multiple colors are chosen — and budget). Only include vehicles that satisfy every specified criterion. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
                     }
                   ]
                 },
@@ -2218,6 +2218,9 @@ class LocalScoutEngine {
                             'bedLength': guest.bedLength,
                             'cabStyle': guest.cabStyle,
                             'drivetrain': guest.drivetrain,
+                            'exteriorColor': guest.exteriorColor,
+                            'exteriorColors': NaturalLanguageVehicleParser
+                                .parseExteriorColors(guest.exteriorColor),
                             'maxPrice': guest.maxPrice,
                             'features': guest.features,
                             'notes': guest.notes,
