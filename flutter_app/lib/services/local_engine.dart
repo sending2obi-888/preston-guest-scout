@@ -152,6 +152,62 @@ class LocalScoutEngine {
 
     _startOnDeviceScheduler();
     await _syncWidget();
+    unawaited(_repairZeroScannedGuestsIfNeeded());
+  }
+
+  static int _dealerId = 19398;
+  static int _newPageId = 1446609;
+  static int _usedPageId = 1446611;
+  static DateTime? _configFetchedAt;
+
+  static double? _asDouble(Object? raw) {
+    if (raw == null) return null;
+    if (raw is num) return raw.toDouble();
+    final cleaned = raw.toString().replaceAll(RegExp(r'[^0-9.\-]'), '').trim();
+    if (cleaned.isEmpty) return null;
+    return double.tryParse(cleaned);
+  }
+
+  static int? _asInt(Object? raw) {
+    if (raw == null) return null;
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    final cleaned = raw.toString().replaceAll(RegExp(r'[^0-9\-]'), '').trim();
+    if (cleaned.isEmpty) return null;
+    return int.tryParse(cleaned) ?? _asDouble(raw)?.round();
+  }
+
+  static bool _isRepairingZeroScannedGuests = false;
+
+  /// Automatically re-runs initial search for any active guest whose previous scan
+  /// recorded "Scanned 0 live prestonmotor.com vehicles" due to string-typed Length fields.
+  static Future<void> _repairZeroScannedGuestsIfNeeded() async {
+    if (kIsWeb || _isRunningBatch || _isRepairingZeroScannedGuests) return;
+    final affectedIds = _guests
+        .where((g) =>
+            g['active'] != false &&
+            (g['lastSearchSummary']?.toString() ?? '')
+                .startsWith('Scanned 0 live prestonmotor.com vehicles'))
+        .map((g) => g['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList();
+    if (affectedIds.isEmpty) return;
+
+    _isRepairingZeroScannedGuests = true;
+    try {
+      for (final gid in affectedIds) {
+        if (!_initialized) return;
+        try {
+          await runSearchForSingleGuest(
+            gid,
+            slotLabel: 'Inventory Sync Repair',
+            isInitialSearch: true,
+          );
+        } catch (_) {}
+      }
+    } finally {
+      _isRepairingZeroScannedGuests = false;
+    }
   }
 
   /// Reloads the persisted on-device store when the Android app resumes from background
@@ -1526,6 +1582,64 @@ class LocalScoutEngine {
         .trim();
   }
 
+  static Future<void> _refreshPrestonConfig(
+    http.Client client, {
+    bool force = false,
+  }) async {
+    final now = DateTime.now();
+    if (!force &&
+        _configFetchedAt != null &&
+        now.difference(_configFetchedAt!) < const Duration(hours: 6)) {
+      return;
+    }
+    try {
+      final results = await Future.wait([
+        client
+            .get(
+              Uri.parse('$_prestonBase/searchnew.aspx'),
+              headers: const {
+                'User-Agent':
+                    'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36',
+              },
+            )
+            .timeout(const Duration(seconds: 10)),
+        client
+            .get(
+              Uri.parse('$_prestonBase/searchused.aspx'),
+              headers: const {
+                'User-Agent':
+                    'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36',
+              },
+            )
+            .timeout(const Duration(seconds: 10)),
+      ]);
+
+      Map<String, dynamic>? extractSrpModel(String html) {
+        final m = RegExp(
+          r'''id=["']dlron-srp-model["'][^>]*>([\s\S]*?)</script>''',
+          caseSensitive: false,
+        ).firstMatch(html);
+        if (m == null) return null;
+        final raw = jsonDecode((m.group(1) ?? '').trim());
+        return raw is Map ? Map<String, dynamic>.from(raw) : null;
+      }
+
+      final newModel =
+          results[0].statusCode == 200 ? extractSrpModel(results[0].body) : null;
+      final usedModel =
+          results[1].statusCode == 200 ? extractSrpModel(results[1].body) : null;
+
+      _dealerId = _asInt(newModel?['DealerId']) ??
+          _asInt(usedModel?['DealerId']) ??
+          _dealerId;
+      _newPageId = _asInt(newModel?['PageId']) ?? _newPageId;
+      _usedPageId = _asInt(usedModel?['PageId']) ?? _usedPageId;
+      _configFetchedAt = now;
+    } catch (_) {
+      _configFetchedAt = now;
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> _fetchPrestonCandidates(
       GuestProfile guest) async {
     final normalizedSpec = NaturalLanguageVehicleParser.parseCriteriaMap({
@@ -1546,25 +1660,14 @@ class LocalScoutEngine {
       'notes': guest.notes,
     });
 
-    final cond = (normalizedSpec['condition']?.toString() ?? 'Any').toLowerCase();
-    final pageIds = <int>[];
-    if (cond == 'new') {
-      pageIds.add(1446609);
-    } else if (cond == 'pre-owned' ||
-        cond == 'used' ||
-        cond == 'cpo' ||
-        cond == 'certified pre-owned') {
-      pageIds.add(1446611);
-    } else {
-      pageIds.addAll([1446609, 1446611]);
-    }
-
+    final cond =
+        (normalizedSpec['condition']?.toString() ?? 'Any').toLowerCase();
     final byVin = <String, Map<String, dynamic>>{};
     final make = (normalizedSpec['make']?.toString() ?? '').trim();
     final model = (normalizedSpec['model']?.toString() ?? '').trim();
     final trim = (normalizedSpec['trim']?.toString() ?? '').trim();
     final bedLength = (normalizedSpec['bedLength']?.toString() ?? '').trim();
-    final maxPrice = (normalizedSpec['maxPrice'] as num?)?.toDouble();
+    final maxPrice = _asDouble(normalizedSpec['maxPrice']);
     final variants =
         NaturalLanguageVehicleParser.expandPrestonModelVariants(make, model);
     final bedFacets =
@@ -1572,6 +1675,20 @@ class LocalScoutEngine {
 
     final client = http.Client();
     try {
+      await _refreshPrestonConfig(client);
+
+      final pageIds = <int>[];
+      if (cond == 'new') {
+        pageIds.add(_newPageId);
+      } else if (cond == 'pre-owned' ||
+          cond == 'used' ||
+          cond == 'cpo' ||
+          cond == 'certified pre-owned') {
+        pageIds.add(_usedPageId);
+      } else {
+        pageIds.addAll([_newPageId, _usedPageId]);
+      }
+
       for (final pid in pageIds) {
         final batch = <Map<String, dynamic>>[];
 
@@ -1651,8 +1768,9 @@ class LocalScoutEngine {
 
         // Strategy 4: Broad full-catalog fallback
         if (batch.isEmpty) {
-          final fallback =
-              make.isNotEmpty ? <String, String>{'Make': make} : <String, String>{};
+          final fallback = make.isNotEmpty
+              ? <String, String>{'Make': make}
+              : <String, String>{};
           batch.addAll(await _queryAllCosmosPages(
             client,
             pid,
@@ -1699,7 +1817,7 @@ class LocalScoutEngine {
     };
     final uri = Uri.https(
       _prestonHost,
-      '/api/vhcliaa/vehicle-pages/cosmos/srp/vehicles/19398/$pageId',
+      '/api/vhcliaa/vehicle-pages/cosmos/srp/vehicles/$_dealerId/$pageId',
       queryParams,
     );
 
@@ -1719,6 +1837,10 @@ class LocalScoutEngine {
           return (vehicles: <Map<String, dynamic>>[], totalPages: 1);
         }
 
+        if (res.body.trim().isEmpty) {
+          return (vehicles: <Map<String, dynamic>>[], totalPages: 1);
+        }
+
         final data = jsonDecode(res.body) as Map<String, dynamic>;
         final cards = data['DisplayCards'] as List<dynamic>? ?? [];
         final out = <Map<String, dynamic>>[];
@@ -1726,22 +1848,24 @@ class LocalScoutEngine {
           if (item is! Map || item['IsAdCard'] == true) continue;
           final vc = item['VehicleCard'];
           if (vc is! Map) continue;
-          final parsed = _parseVehicleCard(
-            Map<String, dynamic>.from(vc),
-            facetBedLength: facetBedLength,
-          );
-          if (parsed != null) out.add(parsed);
+          try {
+            final parsed = _parseVehicleCard(
+              Map<String, dynamic>.from(vc),
+              facetBedLength: facetBedLength,
+            );
+            if (parsed != null) out.add(parsed);
+          } catch (_) {
+            // Isolate individual malformed VehicleCard so remaining vehicles on the page still parse
+          }
         }
 
         final paging =
             (data['Paging'] as Map?)?['PaginationDataModel'] as Map?;
-        final totalCount =
-            (paging?['TotalCount'] as num?)?.toInt() ?? out.length;
-        final pageSize = (paging?['PageSize'] as num?)?.toInt() ?? 96;
+        final totalCount = _asInt(paging?['TotalCount']) ?? out.length;
+        final pageSize = _asInt(paging?['PageSize']) ?? 96;
         final computedPages =
             pageSize > 0 ? (totalCount / pageSize).ceil() : 1;
-        final rawTotalPages =
-            (paging?['TotalPages'] as num?)?.toInt() ?? computedPages;
+        final rawTotalPages = _asInt(paging?['TotalPages']) ?? computedPages;
         final totalPages = rawTotalPages.clamp(1, 25);
 
         return (vehicles: out, totalPages: totalPages);
@@ -1804,12 +1928,12 @@ class LocalScoutEngine {
 
         if (maxPrice != null && maxPrice > 0 && page.vehicles.length >= 40) {
           final priced = page.vehicles
-              .where((v) => ((v['price'] as num?)?.toDouble() ?? 0) > 0)
+              .where((v) => (_asDouble(v['price']) ?? 0) > 0)
               .toList();
           if (priced.length >= 40 &&
               priced.every((v) {
-                final p = (v['price'] as num).toDouble();
-                final m = (v['msrp'] as num?)?.toDouble();
+                final p = _asDouble(v['price']) ?? 0.0;
+                final m = _asDouble(v['msrp']);
                 return p > maxPrice * 1.25 &&
                     (m == null || m > maxPrice * 1.25);
               })) {
@@ -1879,8 +2003,8 @@ class LocalScoutEngine {
       } catch (_) {}
     }
 
-    final vcInternetPrice = (vc['VehicleInternetPrice'] as num?)?.toDouble();
-    final vcMsrp = (vc['VehicleMsrp'] as num?)?.toDouble();
+    final vcInternetPrice = _asDouble(vc['VehicleInternetPrice']);
+    final vcMsrp = _asDouble(vc['VehicleMsrp']);
     finalPrice ??= (vcInternetPrice != null && vcInternetPrice > 0)
         ? vcInternetPrice
         : ((vcMsrp != null && vcMsrp > 0) ? vcMsrp : null);
@@ -1950,26 +2074,35 @@ class LocalScoutEngine {
     final listingUrl =
         rawDetail.startsWith('http') ? rawDetail : '$_prestonBase$rawDetail';
 
-    final isCpo = vc['VehicleCpo'] == true;
+    final isCpo = vc['VehicleCpo'] == true ||
+        vc['VehicleCpo']?.toString().toLowerCase() == 'true';
     final condition = isCpo
         ? 'Certified Pre-Owned'
         : (vc['VehicleCondition']?.toString() ??
             (vc['VehicleType'] == 'new' ? 'New' : 'Pre-Owned'));
 
+    final parsedYear = _asInt(vc['VehicleYear']);
+    final fallbackTitle =
+        [parsedYear, vc['VehicleMake'], vc['VehicleModel']]
+            .where((x) => x != null && x.toString().trim().isNotEmpty)
+            .join(' ')
+            .trim();
+    final rawTitle = (vc['VehicleName']?.toString() ?? '').trim();
+
     return {
       'vin': vin,
       'stockNumber': vc['VehicleStockNumber']?.toString() ?? '',
-      'title': vc['VehicleName']?.toString() ?? '',
-      'year': (vc['VehicleYear'] as num?)?.toInt(),
-      'make': vc['VehicleMake']?.toString() ?? '',
-      'model': vc['VehicleModel']?.toString() ?? '',
+      'title': rawTitle.isNotEmpty ? rawTitle : fallbackTitle,
+      'year': parsedYear,
+      'make': (vc['VehicleMake']?.toString() ?? '').trim(),
+      'model': (vc['VehicleModel']?.toString() ?? '').trim(),
       'trim': (vc['VehicleTrim'] ?? vc['VehicleRuleAdjustedTrim'] ?? '')
           .toString()
           .trim(),
       'bodyStyle': bodyStyle,
       'bedLength': bedLength,
       'cabStyle': cabStyle,
-      'vehicleLength': (vc['Length'] as num?)?.toDouble(),
+      'vehicleLength': _asDouble(vc['Length']),
       'condition': condition,
       'price': finalPrice,
       'msrp': msrp,
@@ -1977,7 +2110,7 @@ class LocalScoutEngine {
       'location': _formatDealershipLocation(vc),
       'dealerCity': (vc['DealerLocatedAtCity']?.toString() ?? '').trim(),
       'dealerState': (vc['DealerLocatedAtState']?.toString() ?? '').trim(),
-      'mileage': (vc['VehicleMileage'] as num?)?.toInt() ?? 0,
+      'mileage': _asInt(vc['VehicleMileage']) ?? 0,
       'drivetrain': drivetrain,
       'engine': vc['VehicleEngine']?.toString() ?? '',
       'fuelType': vc['VehicleFuelType']?.toString() ?? '',
@@ -2025,10 +2158,10 @@ class LocalScoutEngine {
     final targetDt = (spec['drivetrain']?.toString() ?? 'Any').trim();
     final targetColor = (spec['exteriorColor']?.toString() ?? '').trim();
     final targetCondition = (spec['condition']?.toString() ?? 'Any').trim();
-    final minYear = (spec['minYear'] as num?)?.toInt();
-    final maxYear = (spec['maxYear'] as num?)?.toInt();
-    final maxPrice = (spec['maxPrice'] as num?)?.toDouble();
-    final maxMileage = (spec['maxMileage'] as num?)?.toInt();
+    final minYear = _asInt(spec['minYear']);
+    final maxYear = _asInt(spec['maxYear']);
+    final maxPrice = _asDouble(spec['maxPrice']);
+    final maxMileage = _asInt(spec['maxMileage']);
     final locationHints = (spec['locationHints'] as List<dynamic>? ?? const [])
         .map((e) => e.toString())
         .toList();
@@ -2061,7 +2194,10 @@ class LocalScoutEngine {
               (v['fullCommentsSearchText'] ?? v['commentsSummary'] ?? '')
                   .toString(),
         );
-        if (vBed != targetBed) return false;
+        if (vBed.isEmpty ||
+            vBed.replaceAll("'", '') != targetBed.replaceAll("'", '')) {
+          return false;
+        }
       }
 
       if (targetCab.isNotEmpty &&
@@ -2102,7 +2238,7 @@ class LocalScoutEngine {
         return false;
       }
 
-      final yr = v['year'] as int?;
+      final yr = _asInt(v['year']);
       if (minYear != null && yr != null && yr < minYear) {
         return false;
       }
@@ -2111,8 +2247,8 @@ class LocalScoutEngine {
       }
 
       if (maxPrice != null && maxPrice > 0) {
-        final pr = (v['price'] as num?)?.toDouble();
-        final msrp = (v['msrp'] as num?)?.toDouble();
+        final pr = _asDouble(v['price']);
+        final msrp = _asDouble(v['msrp']);
         final effectivePrice = (pr != null && pr > 0)
             ? pr
             : ((msrp != null && msrp > 0) ? msrp : null);
@@ -2121,7 +2257,7 @@ class LocalScoutEngine {
         }
       }
 
-      final mi = (v['mileage'] as num?)?.toInt() ?? 0;
+      final mi = _asInt(v['mileage']) ?? 0;
       if (maxMileage != null && mi > maxMileage) {
         return false;
       }
@@ -2160,7 +2296,7 @@ class LocalScoutEngine {
     final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
     final targetDt = (spec['drivetrain']?.toString() ?? 'Any').trim();
     final targetColor = (spec['exteriorColor']?.toString() ?? '').trim();
-    final maxPrice = (spec['maxPrice'] as num?)?.toDouble();
+    final maxPrice = _asDouble(spec['maxPrice']);
     final strictPackages =
         (spec['strictPackages'] as List<dynamic>? ?? const [])
             .map((e) => e.toString())
@@ -2220,7 +2356,7 @@ class LocalScoutEngine {
                 .trim());
       }
 
-      final pr = (v['price'] as num?)?.toDouble();
+      final pr = _asDouble(v['price']);
       if (maxPrice != null && pr != null) {
         final diff = (maxPrice - pr).round();
         matched.add(diff > 0
@@ -2275,13 +2411,11 @@ class LocalScoutEngine {
     }
 
     out.sort((a, b) {
-      final sa = (a['matchScore'] as num?)?.toInt() ?? 80;
-      final sb = (b['matchScore'] as num?)?.toInt() ?? 80;
+      final sa = _asInt(a['matchScore']) ?? 80;
+      final sb = _asInt(b['matchScore']) ?? 80;
       if (sb != sa) return sb.compareTo(sa);
-      final pa =
-          ((a['vehicle'] as Map)['price'] as num?)?.toDouble() ?? double.maxFinite;
-      final pb =
-          ((b['vehicle'] as Map)['price'] as num?)?.toDouble() ?? double.maxFinite;
+      final pa = _asDouble((a['vehicle'] as Map)['price']) ?? double.maxFinite;
+      final pb = _asDouble((b['vehicle'] as Map)['price']) ?? double.maxFinite;
       return pa.compareTo(pb);
     });
 
@@ -2357,7 +2491,7 @@ class LocalScoutEngine {
             .toList();
 
         final uri = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey');
+            'https://generativelanguage.googleapis.com/v1beta/models/${Uri.encodeComponent(model)}:generateContent?key=${Uri.encodeComponent(apiKey)}');
         final res = await http
             .post(
               uri,
@@ -2403,6 +2537,34 @@ class LocalScoutEngine {
                 'generationConfig': {
                   'temperature': 0.1,
                   'responseMimeType': 'application/json',
+                  'responseSchema': {
+                    'type': 'OBJECT',
+                    'properties': {
+                      'overallSummary': {'type': 'STRING'},
+                      'matches': {
+                        'type': 'ARRAY',
+                        'items': {
+                          'type': 'OBJECT',
+                          'properties': {
+                            'vin': {'type': 'STRING'},
+                            'matchScore': {'type': 'INTEGER'},
+                            'matchedFeatures': {
+                              'type': 'ARRAY',
+                              'items': {'type': 'STRING'},
+                            },
+                            'agentSummary': {'type': 'STRING'},
+                          },
+                          'required': [
+                            'vin',
+                            'matchScore',
+                            'matchedFeatures',
+                            'agentSummary',
+                          ],
+                        },
+                      },
+                    },
+                    'required': ['overallSummary', 'matches'],
+                  },
                 }
               }),
             )
@@ -2415,9 +2577,6 @@ class LocalScoutEngine {
               '{}';
           final parsed = jsonDecode(text) as Map<String, dynamic>;
           final byVin = {for (final v in filtered) v['vin'].toString(): v};
-          final sampledVins = {
-            for (final v in sampled) v['vin'].toString(),
-          };
           final geminiByVin = <String, Map<String, dynamic>>{};
 
           for (final m in (parsed['matches'] as List<dynamic>? ?? [])) {
@@ -2425,9 +2584,10 @@ class LocalScoutEngine {
             final vin = m['vin']?.toString() ?? '';
             final v = byVin[vin];
             if (v == null || !detByVin.containsKey(vin)) continue;
-            final detFeatures = (detByVin[vin]?['matchedFeatures'] as List<dynamic>? ?? const [])
-                .map((e) => e.toString())
-                .toList();
+            final detFeatures =
+                (detByVin[vin]?['matchedFeatures'] as List<dynamic>? ?? const [])
+                    .map((e) => e.toString())
+                    .toList();
             final combinedFeatures = <String>{
               if (guest.bedLength.isNotEmpty)
                 '${NaturalLanguageVehicleParser.formatBedLengthLabel(guest.bedLength)} (Verified)',
@@ -2440,28 +2600,24 @@ class LocalScoutEngine {
 
             geminiByVin[vin] = {
               'vehicle': v,
-              'matchScore': (m['matchScore'] as num?)?.toInt() ?? 90,
+              'matchScore': _asInt(m['matchScore']) ?? 90,
               'matchedFeatures': combinedFeatures,
               'agentSummary': m['agentSummary']?.toString() ??
                   (detByVin[vin]?['agentSummary']?.toString() ?? ''),
             };
           }
 
+          final hasCustomNotes = guest.notes.trim().isNotEmpty;
           List<Map<String, dynamic>> merged;
-          if (filtered.length <= 30) {
-            merged = geminiByVin.isNotEmpty
-                ? geminiByVin.values.toList()
-                : fullDeterministic;
+          if (geminiByVin.isEmpty) {
+            merged = fullDeterministic;
+          } else if (filtered.length <= 30 && hasCustomNotes) {
+            merged = geminiByVin.values.toList();
           } else {
-            merged = [];
-            for (final dm in fullDeterministic) {
+            merged = fullDeterministic.map((dm) {
               final vin = (dm['vehicle'] as Map)['vin'].toString();
-              if (geminiByVin.containsKey(vin)) {
-                merged.add(geminiByVin[vin]!);
-              } else if (!sampledVins.contains(vin)) {
-                merged.add(dm);
-              }
-            }
+              return geminiByVin[vin] ?? dm;
+            }).toList();
           }
 
           final locCount = merged
@@ -2658,7 +2814,7 @@ class LocalScoutEngine {
           vehicleTitle: titleStr,
           message: message,
           location: m['location']?.toString() ?? 'Preston Automotive Group',
-          price: (m['price'] as num?)?.toDouble(),
+          price: _asDouble(m['price']),
           createdAt: m['foundAt']?.toString() ?? nowIso,
           read: false,
         );
@@ -2676,6 +2832,7 @@ class LocalScoutEngine {
       await MatchNotificationService.instance
           .dispatchNewNotifications(cloudAlerts);
     }
+    unawaited(_repairZeroScannedGuestsIfNeeded());
     return res;
   }
 
@@ -3640,6 +3797,8 @@ class LocalScoutEngine {
     _scheduleTimer?.cancel();
     _scheduleTimer = null;
     _initialized = false;
+    _isRepairingZeroScannedGuests = false;
+    _configFetchedAt = null;
     _guests = [];
     _matches = [];
     _notifications = [];
@@ -3654,6 +3813,13 @@ class LocalScoutEngine {
     MatchNotificationService.instance.resetForTest();
     CalendarService.instance.resetForTest();
   }
+
+  @visibleForTesting
+  static Map<String, dynamic>? parseVehicleCardForTest(
+    Map<String, dynamic> vc, {
+    String facetBedLength = '',
+  }) =>
+      _parseVehicleCard(vc, facetBedLength: facetBedLength);
 
   @visibleForTesting
   static Map<String, dynamic> normalizeSpecsForTest(Map<String, dynamic> raw) =>

@@ -2705,6 +2705,147 @@ void main() {
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
   });
+
+  test(
+      'F-150 search parses live DealerOn string-typed Length fields, resolves F-150 across Make/Model/Notes, and returns all 105+ matching F-150s instead of 0',
+      () async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    // 1. Real prestonmotor.com DealerOn VehicleCard payload where "Length": "227.7" is a JSON String
+    final liveF150RegularCabCard = <String, dynamic>{
+      'VehicleVin': '1FTMF1KP4TKD16220',
+      'VehicleStockNumber': 'K60110',
+      'VehicleYear': '2026',
+      'VehicleMake': 'Ford',
+      'VehicleModel': 'F-150',
+      'VehicleTrim': 'XL',
+      'VehicleName': '2026 Ford F-150 XL',
+      'VehicleBodyStyle': 'Regular Cab Pickup',
+      'VehicleCondition': 'New',
+      'VehicleInternetPrice': '41290',
+      'VehicleMsrp': '44185',
+      'VehicleMileage': '8',
+      'Length': '227.7',
+      'VehicleLocationLabel': 'Preston Ford of Hurlock',
+      'DealerLocatedAtCity': 'Hurlock',
+      'DealerLocatedAtState': 'MD',
+      'VehicleDriveTrain': '4WD',
+      'VehicleEngine': '2.7L V6 EcoBoost',
+      'ExteriorColorLabel': 'Oxford White',
+      'InteriorColorLabel': 'Medium Dark Slate',
+      'VehicleComments': '2026 Ford F-150 XL Regular Cab 4x4 141WB 8ft Box.',
+    };
+
+    final parsedCard =
+        LocalScoutEngine.parseVehicleCardForTest(liveF150RegularCabCard);
+    expect(parsedCard, isNotNull);
+    expect(parsedCard!['vin'], '1FTMF1KP4TKD16220');
+    expect(parsedCard['make'], 'Ford');
+    expect(parsedCard['model'], 'F-150');
+    expect(parsedCard['year'], 2026);
+    expect(parsedCard['price'], 41290.0);
+    expect(parsedCard['vehicleLength'], 227.7);
+    expect(parsedCard['bedLength'], "8'");
+
+    // 2. Verify F-150 input variations (in Model, Make, or Notes) all resolve to Make=Ford, Model=F-150
+    for (final rawInput in <Map<String, dynamic>>[
+      {'make': 'Ford', 'model': 'F-150'},
+      {'make': 'ford', 'model': 'F150'},
+      {'make': '', 'model': 'F-150'},
+      {'make': 'F-150', 'model': ''},
+      {'make': 'Ford F-150', 'model': ''},
+      {'make': '', 'model': '', 'notes': 'F-150'},
+    ]) {
+      final norm = NaturalLanguageVehicleParser.parseCriteriaMap(rawInput);
+      expect(norm['make'], 'Ford', reason: 'Failed make for $rawInput');
+      expect(norm['model'], 'F-150', reason: 'Failed model for $rawInput');
+    }
+
+    // 3. Bed-length facet & comparison normalization handles both '6.5' (chip) and "6.5'" (parser)
+    expect(
+      NaturalLanguageVehicleParser.bedLengthToCosmosFacetValues('6.5'),
+      equals(const ["6-1/2' Box"]),
+    );
+    expect(
+      NaturalLanguageVehicleParser.bedLengthToCosmosFacetValues("6.5'"),
+      equals(const ["6-1/2' Box"]),
+    );
+
+    // 4. Searching for "F-150" across 105 live-format F-150s returns all 105 matches (never 0, never capped at 30)
+    final stores = const [
+      'Preston Ford of Hurlock',
+      'Preston Ford of Denton',
+      'Preston Ford of Keller',
+      'Preston Ford West',
+      'Boulevard Ford of Millsboro',
+      'Boulevard Ford of Lewes',
+    ];
+    final trims = const ['XL', 'STX', 'XLT', 'Lariat', 'King Ranch', 'Platinum'];
+    final live105F150Cards = List<Map<String, dynamic>>.generate(105, (i) {
+      final vinSuffix = (100000 + i).toString();
+      final card = <String, dynamic>{
+        'VehicleVin': '1FTFW3L87TK$vinSuffix',
+        'VehicleStockNumber': 'F${6000 + i}',
+        'VehicleYear': 2025 + (i % 2),
+        'VehicleMake': 'Ford',
+        'VehicleModel': 'F-150',
+        'VehicleTrim': trims[i % trims.length],
+        'VehicleName':
+            '${2025 + (i % 2)} Ford F-150 ${trims[i % trims.length]}',
+        'VehicleBodyStyle': 'SuperCrew',
+        'VehicleCondition': i < 85 ? 'New' : 'Pre-Owned',
+        'VehicleInternetPrice': '${43500 + (i * 250)}',
+        'VehicleMsrp': '${46500 + (i * 250)}',
+        'VehicleMileage': i < 85 ? '12' : '${18400 + i * 100}',
+        'Length': i % 3 == 0 ? '243.5' : '231.7',
+        'VehicleLocationLabel': stores[i % stores.length],
+        'DealerLocatedAtCity': 'Hurlock',
+        'DealerLocatedAtState': 'MD',
+        'VehicleDriveTrain': '4WD',
+        'ExteriorColorLabel': i % 2 == 0 ? 'Oxford White' : 'Carbonized Gray',
+      };
+      return LocalScoutEngine.parseVehicleCardForTest(card)!;
+    });
+
+    final created = await LocalScoutEngine.createGuest(
+      name: 'F-150 Shopper',
+      make: '',
+      model: 'F-150',
+      mockCandidatesOverride: live105F150Cards,
+    );
+
+    expect(created.guest.make, 'Ford');
+    expect(created.guest.model, 'F-150');
+    expect(created.matchesFound, 105);
+    expect(created.guest.matchCount, 105);
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
 }
+
 
 

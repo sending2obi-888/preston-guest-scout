@@ -1154,18 +1154,19 @@ class NaturalLanguageVehicleParser {
   }
 
   static List<String> bedLengthToCosmosFacetValues(String bedLength) {
-    switch (bedLength) {
-      case "5'":
+    final clean = bedLength.trim().replaceAll(RegExp(r"'$"), '');
+    switch (clean) {
+      case '5':
         return const ['5-ft bed'];
-      case "5.5'":
+      case '5.5':
         return const ["5-1/2' Box", '5.5-Ft.'];
-      case "6'":
+      case '6':
         return const ['6-ft bed'];
-      case "6.5'":
+      case '6.5':
         return const ["6-1/2' Box"];
-      case "6.75'":
+      case '6.75':
         return const ["6 3/4' Box"];
-      case "8'":
+      case '8':
         return const ["8' Box"];
       default:
         return const [];
@@ -1423,23 +1424,69 @@ class NaturalLanguageVehicleParser {
     return found.join(', ');
   }
 
+  static String _canonicalizeKnownMake(String rawMake) {
+    final s = rawMake.trim();
+    if (s.isEmpty) return '';
+    final lower = s.toLowerCase();
+    for (final entry in knownMakes.entries) {
+      if (entry.key.toLowerCase() == lower || entry.value.contains(lower)) {
+        return entry.key;
+      }
+    }
+    return '';
+  }
+
+  static double? _parseSafeDouble(Object? raw) {
+    if (raw == null) return null;
+    if (raw is num) return raw.toDouble();
+    final cleaned = raw.toString().replaceAll(RegExp(r'[^0-9.\-]'), '').trim();
+    if (cleaned.isEmpty) return null;
+    return double.tryParse(cleaned);
+  }
+
+  static int? _parseSafeInt(Object? raw) {
+    if (raw == null) return null;
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    final cleaned = raw.toString().replaceAll(RegExp(r'[^0-9\-]'), '').trim();
+    if (cleaned.isEmpty) return null;
+    return int.tryParse(cleaned) ?? _parseSafeDouble(raw)?.round();
+  }
+
   static ({String make, String model}) normalizeModelInput(
     String rawMake,
     String rawModel,
   ) {
     final cleanMake = rawMake.trim();
     final cleanModel = rawModel.trim();
-    if (cleanModel.isEmpty) return (make: cleanMake, model: '');
+    final exactMake = _canonicalizeKnownMake(cleanMake);
+
+    if (cleanModel.isEmpty) {
+      if (exactMake.isNotEmpty) return (make: exactMake, model: '');
+      if (cleanMake.isNotEmpty) {
+        for (final entry in _modelPatterns) {
+          if (entry.regex.hasMatch(cleanMake)) {
+            return (make: entry.make, model: entry.model);
+          }
+        }
+      }
+      return (make: cleanMake, model: '');
+    }
 
     for (final entry in _modelPatterns) {
       if (entry.regex.hasMatch(cleanModel)) {
         return (
-          make: cleanMake.isNotEmpty ? cleanMake : entry.make,
+          make: exactMake.isNotEmpty
+              ? exactMake
+              : (entry.make.isNotEmpty ? entry.make : cleanMake),
           model: entry.model,
         );
       }
     }
-    return (make: cleanMake, model: cleanModel);
+    return (
+      make: exactMake.isNotEmpty ? exactMake : cleanMake,
+      model: cleanModel,
+    );
   }
 
   static String extractTrimFromText(String text, {String currentModel = ''}) {
@@ -1582,8 +1629,15 @@ class NaturalLanguageVehicleParser {
           canonicalTrim.toLowerCase() == trim.toLowerCase()) {
         trim = canonicalTrim;
       }
-    } else if (strictCombined.isNotEmpty) {
-      trim = extractTrimFromText(strictCombined, currentModel: model);
+    } else {
+      final inlineMakeModel =
+          '${raw['make'] ?? ''} ${raw['model'] ?? ''}'.trim();
+      if (inlineMakeModel.isNotEmpty) {
+        trim = extractTrimFromText(inlineMakeModel, currentModel: model);
+      }
+      if (trim.isEmpty && strictCombined.isNotEmpty) {
+        trim = extractTrimFromText(strictCombined, currentModel: model);
+      }
     }
 
     final explicitBed = (raw['bedLength']?.toString() ?? '').trim();
@@ -1603,7 +1657,7 @@ class NaturalLanguageVehicleParser {
         ? explicitEngine
         : extractEngineSpecFromText(strictNotes);
 
-    double? maxPrice = (raw['maxPrice'] as num?)?.toDouble();
+    double? maxPrice = _parseSafeDouble(raw['maxPrice']);
     if (maxPrice != null && maxPrice <= 0) maxPrice = null;
     if (maxPrice != null && maxPrice > 0 && maxPrice < 500) {
       maxPrice = maxPrice * 1000.0;
@@ -1631,8 +1685,8 @@ class NaturalLanguageVehicleParser {
       }
     }
 
-    int? minYear = (raw['minYear'] as num?)?.toInt();
-    int? maxYear = (raw['maxYear'] as num?)?.toInt();
+    int? minYear = _parseSafeInt(raw['minYear']);
+    int? maxYear = _parseSafeInt(raw['maxYear']);
     if (minYear != null && minYear <= 0) minYear = null;
     if (maxYear != null && maxYear <= 0) maxYear = null;
     if (minYear == null && maxYear == null && strictNotes.isNotEmpty) {
@@ -1641,7 +1695,7 @@ class NaturalLanguageVehicleParser {
       maxYear = yr.maxYear;
     }
 
-    int? maxMileage = (raw['maxMileage'] as num?)?.toInt();
+    int? maxMileage = _parseSafeInt(raw['maxMileage']);
     if (maxMileage != null && maxMileage <= 0) maxMileage = null;
     if (maxMileage == null && combinedRaw.isNotEmpty) {
       maxMileage = _extractMaxMileage(combinedRaw);

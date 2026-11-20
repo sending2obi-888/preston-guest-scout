@@ -76,7 +76,7 @@ export function preFilterCandidates(rawGuest, candidates) {
           v,
           v.fullCommentsSearchText || v.commentsSummary || ''
         );
-      if (vBed !== guest.bedLength) {
+      if (!vBed || vBed.replace(/'$/, '') !== String(guest.bedLength).replace(/'$/, '')) {
         return false;
       }
     }
@@ -532,20 +532,19 @@ Rules:
       });
     }
 
+    const hasCustomNotes = String(guest.notes || '').trim().length > 0;
     let mergedMatches;
-    if (preFiltered.length <= 30) {
-      mergedMatches =
-        geminiByVin.size > 0 ? Array.from(geminiByVin.values()) : fullDeterministicMatches;
+    if (geminiByVin.size === 0) {
+      mergedMatches = fullDeterministicMatches;
+    } else if (preFiltered.length <= 30 && hasCustomNotes) {
+      mergedMatches = Array.from(geminiByVin.values());
     } else {
-      mergedMatches = [];
-      for (const dm of fullDeterministicMatches) {
+      // Every vehicle in fullDeterministicMatches already satisfied all strict structural criteria;
+      // use Gemini's rich summary/score where available without dropping qualifying inventory!
+      mergedMatches = fullDeterministicMatches.map((dm) => {
         const vin = dm.vehicle.vin;
-        if (geminiByVin.has(vin)) {
-          mergedMatches.push(geminiByVin.get(vin));
-        } else if (!sampledVinSet.has(vin)) {
-          mergedMatches.push(dm);
-        }
-      }
+        return geminiByVin.get(vin) || dm;
+      });
     }
 
     mergedMatches.sort((a, b) => {

@@ -626,7 +626,8 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                       spacing: 8,
                       runSpacing: 8,
                       children: _bedLengthOptions.map((opt) {
-                        final selected = _bedLength == opt.$1;
+                        final selected = _bedLength.replaceAll("'", '') ==
+                            opt.$1.replaceAll("'", '');
                         return ChoiceChip(
                           key: ValueKey(
                             'dialog_bed_chip_${opt.$1.isEmpty ? 'any' : opt.$1}',

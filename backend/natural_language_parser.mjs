@@ -464,18 +464,21 @@ export function extractBedLengthFromQuery(rawText) {
 }
 
 export function bedLengthToCosmosFacetValues(bedLength) {
-  switch (bedLength) {
-    case "5'":
+  const clean = String(bedLength || '')
+    .trim()
+    .replace(/'$/, '');
+  switch (clean) {
+    case '5':
       return ['5-ft bed'];
-    case "5.5'":
+    case '5.5':
       return ["5-1/2' Box", '5.5-Ft.'];
-    case "6'":
+    case '6':
       return ['6-ft bed'];
-    case "6.5'":
+    case '6.5':
       return ["6-1/2' Box"];
-    case "6.75'":
+    case '6.75':
       return ["6 3/4' Box"];
-    case "8'":
+    case '8':
       return ["8' Box"];
     default:
       return [];
@@ -713,20 +716,45 @@ function extractColorFromStrictNotes(strictText) {
   return found.join(', ');
 }
 
+function canonicalizeKnownMake(rawMake) {
+  const s = String(rawMake || '').trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  for (const entry of KNOWN_MAKES) {
+    if (entry.canonical.toLowerCase() === lower || entry.aliases.includes(lower)) {
+      return entry.canonical;
+    }
+  }
+  return '';
+}
+
 export function normalizeModelInput(rawMake, rawModel) {
+  const cleanMake = String(rawMake || '').trim();
   const cleanModel = String(rawModel || '').trim();
-  if (!cleanModel) return { make: String(rawMake || '').trim(), model: '' };
+  const exactMake = canonicalizeKnownMake(cleanMake);
+
+  if (!cleanModel) {
+    if (exactMake) return { make: exactMake, model: '' };
+    if (cleanMake) {
+      for (const entry of MODEL_PATTERNS) {
+        if (entry.regex.test(cleanMake)) {
+          return { make: entry.make, model: entry.model };
+        }
+      }
+    }
+    return { make: cleanMake, model: '' };
+  }
 
   for (const entry of MODEL_PATTERNS) {
     if (entry.regex.test(cleanModel)) {
       return {
-        make: String(rawMake || '').trim() || entry.make,
+        make: exactMake || entry.make || cleanMake,
         model: entry.model,
       };
     }
   }
   return {
-    make: String(rawMake || '').trim(),
+    make: exactMake || cleanMake,
     model: cleanModel,
   };
 }
@@ -849,15 +877,21 @@ export function parseNaturalLanguageCriteria(guest = {}) {
     }
   }
 
-  // 2. Normalize Trim (from explicit field or strict natural language clauses)
+  // 2. Normalize Trim (from explicit field, inline make/model text, or strict natural language clauses)
   let trim = String(guest.trim || '').trim();
   if (trim) {
     const canonicalTrim = extractTrimFromText(trim, model);
     if (canonicalTrim && canonicalTrim.toLowerCase() === trim.toLowerCase()) {
       trim = canonicalTrim;
     }
-  } else if (strictCombined) {
-    trim = extractTrimFromText(strictCombined, model);
+  } else {
+    const inlineMakeModel = `${guest.make || ''} ${guest.model || ''}`.trim();
+    if (inlineMakeModel) {
+      trim = extractTrimFromText(inlineMakeModel, model);
+    }
+    if (!trim && strictCombined) {
+      trim = extractTrimFromText(strictCombined, model);
+    }
   }
 
   // 3. Bed Length & Cab Style

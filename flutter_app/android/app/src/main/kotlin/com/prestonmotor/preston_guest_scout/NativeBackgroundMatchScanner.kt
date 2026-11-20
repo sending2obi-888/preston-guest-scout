@@ -283,15 +283,16 @@ object NativeBackgroundMatchScanner {
         }
     }
 
-    private fun bedLengthToFacetValues(bedLength: String): List<String> = when (bedLength) {
-        "5'" -> listOf("5-ft bed")
-        "5.5'" -> listOf("5-1/2' Box", "5.5-Ft.")
-        "6'" -> listOf("6-ft bed")
-        "6.5'" -> listOf("6-1/2' Box")
-        "6.75'" -> listOf("6 3/4' Box")
-        "8'" -> listOf("8' Box")
-        else -> emptyList()
-    }
+    private fun bedLengthToFacetValues(bedLength: String): List<String> =
+        when (bedLength.trim().removeSuffix("'")) {
+            "5" -> listOf("5-ft bed")
+            "5.5" -> listOf("5-1/2' Box", "5.5-Ft.")
+            "6" -> listOf("6-ft bed")
+            "6.5" -> listOf("6-1/2' Box")
+            "6.75" -> listOf("6 3/4' Box")
+            "8" -> listOf("8' Box")
+            else -> emptyList()
+        }
 
     private fun expandModelVariants(make: String, model: String): List<String> {
         val m = model.trim()
@@ -318,6 +319,16 @@ object NativeBackgroundMatchScanner {
         return out.toList()
     }
 
+    private fun inferMakeFromModel(rawMake: String, rawModel: String): String {
+        val cleanMake = rawMake.trim()
+        if (cleanMake.isNotEmpty()) return cleanMake
+        val m = rawModel.trim()
+        if (Regex("^(?:f[\\s-]*\\d{3}|bronco(?:\\s+sport)?|mustang(?:\\s+mach-?e)?|explorer|escape|expedition(?:\\s+max)?|maverick|ranger|transit)$", RegexOption.IGNORE_CASE).matches(m)) {
+            return "Ford"
+        }
+        return ""
+    }
+
     private fun fetchCandidatesForTarget(target: JSONObject): List<JSONObject> {
         val cond = target.optString("condition", "Any").lowercase(Locale.US)
         val pageIds = when {
@@ -326,8 +337,8 @@ object NativeBackgroundMatchScanner {
                 listOf(1446611)
             else -> listOf(1446609, 1446611)
         }
-        val make = target.optString("make", "").trim()
         val model = target.optString("model", "").trim()
+        val make = inferMakeFromModel(target.optString("make", ""), model)
         val bedLength = target.optString("bedLength", "").trim()
         val variants = expandModelVariants(make, model)
         val bedFacets = bedLengthToFacetValues(bedLength)
@@ -657,9 +668,9 @@ object NativeBackgroundMatchScanner {
                 return false
             }
         }
-        val targetBed = target.optString("bedLength", "").trim()
+        val targetBed = target.optString("bedLength", "").trim().removeSuffix("'")
         if (targetBed.isNotEmpty()) {
-            if (v.optString("bedLength", "").trim() != targetBed) return false
+            if (v.optString("bedLength", "").trim().removeSuffix("'") != targetBed) return false
         }
         val targetCab = target.optString("cabStyle", "").trim()
         if (targetCab.isNotEmpty()) {
