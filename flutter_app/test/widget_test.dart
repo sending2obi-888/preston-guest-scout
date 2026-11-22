@@ -2156,11 +2156,25 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    // Exterior Colors section is tucked under a collapsed dropdown by default
+    expect(
+      find.byKey(const ValueKey('dropdown_exterior_colors')),
+      findsOneWidget,
+    );
+    expect(find.text('Any Color'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('multi_exterior_color_selector')),
+      findsNothing,
+    );
+
+    // Expand the Exterior Colors dropdown
+    await tester.tap(find.byKey(const ValueKey('dropdown_exterior_colors')));
+    await tester.pumpAndSettle();
+
     expect(
       find.byKey(const ValueKey('multi_exterior_color_selector')),
       findsOneWidget,
     );
-    expect(find.text('Any Color'), findsOneWidget);
 
     // Select 3 colors: White, Blue, and Gray
     await tester.tap(find.byKey(const ValueKey('color_chip_white')));
@@ -2171,6 +2185,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('3 selected (matches any)'), findsOneWidget);
+    expect(find.text('3 selected: White, Blue +1'), findsOneWidget);
     expect(find.text('Colors: White, Blue, Gray'), findsOneWidget);
 
     // Also add a custom OEM paint color ("Rapid Red")
@@ -2871,6 +2886,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    final specsDropdown = find.byKey(const ValueKey('dropdown_vehicle_specs'));
+    expect(specsDropdown, findsOneWidget);
+    expect(find.byKey(const ValueKey('number_of_doors_field')), findsNothing);
+
+    await tester.tap(specsDropdown);
+    await tester.pumpAndSettle();
+
     final doorsField = find.byKey(const ValueKey('number_of_doors_field'));
     expect(doorsField, findsOneWidget);
     expect(find.text('Number of Doors'), findsOneWidget);
@@ -3032,6 +3054,104 @@ void main() {
     LocalScoutEngine.resetForTest();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  testWidgets(
+      'Search page places secondary elements under clean dropdowns to reduce clutter, supports Brand & Condition dropdowns, and toggles Expand/Collapse All with live summary badges',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1100);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HomeIntakeScreen(
+            status: const SystemStatus(geminiConfigured: true),
+            onGuestCreated: () {},
+            onOpenGuestMatches: (_) {},
+            onOpenSettings: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. Core quick-search controls are visible immediately
+    expect(find.text('Quick Guest & Vehicle Search'), findsOneWidget);
+    expect(find.byKey(const ValueKey('condition_dropdown_field')), findsOneWidget);
+    expect(find.byKey(const ValueKey('make_brand_dropdown_button')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('natural_language_search_input')),
+      findsOneWidget,
+    );
+
+    // 2. Secondary clutter-heavy sections are tucked neatly under collapsed dropdowns
+    expect(find.byKey(const ValueKey('dropdown_guest_contact')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dropdown_vehicle_specs')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dropdown_exterior_colors')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dropdown_features')), findsOneWidget);
+
+    expect(find.text('Phone (Optional)'), findsNothing);
+    expect(find.text('Trim / Cab / Series'), findsNothing);
+    expect(find.byKey(const ValueKey('drivetrain_dropdown_field')), findsNothing);
+    expect(find.byKey(const ValueKey('bed_length_dropdown_field')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('multi_exterior_color_selector')),
+      findsNothing,
+    );
+    expect(find.text('Leather Seats'), findsNothing);
+
+    // 3. Quick Brand dropdown menu populates Make without 8-chip clutter
+    await tester.tap(find.byKey(const ValueKey('make_brand_dropdown_button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Lincoln').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Lincoln'), findsOneWidget);
+
+    // 4. Expand All opens every collapsible dropdown; selections remain visible on header badges after Collapse All
+    await tester.tap(find.byKey(const ValueKey('toggle_all_dropdowns_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Collapse All'), findsOneWidget);
+    expect(find.text('Phone (Optional)'), findsOneWidget);
+    expect(find.text('Trim / Cab / Series'), findsOneWidget);
+    expect(find.byKey(const ValueKey('drivetrain_dropdown_field')), findsOneWidget);
+    expect(find.byKey(const ValueKey('bed_length_dropdown_field')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('multi_exterior_color_selector')),
+      findsOneWidget,
+    );
+    expect(find.text('Leather Seats'), findsOneWidget);
+
+    // Select a feature & drivetrain, then Collapse All -> clutter disappears while live summary badges remain!
+    await tester.ensureVisible(find.text('Leather Seats'));
+    await tester.tap(find.text('Leather Seats'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('drivetrain_dropdown_field')),
+    );
+    await tester.tap(find.byKey(const ValueKey('drivetrain_dropdown_field')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('AWD').last);
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('toggle_all_dropdowns_button')),
+    );
+    await tester.tap(find.byKey(const ValueKey('toggle_all_dropdowns_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Expand All'), findsOneWidget);
+    expect(find.text('Phone (Optional)'), findsNothing);
+    expect(find.text('1 selected: Leather Seats'), findsOneWidget);
+    expect(find.text('AWD'), findsOneWidget);
+
+    LocalScoutEngine.resetForTest();
   });
 }
 

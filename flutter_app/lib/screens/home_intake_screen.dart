@@ -43,9 +43,32 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
   String _condition = 'Any';
   String _drivetrain = 'Any';
   String _doors = '';
+  String _bedLength = '';
   List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
   bool _isSubmitting = false;
+  int _resetGeneration = 0;
+
+  // Collapsible dropdown states (collapsed by default to minimize clutter)
+  bool _contactDropdownOpen = false;
+  bool _specsDropdownOpen = false;
+  bool _colorsDropdownOpen = false;
+  bool _featuresDropdownOpen = false;
+
+  static const List<(String, String)> _conditionOptions = [
+    ('Any', 'Any Condition'),
+    ('New', 'New'),
+    ('Pre-Owned', 'Pre-Owned'),
+    ('CPO', 'Certified Pre-Owned (CPO)'),
+  ];
+
+  static const List<(String, String)> _drivetrainOptions = [
+    ('Any', 'Any Drivetrain'),
+    ('4WD', '4WD / 4x4'),
+    ('AWD', 'AWD'),
+    ('FWD', 'FWD'),
+    ('RWD', 'RWD'),
+  ];
 
   static const List<(String, String)> _doorOptions = [
     ('', 'Any Doors'),
@@ -53,6 +76,14 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     ('3', '3 Doors'),
     ('4', '4 Doors'),
     ('5', '5 Doors'),
+  ];
+
+  static const List<(String, String)> _bedLengthOptions = [
+    ('', 'Any Bed Length'),
+    ('5.5', '5.5 ft Bed'),
+    ('6.5', '6.5 ft Bed'),
+    ('6.75', '6.75 ft Bed'),
+    ('8', '8 ft Bed'),
   ];
 
   static const List<String> _prestonMakes = [
@@ -64,6 +95,9 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     'Chevrolet',
     'Jeep',
     'Ram',
+    'GMC',
+    'Toyota',
+    'Honda',
   ];
 
   static const List<String> _commonFeatures = [
@@ -82,6 +116,12 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     'Power Tailgate/Liftgate',
   ];
 
+  bool get _allDropdownsExpanded =>
+      _contactDropdownOpen &&
+      _specsDropdownOpen &&
+      _colorsDropdownOpen &&
+      _featuresDropdownOpen;
+
   @override
   void dispose() {
     _guestNameCtrl.dispose();
@@ -98,6 +138,16 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     _customFeatureCtrl.dispose();
     _notesCtrl.dispose();
     super.dispose();
+  }
+
+  void _toggleAllDropdowns() {
+    final expand = !_allDropdownsExpanded;
+    setState(() {
+      _contactDropdownOpen = expand;
+      _specsDropdownOpen = expand;
+      _colorsDropdownOpen = expand;
+      _featuresDropdownOpen = expand;
+    });
   }
 
   void _addCustomFeature() {
@@ -128,8 +178,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       _condition = 'Any';
       _drivetrain = 'Any';
       _doors = '';
+      _bedLength = '';
       _selectedColors = [];
       _selectedFeatures.clear();
+      _resetGeneration++;
     });
   }
 
@@ -153,14 +205,97 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     return parsed;
   }
 
+  String _contactSummaryLabel() {
+    final parts = <String>[];
+    if (_phoneCtrl.text.trim().isNotEmpty) {
+      parts.add(_phoneCtrl.text.trim());
+    }
+    if (_emailCtrl.text.trim().isNotEmpty) {
+      parts.add(_emailCtrl.text.trim());
+    }
+    return parts.isEmpty ? 'Optional Phone & Email' : parts.join(' • ');
+  }
+
+  bool get _hasContactDetails =>
+      _phoneCtrl.text.trim().isNotEmpty || _emailCtrl.text.trim().isNotEmpty;
+
+  String _specsSummaryLabel() {
+    final parts = <String>[];
+    if (_trimCtrl.text.trim().isNotEmpty) {
+      parts.add(_trimCtrl.text.trim());
+    }
+    if (_doors.isNotEmpty) {
+      parts.add('$_doors Doors');
+    }
+    if (_drivetrain != 'Any') {
+      parts.add(_drivetrain);
+    }
+    if (_bedLength.isNotEmpty) {
+      parts.add('$_bedLength ft Bed');
+    }
+    final minY = _minYearCtrl.text.trim();
+    final maxY = _maxYearCtrl.text.trim();
+    if (minY.isNotEmpty && maxY.isNotEmpty) {
+      parts.add('$minY–$maxY');
+    } else if (minY.isNotEmpty) {
+      parts.add('$minY+');
+    } else if (maxY.isNotEmpty) {
+      parts.add('Up to $maxY');
+    }
+    if (_maxMileageCtrl.text.trim().isNotEmpty) {
+      parts.add('≤${_maxMileageCtrl.text.trim()} mi');
+    }
+    return parts.isEmpty
+        ? 'Any Trim, Doors, Drivetrain & Year'
+        : parts.join(' • ');
+  }
+
+  bool get _hasCustomSpecs =>
+      _trimCtrl.text.trim().isNotEmpty ||
+      _doors.isNotEmpty ||
+      _drivetrain != 'Any' ||
+      _bedLength.isNotEmpty ||
+      _minYearCtrl.text.trim().isNotEmpty ||
+      _maxYearCtrl.text.trim().isNotEmpty ||
+      _maxMileageCtrl.text.trim().isNotEmpty;
+
+  String _colorsSummaryLabel() {
+    final combined = _effectiveExteriorColorString();
+    if (combined.isEmpty) return 'Any Color';
+    final list = NaturalLanguageVehicleParser.parseExteriorColors(combined);
+    if (list.isEmpty) return 'Any Color';
+    if (list.length <= 2) {
+      return '${list.length} selected: ${list.join(', ')}';
+    }
+    return '${list.length} selected: ${list.take(2).join(', ')} +${list.length - 2}';
+  }
+
+  bool get _hasSelectedColors => _effectiveExteriorColorString().isNotEmpty;
+
+  String _featuresSummaryLabel() {
+    if (_selectedFeatures.isEmpty) return 'Optional';
+    final list = _selectedFeatures.toList();
+    if (list.length <= 2) {
+      return '${list.length} selected: ${list.join(', ')}';
+    }
+    return '${list.length} selected: ${list.take(2).join(', ')} +${list.length - 2}';
+  }
+
   Future<void> _submitIntake() async {
     if (!_formKey.currentState!.validate()) return;
 
     final combinedColors = _effectiveExteriorColorString();
     final hasAnyVehicleSpec = _makeCtrl.text.trim().isNotEmpty ||
         _modelCtrl.text.trim().isNotEmpty ||
+        _trimCtrl.text.trim().isNotEmpty ||
         _doors.isNotEmpty ||
+        _bedLength.isNotEmpty ||
+        _condition != 'Any' ||
+        _drivetrain != 'Any' ||
+        _minYearCtrl.text.trim().isNotEmpty ||
+        _maxYearCtrl.text.trim().isNotEmpty ||
         _maxPriceCtrl.text.trim().isNotEmpty ||
+        _maxMileageCtrl.text.trim().isNotEmpty ||
         _notesCtrl.text.trim().isNotEmpty ||
         combinedColors.isNotEmpty ||
         _selectedFeatures.isNotEmpty;
@@ -169,7 +304,8 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              'Please enter at least a Make, Model, Number of Doors, Max Price, Color, or Requirements note for the Gemini Agent.'),
+            'Please enter at least a Make, Model, Number of Doors, Max Price, Color, or Requirements note for the Gemini Agent.',
+          ),
         ),
       );
       return;
@@ -188,9 +324,11 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         model: _modelCtrl.text.trim(),
         trim: _trimCtrl.text.trim(),
         doors: _doors,
+        bedLength: _bedLength,
         maxPrice: _parseMaxPrice(_maxPriceCtrl.text),
         maxMileage: int.tryParse(
-            _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), '')),
+          _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), ''),
+        ),
         drivetrain: _drivetrain,
         exteriorColor: combinedColors,
         features: _selectedFeatures.toList(),
@@ -236,297 +374,395 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     final textTheme = Theme.of(context).textTheme;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 36),
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 960),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Schedule & Gemini Agent Status Banner
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: scheme.primaryContainer.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: scheme.primary.withValues(alpha: 0.2),
+          constraints: const BoxConstraints(maxWidth: 920),
+          child: KeyedSubtree(
+            key: ValueKey('intake_form_gen_$_resetGeneration'),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Compact Gemini Status & Dropdown Toggle Bar
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
                     ),
-                  ),
-                  child: Wrap(
-                    spacing: 16,
-                    runSpacing: 12,
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircleAvatar(
-                            backgroundColor: scheme.primary,
-                            foregroundColor: scheme.onPrimary,
-                            child: const Icon(Icons.auto_awesome, size: 20),
-                          ),
-                          const SizedBox(width: 12),
-                          Flexible(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Gemini Agent • Twice-Daily prestonmotor.com Search',
-                                  style: textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    color: scheme.onPrimaryContainer,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  'Runs automatically at 7:30 AM & 2:00 PM daily • Next: ${widget.status.nextScheduledRunLabel}',
-                                  style: textTheme.bodySmall?.copyWith(
-                                    color: scheme.onPrimaryContainer
-                                        .withValues(alpha: 0.85),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                    decoration: BoxDecoration(
+                      color: scheme.primaryContainer.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: scheme.primary.withValues(alpha: 0.18),
                       ),
-                      ActionChip(
-                        avatar: Icon(
-                          widget.status.geminiConfigured
-                              ? Icons.verified
-                              : Icons.key,
-                          size: 16,
-                          color: scheme.primary,
-                        ),
-                        label: Text(
-                          widget.status.geminiConfigured
-                              ? 'Gemini (${widget.status.geminiModel}) Active'
-                              : 'Configure Gemini API Key',
-                        ),
-                        onPressed: widget.onOpenSettings,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-
-                // Section 1: Guest Information
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    ),
+                    child: Wrap(
+                      spacing: 12,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.person_add_alt_1_outlined,
-                                color: scheme.primary),
-                            const SizedBox(width: 10),
-                            Text(
-                              'Guest Information',
-                              style: textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
+                            Icon(
+                              Icons.auto_awesome,
+                              size: 18,
+                              color: scheme.primary,
                             ),
-                            const Spacer(),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: scheme.secondaryContainer,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
+                            const SizedBox(width: 8),
+                            Flexible(
                               child: Text(
-                                'Unlimited Guests Supported',
-                                style: textTheme.labelSmall?.copyWith(
-                                  color: scheme.onSecondaryContainer,
-                                  fontWeight: FontWeight.w600,
+                                '7:30 AM & 2:00 PM prestonmotor.com Search • Next: ${widget.status.nextScheduledRunLabel}',
+                                style: textTheme.labelMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  color: scheme.onPrimaryContainer,
                                 ),
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 16),
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            final wide = constraints.maxWidth > 620;
-                            if (wide) {
-                              return Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    flex: 5,
-                                    child: _buildGuestNameField(),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    flex: 3,
-                                    child: _buildPhoneField(),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    flex: 4,
-                                    child: _buildEmailField(),
-                                  ),
-                                ],
-                              );
-                            }
-                            return Column(
-                              children: [
-                                _buildGuestNameField(),
-                                const SizedBox(height: 12),
-                                _buildPhoneField(),
-                                const SizedBox(height: 12),
-                                _buildEmailField(),
-                              ],
-                            );
-                          },
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            ActionChip(
+                              visualDensity: VisualDensity.compact,
+                              avatar: Icon(
+                                widget.status.geminiConfigured
+                                    ? Icons.verified
+                                    : Icons.key,
+                                size: 15,
+                                color: scheme.primary,
+                              ),
+                              label: Text(
+                                widget.status.geminiConfigured
+                                    ? 'Gemini Active'
+                                    : 'Set API Key',
+                                style: textTheme.labelSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              onPressed: widget.onOpenSettings,
+                            ),
+                            TextButton.icon(
+                              key: const ValueKey('toggle_all_dropdowns_button'),
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                              ),
+                              onPressed: _toggleAllDropdowns,
+                              icon: Icon(
+                                _allDropdownsExpanded
+                                    ? Icons.unfold_less_rounded
+                                    : Icons.unfold_more_rounded,
+                                size: 18,
+                              ),
+                              label: Text(
+                                _allDropdownsExpanded
+                                    ? 'Collapse All'
+                                    : 'Expand All',
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
+                  const SizedBox(height: 14),
 
-                // Section 2: Target Vehicle Specs
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(Icons.directions_car_outlined,
-                                color: scheme.primary),
-                            const SizedBox(width: 10),
-                            Text(
-                              'Target Vehicle Specifications',
-                              style: textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w700,
+                  // Primary Quick Search Card (Essential Fields Only)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.manage_search_rounded,
+                                color: scheme.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Quick Guest & Vehicle Search',
+                                  style: textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: scheme.secondaryContainer,
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(
+                                  'Unlimited Guests',
+                                  style: textTheme.labelSmall?.copyWith(
+                                    color: scheme.onSecondaryContainer,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+
+                          // Guest Name + Condition Dropdown
+                          LayoutBuilder(
+                            builder: (context, constraints) {
+                              final wide = constraints.maxWidth > 600;
+                              final conditionDropdown =
+                                  DropdownButtonFormField<String>(
+                                key: const ValueKey('condition_dropdown_field'),
+                                isExpanded: true,
+                                initialValue: _condition,
+                                decoration: const InputDecoration(
+                                  labelText: 'Condition',
+                                  prefixIcon: Icon(Icons.sell_outlined),
+                                ),
+                                items: _conditionOptions
+                                    .map(
+                                      (opt) => DropdownMenuItem<String>(
+                                        value: opt.$1,
+                                        child: Text(
+                                          opt.$2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: (v) {
+                                  if (v != null) {
+                                    setState(() => _condition = v);
+                                  }
+                                },
+                              );
+
+                              if (wide) {
+                                return Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      flex: 6,
+                                      child: _buildGuestNameField(),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      flex: 4,
+                                      child: conditionDropdown,
+                                    ),
+                                  ],
+                                );
+                              }
+                              return Column(
+                                children: [
+                                  _buildGuestNameField(),
+                                  const SizedBox(height: 12),
+                                  conditionDropdown,
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 12),
+
+                          // Make (with Quick Brand Dropdown Menu) + Model + Max Price
+                          LayoutBuilder(
+                            builder: (context, constraints) {
+                              final wide = constraints.maxWidth > 640;
+                              final makeField = TextFormField(
+                                controller: _makeCtrl,
+                                onChanged: (_) => setState(() {}),
+                                decoration: InputDecoration(
+                                  labelText: 'Make',
+                                  hintText: 'e.g. Ford, Lincoln, Mazda',
+                                  prefixIcon: const Icon(Icons.badge_outlined),
+                                  suffixIcon: PopupMenuButton<String>(
+                                    key: const ValueKey(
+                                      'make_brand_dropdown_button',
+                                    ),
+                                    tooltip: 'Select Brand',
+                                    icon: const Icon(Icons.arrow_drop_down),
+                                    onSelected: (brand) {
+                                      setState(() {
+                                        _makeCtrl.text =
+                                            brand == '__CLEAR__' ? '' : brand;
+                                      });
+                                    },
+                                    itemBuilder: (context) => [
+                                      const PopupMenuItem<String>(
+                                        value: '__CLEAR__',
+                                        child: Text('Any / Clear Make'),
+                                      ),
+                                      const PopupMenuDivider(),
+                                      ..._prestonMakes.map(
+                                        (b) => PopupMenuItem<String>(
+                                          value: b,
+                                          child: Text(b),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                              final modelField = TextFormField(
+                                controller: _modelCtrl,
+                                onChanged: (_) => setState(() {}),
+                                decoration: const InputDecoration(
+                                  labelText: 'Model',
+                                  hintText: 'e.g. F-150, Nautilus, Bronco',
+                                  prefixIcon: Icon(Icons.commute_outlined),
+                                ),
+                              );
+                              final maxPriceField = TextFormField(
+                                controller: _maxPriceCtrl,
+                                keyboardType: TextInputType.text,
+                                onChanged: (_) => setState(() {}),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                    RegExp(r'[0-9kK.$,\s]'),
+                                  ),
+                                ],
+                                decoration: const InputDecoration(
+                                  labelText: 'Max Price (\$)',
+                                  hintText: '60000 or 60K',
+                                  prefixIcon: Icon(Icons.attach_money),
+                                ),
+                              );
+
+                              if (wide) {
+                                return Row(
+                                  children: [
+                                    Expanded(flex: 4, child: makeField),
+                                    const SizedBox(width: 12),
+                                    Expanded(flex: 4, child: modelField),
+                                    const SizedBox(width: 12),
+                                    Expanded(flex: 3, child: maxPriceField),
+                                  ],
+                                );
+                              }
+                              return Column(
+                                children: [
+                                  makeField,
+                                  const SizedBox(height: 12),
+                                  Row(
+                                    children: [
+                                      Expanded(child: modelField),
+                                      const SizedBox(width: 10),
+                                      Expanded(child: maxPriceField),
+                                    ],
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 12),
+
+                          // Natural-Language Search Input (Always Handy, Compact 2-Line Field)
+                          TextFormField(
+                            key: const ValueKey('natural_language_search_input'),
+                            controller: _notesCtrl,
+                            maxLines: 2,
+                            onChanged: (_) => setState(() {}),
+                            decoration: const InputDecoration(
+                              labelText:
+                                  'Natural-Language Search / Quick Notes (Optional)',
+                              hintText:
+                                  'e.g. Ford F150. 6.5ft bed. XLT. — or type cab, engine, trim, or package codes...',
+                              alignLabelWithHint: true,
+                              prefixIcon: Padding(
+                                padding: EdgeInsets.only(bottom: 22),
+                                child: Icon(Icons.psychology_outlined),
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Condition & Drivetrain Row
-                        Wrap(
-                          spacing: 24,
-                          runSpacing: 16,
-                          children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Vehicle Condition',
-                                    style: textTheme.labelMedium),
-                                const SizedBox(height: 6),
-                                SegmentedButton<String>(
-                                  showSelectedIcon: false,
-                                  segments: const [
-                                    ButtonSegment(
-                                        value: 'Any', label: Text('Any')),
-                                    ButtonSegment(
-                                        value: 'New', label: Text('New')),
-                                    ButtonSegment(
-                                        value: 'Pre-Owned',
-                                        label: Text('Pre-Owned')),
-                                    ButtonSegment(
-                                        value: 'CPO', label: Text('CPO')),
-                                  ],
-                                  selected: {_condition},
-                                  onSelectionChanged: (s) =>
-                                      setState(() => _condition = s.first),
-                                ),
-                              ],
-                            ),
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Drivetrain',
-                                    style: textTheme.labelMedium),
-                                const SizedBox(height: 6),
-                                SegmentedButton<String>(
-                                  showSelectedIcon: false,
-                                  segments: const [
-                                    ButtonSegment(
-                                        value: 'Any', label: Text('Any')),
-                                    ButtonSegment(
-                                        value: '4WD', label: Text('4WD')),
-                                    ButtonSegment(
-                                        value: 'AWD', label: Text('AWD')),
-                                    ButtonSegment(
-                                        value: 'FWD', label: Text('FWD')),
-                                    ButtonSegment(
-                                        value: 'RWD', label: Text('RWD')),
-                                  ],
-                                  selected: {_drivetrain},
-                                  onSelectionChanged: (s) =>
-                                      setState(() => _drivetrain = s.first),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 18),
-
-                        // Quick Preston Motor Brand selector
-                        Text(
-                          'Quick-Select Preston Automotive Brand (or type any make below)',
-                          style: textTheme.labelMedium?.copyWith(
-                            color: scheme.onSurfaceVariant,
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: _prestonMakes.map((brand) {
-                            final isSelected = _makeCtrl.text.trim().toLowerCase() ==
-                                brand.toLowerCase();
-                            return ChoiceChip(
-                              label: Text(brand),
-                              selected: isSelected,
-                              onSelected: (sel) {
-                                setState(() {
-                                  _makeCtrl.text = sel ? brand : '';
-                                });
-                              },
-                            );
-                          }).toList(),
-                        ),
-                        const SizedBox(height: 16),
+                          if (_notesCtrl.text.trim().isNotEmpty ||
+                              _hasSelectedColors ||
+                              _doors.isNotEmpty ||
+                              _bedLength.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            _buildParsedCriteriaBanner(scheme, textTheme),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
 
-                        // Make / Model / Trim / Number of Doors
+                  // Collapsible Dropdown 1: Guest Contact Info (Phone & Email)
+                  _buildCollapsibleDropdownSection(
+                    dropdownKey: const ValueKey('dropdown_guest_contact'),
+                    icon: Icons.contact_phone_outlined,
+                    title: 'Guest Contact Info',
+                    summaryBadge: _contactSummaryLabel(),
+                    hasActiveSelection: _hasContactDetails,
+                    isExpanded: _contactDropdownOpen,
+                    onToggle: () => setState(
+                      () => _contactDropdownOpen = !_contactDropdownOpen,
+                    ),
+                    scheme: scheme,
+                    textTheme: textTheme,
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final wide = constraints.maxWidth > 540;
+                        if (wide) {
+                          return Row(
+                            children: [
+                              Expanded(child: _buildPhoneField()),
+                              const SizedBox(width: 12),
+                              Expanded(child: _buildEmailField()),
+                            ],
+                          );
+                        }
+                        return Column(
+                          children: [
+                            _buildPhoneField(),
+                            const SizedBox(height: 12),
+                            _buildEmailField(),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Collapsible Dropdown 2: Trim, Doors, Drivetrain, Bed Length, Year & Mileage
+                  _buildCollapsibleDropdownSection(
+                    dropdownKey: const ValueKey('dropdown_vehicle_specs'),
+                    icon: Icons.tune_rounded,
+                    title: 'Trim, Doors, Drivetrain, Year & Mileage',
+                    summaryBadge: _specsSummaryLabel(),
+                    hasActiveSelection: _hasCustomSpecs,
+                    isExpanded: _specsDropdownOpen,
+                    onToggle: () => setState(
+                      () => _specsDropdownOpen = !_specsDropdownOpen,
+                    ),
+                    scheme: scheme,
+                    textTheme: textTheme,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
                         LayoutBuilder(
                           builder: (context, constraints) {
-                            final wide = constraints.maxWidth > 720;
-                            final makeField = TextFormField(
-                              controller: _makeCtrl,
-                              onChanged: (_) => setState(() {}),
-                              decoration: const InputDecoration(
-                                labelText: 'Make',
-                                hintText: 'e.g. Ford, Lincoln, Hyundai',
-                                prefixIcon: Icon(Icons.badge_outlined),
-                              ),
-                            );
-                            final modelField = TextFormField(
-                              controller: _modelCtrl,
-                              decoration: const InputDecoration(
-                                labelText: 'Model',
-                                hintText: 'e.g. F-250, Nautilus, Bronco',
-                                prefixIcon: Icon(Icons.commute_outlined),
-                              ),
-                            );
+                            final wide = constraints.maxWidth > 680;
                             final trimField = TextFormField(
                               controller: _trimCtrl,
+                              onChanged: (_) => setState(() {}),
                               decoration: const InputDecoration(
-                                labelText: 'Trim / Cab / Series (Optional)',
-                                hintText: 'e.g. Reserve, XL, Lariat, Big Bend',
+                                labelText: 'Trim / Cab / Series',
+                                hintText: 'e.g. XLT, Lariat, Reserve, Big Bend',
                                 prefixIcon: Icon(Icons.tune_outlined),
                               ),
                             );
@@ -553,42 +789,99 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 setState(() => _doors = v ?? '');
                               },
                             );
+                            final drivetrainField =
+                                DropdownButtonFormField<String>(
+                              key: const ValueKey('drivetrain_dropdown_field'),
+                              isExpanded: true,
+                              initialValue: _drivetrain,
+                              decoration: const InputDecoration(
+                                labelText: 'Drivetrain',
+                                prefixIcon: Icon(Icons.settings_outlined),
+                              ),
+                              items: _drivetrainOptions
+                                  .map(
+                                    (opt) => DropdownMenuItem<String>(
+                                      value: opt.$1,
+                                      child: Text(
+                                        opt.$2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (v) {
+                                if (v != null) {
+                                  setState(() => _drivetrain = v);
+                                }
+                              },
+                            );
+                            final bedLengthField =
+                                DropdownButtonFormField<String>(
+                              key: const ValueKey('bed_length_dropdown_field'),
+                              isExpanded: true,
+                              initialValue: _bedLength,
+                              decoration: const InputDecoration(
+                                labelText: 'Truck Bed Length',
+                                prefixIcon: Icon(Icons.straighten_outlined),
+                              ),
+                              items: _bedLengthOptions
+                                  .map(
+                                    (opt) => DropdownMenuItem<String>(
+                                      value: opt.$1,
+                                      child: Text(
+                                        opt.$2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (v) {
+                                setState(() => _bedLength = v ?? '');
+                              },
+                            );
 
                             if (wide) {
-                              return Row(
+                              return Column(
                                 children: [
-                                  Expanded(flex: 3, child: makeField),
-                                  const SizedBox(width: 12),
-                                  Expanded(flex: 3, child: modelField),
-                                  const SizedBox(width: 12),
-                                  Expanded(flex: 3, child: trimField),
-                                  const SizedBox(width: 12),
-                                  Expanded(flex: 3, child: doorsField),
+                                  Row(
+                                    children: [
+                                      Expanded(child: trimField),
+                                      const SizedBox(width: 12),
+                                      Expanded(child: doorsField),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Row(
+                                    children: [
+                                      Expanded(child: drivetrainField),
+                                      const SizedBox(width: 12),
+                                      Expanded(child: bedLengthField),
+                                    ],
+                                  ),
                                 ],
                               );
                             }
                             return Column(
                               children: [
-                                makeField,
-                                const SizedBox(height: 12),
-                                modelField,
-                                const SizedBox(height: 12),
                                 trimField,
                                 const SizedBox(height: 12),
                                 doorsField,
+                                const SizedBox(height: 12),
+                                drivetrainField,
+                                const SizedBox(height: 12),
+                                bedLengthField,
                               ],
                             );
                           },
                         ),
-                        const SizedBox(height: 14),
-
-                        // Min Year / Max Year / Max Price / Max Mileage
+                        const SizedBox(height: 12),
                         LayoutBuilder(
                           builder: (context, constraints) {
-                            final wide = constraints.maxWidth > 680;
+                            final wide = constraints.maxWidth > 540;
                             final minYearField = TextFormField(
                               controller: _minYearCtrl,
                               keyboardType: TextInputType.number,
+                              onChanged: (_) => setState(() {}),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
                                 LengthLimitingTextInputFormatter(4),
@@ -602,6 +895,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             final maxYearField = TextFormField(
                               controller: _maxYearCtrl,
                               keyboardType: TextInputType.number,
+                              onChanged: (_) => setState(() {}),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
                                 LengthLimitingTextInputFormatter(4),
@@ -612,23 +906,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 prefixIcon: Icon(Icons.event_outlined),
                               ),
                             );
-                            final maxPriceField = TextFormField(
-                              controller: _maxPriceCtrl,
-                              keyboardType: TextInputType.text,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.allow(
-                                  RegExp(r'[0-9kK.$,\s]'),
-                                ),
-                              ],
-                              decoration: const InputDecoration(
-                                labelText: 'Max Price (\$)',
-                                hintText: '60000 or 60K',
-                                prefixIcon: Icon(Icons.attach_money),
-                              ),
-                            );
                             final maxMilesField = TextFormField(
                               controller: _maxMileageCtrl,
                               keyboardType: TextInputType.number,
+                              onChanged: (_) => setState(() {}),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
                               ],
@@ -642,13 +923,11 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             if (wide) {
                               return Row(
                                 children: [
-                                  Expanded(flex: 2, child: minYearField),
-                                  const SizedBox(width: 10),
-                                  Expanded(flex: 2, child: maxYearField),
-                                  const SizedBox(width: 10),
-                                  Expanded(flex: 3, child: maxPriceField),
-                                  const SizedBox(width: 10),
-                                  Expanded(flex: 3, child: maxMilesField),
+                                  Expanded(child: minYearField),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: maxYearField),
+                                  const SizedBox(width: 12),
+                                  Expanded(child: maxMilesField),
                                 ],
                               );
                             }
@@ -662,63 +941,56 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                   ],
                                 ),
                                 const SizedBox(height: 12),
-                                Row(
-                                  children: [
-                                    Expanded(child: maxPriceField),
-                                    const SizedBox(width: 10),
-                                    Expanded(child: maxMilesField),
-                                  ],
-                                ),
+                                maxMilesField,
                               ],
                             );
-                          },
-                        ),
-                        const SizedBox(height: 16),
-
-                        // Multi-Select Exterior Colors Picker
-                        ExteriorColorSelector(
-                          selectedColors: _selectedColors,
-                          customColorController: _exteriorColorCtrl,
-                          onChanged: (colors) {
-                            setState(() => _selectedColors = colors);
                           },
                         ),
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
+                  const SizedBox(height: 10),
 
-                // Section 3: Must-Have Features & Natural Language Notes for Gemini Agent
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
+                  // Collapsible Dropdown 3: Exterior Colors
+                  _buildCollapsibleDropdownSection(
+                    dropdownKey: const ValueKey('dropdown_exterior_colors'),
+                    icon: Icons.palette_outlined,
+                    title: 'Exterior Colors',
+                    summaryBadge: _colorsSummaryLabel(),
+                    hasActiveSelection: _hasSelectedColors,
+                    isExpanded: _colorsDropdownOpen,
+                    onToggle: () => setState(
+                      () => _colorsDropdownOpen = !_colorsDropdownOpen,
+                    ),
+                    scheme: scheme,
+                    textTheme: textTheme,
+                    child: ExteriorColorSelector(
+                      selectedColors: _selectedColors,
+                      customColorController: _exteriorColorCtrl,
+                      compact: true,
+                      onChanged: (colors) {
+                        setState(() => _selectedColors = colors);
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // Collapsible Dropdown 4: Must-Have Features & Packages
+                  _buildCollapsibleDropdownSection(
+                    dropdownKey: const ValueKey('dropdown_features'),
+                    icon: Icons.checklist_rtl_outlined,
+                    title: 'Must-Have Features & Packages',
+                    summaryBadge: _featuresSummaryLabel(),
+                    hasActiveSelection: _selectedFeatures.isNotEmpty,
+                    isExpanded: _featuresDropdownOpen,
+                    onToggle: () => setState(
+                      () => _featuresDropdownOpen = !_featuresDropdownOpen,
+                    ),
+                    scheme: scheme,
+                    textTheme: textTheme,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          children: [
-                            Icon(Icons.checklist_rtl_outlined,
-                                color: scheme.primary),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                'Target Features & Gemini Agent Requirements',
-                                style: textTheme.titleMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Select must-have features or type specific equipment, packages, and deal requirements. Selected matches will highlight which exact features meet these specs.',
-                          style: textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: 14),
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
@@ -746,12 +1018,13 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                     label: Text(custom),
                                     selected: true,
                                     onDeleted: () => setState(
-                                        () => _selectedFeatures.remove(custom)),
+                                      () => _selectedFeatures.remove(custom),
+                                    ),
                                   ),
                                 ),
                           ],
                         ),
-                        const SizedBox(height: 14),
+                        const SizedBox(height: 12),
                         Row(
                           children: [
                             Expanded(
@@ -761,9 +1034,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 decoration: const InputDecoration(
                                   labelText: 'Add Custom Feature Tag',
                                   hintText:
-                                      'e.g. Co-Pilot360, SuperCab 8ft Box, 7.3L V8, Panoramic Roof',
-                                  prefixIcon:
-                                      Icon(Icons.add_circle_outline_rounded),
+                                      'e.g. Co-Pilot360, 7.3L V8, Panoramic Roof',
+                                  prefixIcon: Icon(
+                                    Icons.add_circle_outline_rounded,
+                                  ),
                                 ),
                               ),
                             ),
@@ -775,75 +1049,154 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 16),
-                        TextFormField(
-                          key: const ValueKey('natural_language_search_input'),
-                          controller: _notesCtrl,
-                          maxLines: 3,
-                          onChanged: (_) => setState(() {}),
-                          decoration: const InputDecoration(
-                            labelText:
-                                'Additional Specs & Natural-Language Search for Gemini Agent',
-                            hintText:
-                                'e.g. Ford F150. 6.5ft bed. XLT. — or describe cab/box configuration, engine, trim, budget, or package codes...',
-                            alignLabelWithHint: true,
-                            prefixIcon: Padding(
-                              padding: EdgeInsets.only(bottom: 42),
-                              child: Icon(Icons.psychology_outlined),
-                            ),
-                          ),
-                        ),
-                        if (_notesCtrl.text.trim().isNotEmpty ||
-                            _selectedColors.isNotEmpty ||
-                            _doors.isNotEmpty) ...[
-                          const SizedBox(height: 12),
-                          _buildParsedCriteriaBanner(scheme, textTheme),
-                        ],
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 24),
+                  const SizedBox(height: 20),
 
-                // Submit Action Row
-                Wrap(
-                  alignment: WrapAlignment.end,
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: _isSubmitting ? null : _resetForm,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Clear Form'),
-                    ),
-                    FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 16),
+                  // Submit Action Row
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _isSubmitting ? null : _resetForm,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Clear Form'),
                       ),
-                      onPressed: _isSubmitting ? null : _submitIntake,
-                      icon: _isSubmitting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.travel_explore),
-                      label: Text(
-                        _isSubmitting
-                            ? 'Ingesting & Searching prestonmotor.com...'
-                            : 'Save Guest & Start Twice-Daily Search',
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 15,
+                          ),
+                        ),
+                        onPressed: _isSubmitting ? null : _submitIntake,
+                        icon: _isSubmitting
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.travel_explore),
+                        label: Text(
+                          _isSubmitting
+                              ? 'Ingesting & Searching prestonmotor.com...'
+                              : 'Save Guest & Start Twice-Daily Search',
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildCollapsibleDropdownSection({
+    required Key dropdownKey,
+    required IconData icon,
+    required String title,
+    required String summaryBadge,
+    required bool hasActiveSelection,
+    required bool isExpanded,
+    required VoidCallback onToggle,
+    required ColorScheme scheme,
+    required TextTheme textTheme,
+    required Widget child,
+  }) {
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            key: dropdownKey,
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+              child: Row(
+                children: [
+                  Icon(
+                    icon,
+                    size: 20,
+                    color: hasActiveSelection
+                        ? scheme.primary
+                        : scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: hasActiveSelection
+                            ? scheme.primaryContainer
+                            : scheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Text(
+                        summaryBadge,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: hasActiveSelection
+                              ? scheme.onPrimaryContainer
+                              : scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  AnimatedRotation(
+                    turns: isExpanded ? 0.5 : 0.0,
+                    duration: const Duration(milliseconds: 180),
+                    child: Icon(
+                      Icons.expand_more_rounded,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: isExpanded
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Divider(height: 1, color: scheme.outlineVariant),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                        child: child,
+                      ),
+                    ],
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
       ),
     );
   }
@@ -866,10 +1219,24 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     return TextFormField(
       controller: _phoneCtrl,
       keyboardType: TextInputType.phone,
+      onChanged: (_) => setState(() {}),
       decoration: const InputDecoration(
         labelText: 'Phone (Optional)',
         hintText: '(302) 555-0148',
         prefixIcon: Icon(Icons.phone_outlined),
+      ),
+    );
+  }
+
+  Widget _buildEmailField() {
+    return TextFormField(
+      controller: _emailCtrl,
+      keyboardType: TextInputType.emailAddress,
+      onChanged: (_) => setState(() {}),
+      decoration: const InputDecoration(
+        labelText: 'Email (Optional)',
+        hintText: 'guest@example.com',
+        prefixIcon: Icon(Icons.mail_outline),
       ),
     );
   }
@@ -883,6 +1250,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       'model': _modelCtrl.text.trim(),
       'trim': _trimCtrl.text.trim(),
       'doors': _doors,
+      'bedLength': _bedLength,
       'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
       'maxMileage': int.tryParse(
         _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), ''),
@@ -928,8 +1296,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
             children: chips
                 .map(
                   (c) => Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: scheme.surface,
                       borderRadius: BorderRadius.circular(20),
@@ -947,18 +1317,6 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                 .toList(),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildEmailField() {
-    return TextFormField(
-      controller: _emailCtrl,
-      keyboardType: TextInputType.emailAddress,
-      decoration: const InputDecoration(
-        labelText: 'Email (Optional)',
-        hintText: 'guest@example.com',
-        prefixIcon: Icon(Icons.mail_outline),
       ),
     );
   }
