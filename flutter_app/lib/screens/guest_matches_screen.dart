@@ -44,6 +44,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   final TextEditingController _searchCtrl = TextEditingController();
   final TextEditingController _newNoteCtrl = TextEditingController();
   bool _notesDropdownOpen = false;
+  bool _markedDropdownOpen = false;
   bool _savingNote = false;
 
   @override
@@ -566,6 +567,9 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                     const SizedBox(height: 14),
                                     _buildRequirementsCard(
                                         scheme, textTheme, currencyFmt),
+                                    const SizedBox(height: 14),
+                                    _buildMarkedVehiclesDropdownCard(
+                                        scheme, textTheme, currencyFmt),
                                   ],
                                   const SizedBox(height: 20),
                                   Wrap(
@@ -898,6 +902,300 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
           ),
         ],
       ],
+    );
+  }
+
+  Widget _buildMarkedVehiclesDropdownCard(
+    ColorScheme scheme,
+    TextTheme textTheme,
+    NumberFormat currencyFmt,
+  ) {
+    final g = _guest!;
+    final markedMatches = _matches
+        .where((m) => m.isSelectedCandidate)
+        .toList()
+      ..sort((a, b) {
+        final aSel = a.selectedAt ?? '';
+        final bSel = b.selectedAt ?? '';
+        final cmp = bSel.compareTo(aSel);
+        if (cmp != 0) return cmp;
+        return b.matchScore.compareTo(a.matchScore);
+      });
+
+    final hasMarked = markedMatches.isNotEmpty;
+
+    return Card(
+      color: scheme.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Material(
+              color: scheme.surface,
+              borderRadius: BorderRadius.circular(14),
+              child: InkWell(
+                key: const ValueKey('marked_vehicles_dropdown_toggle'),
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => setState(
+                  () => _markedDropdownOpen = !_markedDropdownOpen,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: _markedDropdownOpen
+                          ? scheme.primary
+                          : (hasMarked
+                              ? const Color(0xFFD99B00)
+                              : scheme.outlineVariant),
+                      width: _markedDropdownOpen || hasMarked ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        hasMarked
+                            ? Icons.star_rounded
+                            : Icons.star_border_rounded,
+                        size: 21,
+                        color: hasMarked
+                            ? const Color(0xFFB37A00)
+                            : scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Marked Vehicles',
+                          style: textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: hasMarked
+                              ? const Color(0xFFFFF0C2)
+                              : scheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(999),
+                          border: hasMarked
+                              ? Border.all(color: const Color(0xFFD99B00))
+                              : null,
+                        ),
+                        child: Text(
+                          '${markedMatches.length} Marked',
+                          style: textTheme.labelSmall?.copyWith(
+                            color: hasMarked
+                                ? const Color(0xFF7A5200)
+                                : scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _markedDropdownOpen ? 'Hide Marked' : 'Show Marked',
+                        style: textTheme.labelMedium?.copyWith(
+                          color: scheme.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Icon(
+                        _markedDropdownOpen
+                            ? Icons.arrow_drop_up_rounded
+                            : Icons.arrow_drop_down_rounded,
+                        color: scheme.primary,
+                        size: 26,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (_markedDropdownOpen) ...[
+              const SizedBox(height: 10),
+              Container(
+                key: const ValueKey('marked_vehicles_dropdown_list'),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: markedMatches.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          'No marked vehicles yet for ${g.name}. Tap "Select Candidate" on any match below to add it here.',
+                          style: textTheme.bodySmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    : ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 340),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: markedMatches.length,
+                          separatorBuilder: (_, _) =>
+                              const Divider(height: 16),
+                          itemBuilder: (context, idx) {
+                            final m = markedMatches[idx];
+                            final key = m.vin.isNotEmpty ? m.vin : m.id;
+                            final isToggling =
+                                _togglingCandidateVins.contains(key);
+                            final photoUrl = ApiService.resolveVehiclePhotoUrl(
+                              m.photoUrl,
+                            );
+
+                            return InkWell(
+                              key: ValueKey('marked_dropdown_item_$key'),
+                              borderRadius: BorderRadius.circular(10),
+                              onTap: () async {
+                                await widget.onSelectMatch(m, g);
+                                if (mounted) {
+                                  unawaited(_loadData());
+                                }
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 4,
+                                  horizontal: 4,
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Container(
+                                        width: 64,
+                                        height: 48,
+                                        color: scheme.surfaceContainerHighest,
+                                        child: photoUrl.isNotEmpty
+                                            ? Image.network(
+                                                photoUrl,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (_, _, _) => Icon(
+                                                  Icons.directions_car,
+                                                  size: 24,
+                                                  color:
+                                                      scheme.onSurfaceVariant,
+                                                ),
+                                              )
+                                            : Icon(
+                                                Icons.directions_car,
+                                                size: 24,
+                                                color: scheme.onSurfaceVariant,
+                                              ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  m.title,
+                                                  style: textTheme.titleSmall
+                                                      ?.copyWith(
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Text(
+                                                m.price != null
+                                                    ? currencyFmt.format(
+                                                        m.price,
+                                                      )
+                                                    : 'Call for Price',
+                                                style: textTheme.titleSmall
+                                                    ?.copyWith(
+                                                  fontWeight: FontWeight.w800,
+                                                  color: scheme.primary,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            [
+                                              m.location,
+                                              if (m.selectedAt != null)
+                                                'Marked ${_formatFoundDate(m.selectedAt!)}',
+                                            ].join(' • '),
+                                            style:
+                                                textTheme.labelSmall?.copyWith(
+                                              color: scheme.onSurfaceVariant,
+                                            ),
+                                          ),
+                                          if (m.vin.trim().isNotEmpty ||
+                                              m.stockNumber
+                                                  .trim()
+                                                  .isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            Wrap(
+                                              spacing: 6,
+                                              runSpacing: 4,
+                                              children: [
+                                                if (m.vin.trim().isNotEmpty)
+                                                  CopyableIdentifierBadge.vin(
+                                                    m.vin,
+                                                    compact: true,
+                                                  ),
+                                                if (m.stockNumber
+                                                    .trim()
+                                                    .isNotEmpty)
+                                                  CopyableIdentifierBadge.stock(
+                                                    m.stockNumber,
+                                                    compact: true,
+                                                  ),
+                                              ],
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    IconButton(
+                                      key: ValueKey(
+                                        'unmark_dropdown_button_$key',
+                                      ),
+                                      tooltip: 'Remove from Marked Vehicles',
+                                      visualDensity: VisualDensity.compact,
+                                      onPressed: isToggling
+                                          ? null
+                                          : () => _toggleSelectedCandidate(m),
+                                      icon: const Icon(
+                                        Icons.star_rounded,
+                                        color: Color(0xFFB37A00),
+                                        size: 21,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 

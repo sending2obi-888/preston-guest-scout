@@ -3222,7 +3222,7 @@ void main() {
     expect(created.guest.selectedCandidateCount, 0);
 
     tester.view.devicePixelRatio = 1.0;
-    tester.view.physicalSize = const Size(1200, 1500);
+    tester.view.physicalSize = const Size(1200, 1700);
     addTearDown(() {
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();
@@ -3336,6 +3336,159 @@ void main() {
     expect(find.text('2 Selected'), findsOneWidget);
 
     // Drain any auto-save debounce timer
+    await tester.pump(const Duration(seconds: 1));
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  testWidgets(
+      'GuestMatchesScreen renders Marked Vehicles dropdown showing marked vehicles, opens match details on tap, and supports unmarking inside dropdown',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final mockInventory = <Map<String, dynamic>>[
+      {
+        'vin': '5LM5J7XC6RGL11111',
+        'stockNumber': 'L1111',
+        'title': '2024 Lincoln Nautilus Reserve',
+        'year': 2024,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Reserve',
+        'condition': 'Pre-Owned',
+        'price': 47990.0,
+        'location': 'Preston Lincoln',
+        'drivetrain': 'AWD',
+        'exteriorColor': 'White Platinum',
+      },
+      {
+        'vin': '5LM5J9XC8RGL22222',
+        'stockNumber': 'L2222',
+        'title': '2024 Lincoln Nautilus Black Label',
+        'year': 2024,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Black Label',
+        'condition': 'Pre-Owned',
+        'price': 56490.0,
+        'location': 'Boulevard Lincoln of Lewes',
+        'drivetrain': 'AWD',
+        'exteriorColor': 'Infinite Black',
+      },
+    ];
+
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Taylor Brooks',
+      make: 'Lincoln',
+      model: 'Nautilus',
+      mockCandidatesOverride: mockInventory,
+    );
+
+    VehicleMatch? tappedFromDropdown;
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1700);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: created.guest.id,
+          onDataChanged: () {},
+          onSelectMatch: (match, _) {
+            tappedFromDropdown = match;
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 1. Marked Vehicles dropdown starts collapsed showing "0 Marked"
+    final dropdownToggle =
+        find.byKey(const ValueKey('marked_vehicles_dropdown_toggle'));
+    expect(dropdownToggle, findsOneWidget);
+    expect(find.text('Marked Vehicles'), findsOneWidget);
+    expect(find.text('0 Marked'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('marked_vehicles_dropdown_list')),
+      findsNothing,
+    );
+
+    // 2. Mark the Black Label (5LM5J9XC8RGL22222) -> dropdown header immediately updates to "1 Marked"
+    await tester.tap(
+      find.byKey(const ValueKey('toggle_selected_candidate_5LM5J9XC8RGL22222')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('1 Marked'), findsOneWidget);
+
+    // 3. Open the Marked Vehicles dropdown -> displays ONLY the marked Black Label inside marked_vehicles_dropdown_list
+    await tester.tap(dropdownToggle);
+    await tester.pumpAndSettle();
+
+    final dropdownList =
+        find.byKey(const ValueKey('marked_vehicles_dropdown_list'));
+    expect(dropdownList, findsOneWidget);
+    expect(find.text('Hide Marked'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: dropdownList,
+        matching: find.text('2024 Lincoln Nautilus Black Label'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dropdownList,
+        matching: find.text('2024 Lincoln Nautilus Reserve'),
+      ),
+      findsNothing,
+    );
+
+    // 4. Tapping the marked vehicle row inside the dropdown invokes onSelectMatch
+    await tester.tap(
+      find.byKey(const ValueKey('marked_dropdown_item_5LM5J9XC8RGL22222')),
+    );
+    await tester.pumpAndSettle();
+    expect(tappedFromDropdown?.vin, '5LM5J9XC8RGL22222');
+
+    // 5. Tapping the star button inside the Marked Vehicles dropdown unmarks it -> updates to "0 Marked"
+    await tester.tap(
+      find.byKey(const ValueKey('unmark_dropdown_button_5LM5J9XC8RGL22222')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('0 Marked'), findsOneWidget);
+    expect(
+      find.textContaining('No marked vehicles yet for Taylor Brooks'),
+      findsOneWidget,
+    );
+
+    // Drain auto-save debounce timer
     await tester.pump(const Duration(seconds: 1));
 
     LocalScoutEngine.cancelSchedulerForTest();
