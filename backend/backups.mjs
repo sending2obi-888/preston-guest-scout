@@ -38,7 +38,7 @@ function computeSnapshotSignature(guests, matches) {
     .sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
   const mSig = [...matches]
-    .map((m) => `${m.guestId}::${m.vin}::${m.price ?? ''}`)
+    .map((m) => `${m.guestId}::${m.vin}::${m.price ?? ''}::${m.isSelectedCandidate ? '1' : '0'}`)
     .sort();
 
   return crypto
@@ -403,13 +403,15 @@ export function restoreServerBackup(backupId, { resolution = null } = {}) {
       price, msrp, dealer_fee, location, mileage, drivetrain, engine,
       exterior_color, interior_color, photo_url, listing_url,
       matched_features_json, all_highlights_json, agent_summary, match_score,
-      found_at, search_slot, last_seen_at, target_id, target_label
+      found_at, search_slot, last_seen_at, target_id, target_label,
+      is_selected_candidate, selected_at, selected_updated_at
     ) VALUES (
       @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
       @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
       @exterior_color, @interior_color, @photo_url, @listing_url,
       @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
-      @found_at, @search_slot, @last_seen_at, @target_id, @target_label
+      @found_at, @search_slot, @last_seen_at, @target_id, @target_label,
+      @is_selected_candidate, @selected_at, @selected_updated_at
     )
   `);
 
@@ -598,6 +600,9 @@ export function restoreServerBackup(backupId, { resolution = null } = {}) {
           last_seen_at: nowIso,
           target_id: mappedTid,
           target_label: String(m.targetLabel || ''),
+          is_selected_candidate: m.isSelectedCandidate ? 1 : 0,
+          selected_at: m.selectedAt ? String(m.selectedAt) : null,
+          selected_updated_at: m.selectedUpdatedAt ? String(m.selectedUpdatedAt) : null,
         });
       }
     }

@@ -332,6 +332,59 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                                         ),
                                                       ),
                                                     ),
+                                                    if (guest
+                                                            .selectedCandidateCount >
+                                                        0)
+                                                      Container(
+                                                        key: ValueKey(
+                                                          'guest_selected_candidates_badge_${guest.id}',
+                                                        ),
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                          horizontal: 9,
+                                                          vertical: 3,
+                                                        ),
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: const Color(
+                                                              0xFFFFF0C2),
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(20),
+                                                          border: Border.all(
+                                                            color: const Color(
+                                                                0xFFD99B00),
+                                                          ),
+                                                        ),
+                                                        child: Row(
+                                                          mainAxisSize:
+                                                              MainAxisSize.min,
+                                                          children: [
+                                                            const Icon(
+                                                              Icons
+                                                                  .star_rounded,
+                                                              size: 13,
+                                                              color: Color(
+                                                                  0xFF7A5200),
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 3),
+                                                            Text(
+                                                              '${guest.selectedCandidateCount} Selected',
+                                                              style: textTheme
+                                                                  .labelSmall
+                                                                  ?.copyWith(
+                                                                color: const Color(
+                                                                    0xFF7A5200),
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w800,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ),
                                                   ],
                                                 ),
                                                 const SizedBox(height: 5),

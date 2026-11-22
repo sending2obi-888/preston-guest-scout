@@ -344,7 +344,9 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     );
 
     const existingMatches = db
-      .prepare('SELECT guest_id, vin, found_at, last_seen_at FROM matches')
+      .prepare(
+        'SELECT guest_id, vin, found_at, last_seen_at, is_selected_candidate, selected_at, selected_updated_at FROM matches'
+      )
       .all();
     const localMatchMap = new Map(
       existingMatches.map((m) => [`${m.guest_id}::${m.vin}`, m])
@@ -356,13 +358,15 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         price, msrp, dealer_fee, location, mileage, drivetrain, engine,
         exterior_color, interior_color, photo_url, listing_url,
         matched_features_json, all_highlights_json, agent_summary, match_score,
-        found_at, search_slot, last_seen_at, target_id, target_label
+        found_at, search_slot, last_seen_at, target_id, target_label,
+        is_selected_candidate, selected_at, selected_updated_at
       ) VALUES (
         @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
         @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
         @exterior_color, @interior_color, @photo_url, @listing_url,
         @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
-        @found_at, @search_slot, @last_seen_at, @target_id, @target_label
+        @found_at, @search_slot, @last_seen_at, @target_id, @target_label,
+        @is_selected_candidate, @selected_at, @selected_updated_at
       )
       ON CONFLICT(guest_id, vin) DO UPDATE SET
         price = excluded.price,
@@ -388,7 +392,16 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         target_label = CASE
           WHEN excluded.target_label != '' THEN excluded.target_label
           ELSE matches.target_label
-        END
+        END,
+        is_selected_candidate = excluded.is_selected_candidate,
+        selected_at = excluded.selected_at,
+        selected_updated_at = excluded.selected_updated_at
+    `);
+
+    const updateSelectionOnlyStmt = db.prepare(`
+      UPDATE matches
+         SET is_selected_candidate = ?, selected_at = ?, selected_updated_at = ?
+       WHERE guest_id = ? AND vin = ?
     `);
 
     const remoteMatches = Array.isArray(remote.matches) ? remote.matches : [];
@@ -397,6 +410,28 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       const key = `${rm.guestId}::${rm.vin}`;
       const existing = localMatchMap.get(key);
       const rmSeen = rm.lastSeenAt || rm.foundAt || '';
+      const rmSelUpdated = String(rm.selectedUpdatedAt || rm.selectedAt || '');
+      const locSelUpdated = String(existing?.selected_updated_at || existing?.selected_at || '');
+      const remoteSelectionWins =
+        !existing ||
+        (rmSelUpdated && rmSelUpdated >= locSelUpdated) ||
+        (!locSelUpdated && Boolean(rm.isSelectedCandidate));
+      const mergedIsSelected = remoteSelectionWins
+        ? rm.isSelectedCandidate
+          ? 1
+          : 0
+        : existing?.is_selected_candidate
+          ? 1
+          : 0;
+      const mergedSelectedAt = remoteSelectionWins
+        ? rm.selectedAt
+          ? String(rm.selectedAt)
+          : null
+        : existing?.selected_at || null;
+      const mergedSelectedUpdatedAt = remoteSelectionWins
+        ? rmSelUpdated || null
+        : locSelUpdated || null;
+
       if (!existing || rmSeen > (existing.last_seen_at || '')) {
         upsertMatchStmt.run({
           id: String(rm.id || crypto.randomUUID()),
@@ -433,7 +468,19 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           last_seen_at: String(rmSeen || new Date().toISOString()),
           target_id: String(rm.targetId || ''),
           target_label: String(rm.targetLabel || ''),
+          is_selected_candidate: mergedIsSelected,
+          selected_at: mergedSelectedAt,
+          selected_updated_at: mergedSelectedUpdatedAt,
         });
+        localChanged = true;
+      } else if (rmSelUpdated && rmSelUpdated > locSelUpdated) {
+        updateSelectionOnlyStmt.run(
+          mergedIsSelected,
+          mergedSelectedAt,
+          mergedSelectedUpdatedAt,
+          String(rm.guestId),
+          String(rm.vin)
+        );
         localChanged = true;
       }
     }

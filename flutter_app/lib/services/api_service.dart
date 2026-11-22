@@ -223,6 +223,41 @@ class ApiService {
     );
   }
 
+  static Future<
+          ({GuestProfile guest, List<VehicleMatch> matches, VehicleMatch match})>
+      setMatchSelectedCandidate({
+    required String guestId,
+    required String vin,
+    required bool selected,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.setMatchSelectedCandidate(
+        guestId: guestId,
+        vin: vin,
+        selected: selected,
+      );
+    }
+    final res = await http.patch(
+      Uri.parse(
+        '$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/matches/${Uri.encodeComponent(vin)}',
+      ),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({'selected': selected}),
+    );
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to update selected candidate');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (
+      guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
+      matches: (data['matches'] as List<dynamic>? ?? [])
+          .map((e) => VehicleMatch.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      match: VehicleMatch.fromJson(data['match'] as Map<String, dynamic>),
+    );
+  }
+
   static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
       triggerGuestSearch(String guestId) async {
     if (_useLocalOnDeviceEngine) {

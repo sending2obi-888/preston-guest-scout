@@ -641,6 +641,70 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      if (
+        subResource === 'matches' &&
+        subId &&
+        (req.method === 'PATCH' || req.method === 'POST')
+      ) {
+        const guestRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!guestRow) return sendJson(res, 404, { error: 'Guest not found' });
+
+        const targetMatch = db
+          .prepare('SELECT * FROM matches WHERE guest_id = ? AND (vin = ? OR id = ?)')
+          .get(guestId, subId, subId);
+        if (!targetMatch) {
+          return sendJson(res, 404, { error: 'Vehicle match not found' });
+        }
+
+        const body = await readJsonBody(req);
+        const nextSelected =
+          typeof body.selected === 'boolean'
+            ? body.selected
+            : typeof body.isSelectedCandidate === 'boolean'
+              ? body.isSelectedCandidate
+              : !Boolean(targetMatch.is_selected_candidate);
+        const nowIso = new Date().toISOString();
+
+        db.prepare(
+          `UPDATE matches
+              SET is_selected_candidate = ?,
+                  selected_at = ?,
+                  selected_updated_at = ?
+            WHERE id = ?`
+        ).run(
+          nextSelected ? 1 : 0,
+          nextSelected ? nowIso : null,
+          nowIso,
+          targetMatch.id
+        );
+
+        db.prepare('UPDATE guests SET updated_at = ? WHERE id = ?').run(nowIso, guestId);
+
+        recordServerBackup({
+          label: nextSelected
+            ? `Auto-Backup • Selected ${targetMatch.title || targetMatch.vin}`
+            : `Auto-Backup • Unselected ${targetMatch.title || targetMatch.vin}`,
+        });
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
+        const updatedGuestRow = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        const matchRows = db
+          .prepare(
+            'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
+          )
+          .all(guestId);
+        const updatedMatchRow = db
+          .prepare('SELECT * FROM matches WHERE id = ?')
+          .get(targetMatch.id);
+
+        return sendJson(res, 200, {
+          ok: true,
+          guest: mapGuestRow(updatedGuestRow),
+          matches: matchRows.map(mapMatchRow),
+          match: mapMatchRow(updatedMatchRow),
+        });
+      }
+
       if (subResource === 'search' && !subId && req.method === 'POST') {
         const result = await runSearchForGuest(guestId, 'On-Demand Gemini Search', {
           calendarAccessToken: bearerToken,

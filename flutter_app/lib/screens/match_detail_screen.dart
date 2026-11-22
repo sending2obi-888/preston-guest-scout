@@ -6,15 +6,31 @@ import '../services/api_service.dart';
 import '../widgets/copyable_identifier_badge.dart';
 import 'vin_recall_screen.dart';
 
-class MatchDetailScreen extends StatelessWidget {
+class MatchDetailScreen extends StatefulWidget {
   final VehicleMatch match;
   final GuestProfile guest;
+  final VoidCallback? onDataChanged;
 
   const MatchDetailScreen({
     super.key,
     required this.match,
     required this.guest,
+    this.onDataChanged,
   });
+
+  @override
+  State<MatchDetailScreen> createState() => _MatchDetailScreenState();
+}
+
+class _MatchDetailScreenState extends State<MatchDetailScreen> {
+  late VehicleMatch _match;
+  bool _togglingCandidate = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _match = widget.match;
+  }
 
   String _formatFullDate(String iso) {
     final dt = DateTime.tryParse(iso)?.toLocal();
@@ -22,15 +38,64 @@ class MatchDetailScreen extends StatelessWidget {
     return DateFormat('EEEE, MMMM d, yyyy • h:mm a').format(dt);
   }
 
+  Future<void> _toggleSelectedCandidate() async {
+    if (_togglingCandidate) return;
+    final nextSelected = !_match.isSelectedCandidate;
+    final previous = _match;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    setState(() {
+      _togglingCandidate = true;
+      _match = _match.copyWith(
+        isSelectedCandidate: nextSelected,
+        selectedAt: nextSelected ? nowIso : null,
+        clearSelectedAt: !nextSelected,
+        selectedUpdatedAt: nowIso,
+      );
+    });
+
+    try {
+      final res = await ApiService.setMatchSelectedCandidate(
+        guestId: widget.guest.id,
+        vin: _match.vin.isNotEmpty ? _match.vin : _match.id,
+        selected: nextSelected,
+      );
+      widget.onDataChanged?.call();
+      if (!mounted) return;
+      setState(() {
+        _match = res.match;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            nextSelected
+                ? 'Marked ${_match.title} as a Selected Candidate for ${widget.guest.name}.'
+                : 'Removed ${_match.title} from Selected Candidates.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _match = previous;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update candidate status: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _togglingCandidate = false);
+    }
+  }
+
   void _openVinRecallCheck(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => Scaffold(
           appBar: AppBar(
-            title: Text('NHTSA Recall Check • ${match.vin}'),
+            title: Text('NHTSA Recall Check • ${_match.vin}'),
           ),
           body: VinRecallScreen(
-            initialVin: match.vin,
+            initialVin: _match.vin,
             autoCheckOnInit: true,
           ),
         ),
@@ -39,12 +104,13 @@ class MatchDetailScreen extends StatelessWidget {
   }
 
   Future<void> _openPrestonListing(BuildContext context) async {
-    final urlStr = match.listingUrl.isNotEmpty
-        ? match.listingUrl
+    final urlStr = _match.listingUrl.isNotEmpty
+        ? _match.listingUrl
         : 'https://www.prestonmotor.com';
     final uri = Uri.tryParse(urlStr);
     if (uri == null) return;
-    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final launched =
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!launched && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Listing URL: $urlStr')),
@@ -57,13 +123,13 @@ class MatchDetailScreen extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final currencyFmt = NumberFormat.currency(symbol: '\$', decimalDigits: 0);
-    final photoUrl = ApiService.resolveVehiclePhotoUrl(match.photoUrl);
+    final photoUrl = ApiService.resolveVehiclePhotoUrl(_match.photoUrl);
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(match.title),
+        title: Text(_match.title),
         actions: [
-          if (match.vin.trim().length == 17)
+          if (_match.vin.trim().length == 17)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: FilledButton.tonalIcon(
@@ -93,6 +159,12 @@ class MatchDetailScreen extends StatelessWidget {
                 // Hero Vehicle Card
                 Card(
                   clipBehavior: Clip.antiAlias,
+                  shape: _match.isSelectedCandidate
+                      ? RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: BorderSide(color: scheme.primary, width: 2),
+                        )
+                      : null,
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final wide = constraints.maxWidth > 680;
@@ -126,6 +198,38 @@ class MatchDetailScreen extends StatelessWidget {
                               spacing: 8,
                               runSpacing: 8,
                               children: [
+                                if (_match.isSelectedCandidate)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFFFF0C2),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                        color: const Color(0xFFD99B00),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(
+                                          Icons.star_rounded,
+                                          size: 15,
+                                          color: Color(0xFF7A5200),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'SELECTED CANDIDATE',
+                                          style: textTheme.labelSmall?.copyWith(
+                                            color: const Color(0xFF7A5200),
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 10, vertical: 4),
@@ -134,14 +238,14 @@ class MatchDetailScreen extends StatelessWidget {
                                     borderRadius: BorderRadius.circular(20),
                                   ),
                                   child: Text(
-                                    'Matched for ${guest.name}',
+                                    'Matched for ${widget.guest.name}',
                                     style: textTheme.labelSmall?.copyWith(
                                       color: scheme.onPrimaryContainer,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ),
-                                if (match.condition.isNotEmpty)
+                                if (_match.condition.isNotEmpty)
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 4),
@@ -150,14 +254,14 @@ class MatchDetailScreen extends StatelessWidget {
                                       borderRadius: BorderRadius.circular(20),
                                     ),
                                     child: Text(
-                                      match.condition,
+                                      _match.condition,
                                       style: textTheme.labelSmall?.copyWith(
                                         color: scheme.onSecondaryContainer,
                                         fontWeight: FontWeight.w700,
                                       ),
                                     ),
                                   ),
-                                if (match.targetLabel.isNotEmpty)
+                                if (_match.targetLabel.isNotEmpty)
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 4),
@@ -166,7 +270,7 @@ class MatchDetailScreen extends StatelessWidget {
                                       borderRadius: BorderRadius.circular(20),
                                     ),
                                     child: Text(
-                                      'Criteria: ${match.targetLabel}',
+                                      'Criteria: ${_match.targetLabel}',
                                       style: textTheme.labelSmall?.copyWith(
                                         color: scheme.onTertiaryContainer,
                                         fontWeight: FontWeight.w700,
@@ -177,23 +281,23 @@ class MatchDetailScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 12),
                             Text(
-                              match.title,
+                              _match.title,
                               style: textTheme.headlineSmall?.copyWith(
                                 fontWeight: FontWeight.w800,
                               ),
                             ),
-                            if (match.vin.isNotEmpty ||
-                                match.stockNumber.isNotEmpty) ...[
+                            if (_match.vin.isNotEmpty ||
+                                _match.stockNumber.isNotEmpty) ...[
                               const SizedBox(height: 10),
                               Wrap(
                                 spacing: 8,
                                 runSpacing: 8,
                                 children: [
-                                  if (match.vin.isNotEmpty)
-                                    CopyableIdentifierBadge.vin(match.vin),
-                                  if (match.stockNumber.isNotEmpty)
+                                  if (_match.vin.isNotEmpty)
+                                    CopyableIdentifierBadge.vin(_match.vin),
+                                  if (_match.stockNumber.isNotEmpty)
                                     CopyableIdentifierBadge.stock(
-                                      match.stockNumber,
+                                      _match.stockNumber,
                                     ),
                                 ],
                               ),
@@ -203,22 +307,52 @@ class MatchDetailScreen extends StatelessWidget {
                               spacing: 12,
                               runSpacing: 8,
                               children: [
-                                if (match.mileage > 0)
+                                if (_match.mileage > 0)
                                   _metaBadge(
                                       Icons.speed_outlined,
-                                      '${NumberFormat.decimalPattern().format(match.mileage)} miles',
+                                      '${NumberFormat.decimalPattern().format(_match.mileage)} miles',
                                       scheme),
-                                if (match.drivetrain.isNotEmpty)
+                                if (_match.drivetrain.isNotEmpty)
                                   _metaBadge(Icons.settings_outlined,
-                                      match.drivetrain, scheme),
-                                if (match.exteriorColor.isNotEmpty)
+                                      _match.drivetrain, scheme),
+                                if (_match.exteriorColor.isNotEmpty)
                                   _metaBadge(Icons.palette_outlined,
-                                      match.exteriorColor, scheme),
-                                if (match.engine.isNotEmpty)
+                                      _match.exteriorColor, scheme),
+                                if (_match.engine.isNotEmpty)
                                   _metaBadge(Icons.engineering_outlined,
-                                      match.engine, scheme),
+                                      _match.engine, scheme),
                               ],
                             ),
+                            const SizedBox(height: 16),
+                            _match.isSelectedCandidate
+                                ? FilledButton.tonalIcon(
+                                    key: const ValueKey(
+                                      'detail_toggle_selected_candidate',
+                                    ),
+                                    onPressed: _togglingCandidate
+                                        ? null
+                                        : _toggleSelectedCandidate,
+                                    icon: const Icon(
+                                      Icons.star_rounded,
+                                      size: 19,
+                                    ),
+                                    label: const Text('Selected Candidate'),
+                                  )
+                                : OutlinedButton.icon(
+                                    key: const ValueKey(
+                                      'detail_toggle_selected_candidate',
+                                    ),
+                                    onPressed: _togglingCandidate
+                                        ? null
+                                        : _toggleSelectedCandidate,
+                                    icon: const Icon(
+                                      Icons.star_border_rounded,
+                                      size: 19,
+                                    ),
+                                    label: const Text(
+                                      'Mark as Selected Candidate',
+                                    ),
+                                  ),
                           ],
                         ),
                       );
@@ -251,14 +385,14 @@ class MatchDetailScreen extends StatelessWidget {
                     final priceCard = _KeyHighlightCard(
                       icon: Icons.sell_outlined,
                       label: 'VEHICLE PRICE',
-                      primaryValue: match.price != null
-                          ? currencyFmt.format(match.price)
+                      primaryValue: _match.price != null
+                          ? currencyFmt.format(_match.price)
                           : 'Contact Dealer',
                       secondaryValue: [
-                        if (match.msrp != null && match.msrp! > 0)
-                          'MSRP ${currencyFmt.format(match.msrp)}',
-                        if (match.dealerFee != null)
-                          '+\$${match.dealerFee!.toStringAsFixed(0)} Dealer Fee',
+                        if (_match.msrp != null && _match.msrp! > 0)
+                          'MSRP ${currencyFmt.format(_match.msrp)}',
+                        if (_match.dealerFee != null)
+                          '+\$${_match.dealerFee!.toStringAsFixed(0)} Dealer Fee',
                       ].join(' • '),
                       accentColor: scheme.primary,
                     );
@@ -266,7 +400,7 @@ class MatchDetailScreen extends StatelessWidget {
                     final locationCard = _KeyHighlightCard(
                       icon: Icons.location_on_outlined,
                       label: 'DEALERSHIP LOCATION',
-                      primaryValue: match.location,
+                      primaryValue: _match.location,
                       secondaryValue: 'Preston Automotive Group Network',
                       accentColor: scheme.tertiary,
                     );
@@ -274,8 +408,8 @@ class MatchDetailScreen extends StatelessWidget {
                     final dateFoundCard = _KeyHighlightCard(
                       icon: Icons.event_available_outlined,
                       label: 'DATE MATCH WAS FOUND',
-                      primaryValue: _formatFullDate(match.foundAt),
-                      secondaryValue: 'Discovered via: ${match.searchSlot}',
+                      primaryValue: _formatFullDate(_match.foundAt),
+                      secondaryValue: 'Discovered via: ${_match.searchSlot}',
                       accentColor: scheme.secondary,
                     );
 
@@ -330,13 +464,13 @@ class MatchDetailScreen extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    'Specific Features Meeting ${guest.name}\'s Requirements',
+                                    'Specific Features Meeting ${widget.guest.name}\'s Requirements',
                                     style: textTheme.titleMedium?.copyWith(
                                       fontWeight: FontWeight.w800,
                                     ),
                                   ),
                                   Text(
-                                    'Verified against previously input target specs (${guest.targetVehicleLabel})',
+                                    'Verified against previously input target specs (${widget.guest.targetVehicleLabel})',
                                     style: textTheme.bodySmall?.copyWith(
                                       color: scheme.onSurfaceVariant,
                                     ),
@@ -347,7 +481,7 @@ class MatchDetailScreen extends StatelessWidget {
                           ],
                         ),
                         const SizedBox(height: 16),
-                        if (match.matchedFeatures.isEmpty)
+                        if (_match.matchedFeatures.isEmpty)
                           Text(
                             'Matches core Year, Make, and Model specifications.',
                             style: textTheme.bodyMedium,
@@ -356,7 +490,7 @@ class MatchDetailScreen extends StatelessWidget {
                           Wrap(
                             spacing: 10,
                             runSpacing: 10,
-                            children: match.matchedFeatures.map((feature) {
+                            children: _match.matchedFeatures.map((feature) {
                               return Container(
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 14, vertical: 10),
@@ -393,7 +527,7 @@ class MatchDetailScreen extends StatelessWidget {
                               );
                             }).toList(),
                           ),
-                        if (match.agentSummary.isNotEmpty) ...[
+                        if (_match.agentSummary.isNotEmpty) ...[
                           const SizedBox(height: 18),
                           Container(
                             padding: const EdgeInsets.all(14),
@@ -422,7 +556,7 @@ class MatchDetailScreen extends StatelessWidget {
                                       ),
                                       const SizedBox(height: 4),
                                       Text(
-                                        match.agentSummary,
+                                        _match.agentSummary,
                                         style: textTheme.bodyMedium,
                                       ),
                                     ],
@@ -439,7 +573,7 @@ class MatchDetailScreen extends StatelessWidget {
                 const SizedBox(height: 18),
 
                 // Additional Equipped Factory Highlights from prestonmotor.com
-                if (match.allHighlights.isNotEmpty)
+                if (_match.allHighlights.isNotEmpty)
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(20),
@@ -456,7 +590,7 @@ class MatchDetailScreen extends StatelessWidget {
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
-                            children: match.allHighlights.map((h) {
+                            children: _match.allHighlights.map((h) {
                               return Chip(
                                 visualDensity: VisualDensity.compact,
                                 label: Text(h),

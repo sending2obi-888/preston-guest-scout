@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/models.dart';
@@ -9,7 +10,8 @@ import '../widgets/copyable_identifier_badge.dart';
 class GuestMatchesScreen extends StatefulWidget {
   final String guestId;
   final VoidCallback onDataChanged;
-  final void Function(VehicleMatch match, GuestProfile guest) onSelectMatch;
+  final FutureOr<void> Function(VehicleMatch match, GuestProfile guest)
+      onSelectMatch;
 
   const GuestMatchesScreen({
     super.key,
@@ -35,6 +37,8 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
   String _selectedTargetId = _allVehiclesFilter;
   String _selectedLocation = _allLocationsFilter;
+  bool _onlySelectedCandidates = false;
+  final Set<String> _togglingCandidateVins = {};
   String _sortBy = 'score';
   String _searchQuery = '';
   final TextEditingController _searchCtrl = TextEditingController();
@@ -321,6 +325,75 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     return c;
   }
 
+  int _countSelectedCandidates() {
+    int c = 0;
+    for (final m in _matches) {
+      if (m.isSelectedCandidate) c++;
+    }
+    return c;
+  }
+
+  Future<void> _toggleSelectedCandidate(VehicleMatch match) async {
+    final g = _guest;
+    if (g == null) return;
+    final key = match.vin.isNotEmpty ? match.vin : match.id;
+    if (_togglingCandidateVins.contains(key)) return;
+
+    final nextSelected = !match.isSelectedCandidate;
+    final prevMatches = _matches;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    setState(() {
+      _togglingCandidateVins.add(key);
+      _matches = _matches.map((m) {
+        final mKey = m.vin.isNotEmpty ? m.vin : m.id;
+        if (mKey != key) return m;
+        return m.copyWith(
+          isSelectedCandidate: nextSelected,
+          selectedAt: nextSelected ? nowIso : null,
+          clearSelectedAt: !nextSelected,
+          selectedUpdatedAt: nowIso,
+        );
+      }).toList();
+    });
+
+    try {
+      final res = await ApiService.setMatchSelectedCandidate(
+        guestId: g.id,
+        vin: key,
+        selected: nextSelected,
+      );
+      widget.onDataChanged();
+      if (!mounted) return;
+      setState(() {
+        _guest = res.guest;
+        _matches = res.matches;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 3),
+          content: Text(
+            nextSelected
+                ? 'Marked ${match.title} as a Selected Candidate for ${g.name}.'
+                : 'Removed ${match.title} from Selected Candidates.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _matches = prevMatches;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not update candidate status: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _togglingCandidateVins.remove(key));
+      }
+    }
+  }
+
   List<VehicleMatch> _computeFilteredMatches() {
     final q = _searchQuery.trim().toLowerCase();
     final allTargets = _guest?.effectiveTargets ?? const <VehicleSearchTarget>[];
@@ -335,6 +408,10 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     }
 
     final filtered = _matches.where((m) {
+      if (_onlySelectedCandidates && !m.isSelectedCandidate) {
+        return false;
+      }
+
       if (activeTarget != null &&
           !_doesMatchBelongToTarget(m, activeTarget, allTargets)) {
         return false;
@@ -361,6 +438,17 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     }).toList();
 
     switch (_sortBy) {
+      case 'selected_first':
+        filtered.sort((a, b) {
+          if (a.isSelectedCandidate != b.isSelectedCandidate) {
+            return b.isSelectedCandidate ? 1 : -1;
+          }
+          final cmp = b.matchScore.compareTo(a.matchScore);
+          if (cmp != 0) return cmp;
+          return (a.price ?? double.maxFinite)
+              .compareTo(b.price ?? double.maxFinite);
+        });
+        break;
       case 'price_asc':
         filtered.sort((a, b) =>
             (a.price ?? double.maxFinite).compareTo(b.price ?? double.maxFinite));
@@ -538,12 +626,20 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                     padding: const EdgeInsets.all(24),
                                     child: Column(
                                       children: [
-                                        Icon(Icons.filter_alt_off_outlined,
-                                            size: 40,
-                                            color: scheme.onSurfaceVariant),
+                                        Icon(
+                                          _onlySelectedCandidates
+                                              ? Icons.star_border_rounded
+                                              : Icons.filter_alt_off_outlined,
+                                          size: 40,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
                                         const SizedBox(height: 8),
                                         Text(
-                                          'No vehicles match the active vehicle/location/keyword filter.',
+                                          _onlySelectedCandidates &&
+                                                  _countSelectedCandidates() == 0
+                                              ? 'No vehicles marked as Selected Candidates yet. Tap "Select Candidate" on any match card to shortlist it.'
+                                              : 'No vehicles match the active vehicle/location/keyword filter.',
+                                          textAlign: TextAlign.center,
                                           style: textTheme.titleSmall,
                                         ),
                                         const SizedBox(height: 10),
@@ -551,6 +647,7 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                           onPressed: () {
                                             _searchCtrl.clear();
                                             setState(() {
+                                              _onlySelectedCandidates = false;
                                               _selectedTargetId =
                                                   _allVehiclesFilter;
                                               _selectedLocation =
@@ -559,7 +656,11 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                                             });
                                           },
                                           icon: const Icon(Icons.clear_all),
-                                          label: const Text('Reset Filters'),
+                                          label: Text(
+                                            _onlySelectedCandidates
+                                                ? 'Show All Matches'
+                                                : 'Reset Filters',
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -599,10 +700,48 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     int millsboroCount,
   ) {
     final targets = _guest?.effectiveTargets ?? const <VehicleSearchTarget>[];
+    final selectedCandidatesCount = _countSelectedCandidates();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (_matches.isNotEmpty) ...[
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilterChip(
+                key: const ValueKey('filter_all_matches_chip'),
+                avatar: const Icon(Icons.directions_car_outlined, size: 16),
+                label: Text(
+                  'All Matches (${numberFmt.format(_matches.length)})',
+                ),
+                selected: !_onlySelectedCandidates,
+                onSelected: (_) =>
+                    setState(() => _onlySelectedCandidates = false),
+              ),
+              FilterChip(
+                key: const ValueKey('filter_selected_candidates_chip'),
+                avatar: Icon(
+                  selectedCandidatesCount > 0 || _onlySelectedCandidates
+                      ? Icons.star_rounded
+                      : Icons.star_border_rounded,
+                  size: 17,
+                  color: selectedCandidatesCount > 0 || _onlySelectedCandidates
+                      ? const Color(0xFFB37A00)
+                      : null,
+                ),
+                label: Text(
+                  'Selected Candidates (${numberFmt.format(selectedCandidatesCount)})',
+                ),
+                selected: _onlySelectedCandidates,
+                onSelected: (sel) =>
+                    setState(() => _onlySelectedCandidates = sel),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+        ],
         if (targets.length > 1) ...[
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -675,6 +814,10 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                 initialValue: _sortBy,
                 onSelected: (v) => setState(() => _sortBy = v),
                 itemBuilder: (_) => const [
+                  PopupMenuItem(
+                    value: 'selected_first',
+                    child: Text('Selected Candidates First'),
+                  ),
                   PopupMenuItem(
                       value: 'score', child: Text('Best Match & Lowest Price')),
                   PopupMenuItem(
@@ -1385,13 +1528,27 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     final resolvedTargetLabel = match.targetLabel.isNotEmpty
         ? match.targetLabel
         : (targets.isNotEmpty ? targets.first.label : '');
+    final candidateKey = match.vin.isNotEmpty ? match.vin : match.id;
+    final isToggling = _togglingCandidateVins.contains(candidateKey);
 
     return Card(
       clipBehavior: Clip.antiAlias,
+      color: match.isSelectedCandidate
+          ? scheme.primaryContainer.withValues(alpha: 0.14)
+          : null,
+      shape: match.isSelectedCandidate
+          ? RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: scheme.primary, width: 2),
+            )
+          : null,
       child: InkWell(
-        onTap: () {
+        onTap: () async {
           if (_guest != null) {
-            widget.onSelectMatch(match, _guest!);
+            await widget.onSelectMatch(match, _guest!);
+            if (mounted) {
+              unawaited(_loadData());
+            }
           }
         },
         child: Padding(
@@ -1426,23 +1583,63 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
               final infoWidget = Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (showTargetBadge && resolvedTargetLabel.isNotEmpty) ...[
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: scheme.secondaryContainer,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        'Criteria: $resolvedTargetLabel',
-                        style: textTheme.labelSmall?.copyWith(
-                          color: scheme.onSecondaryContainer,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                  if (match.isSelectedCandidate ||
+                      (showTargetBadge && resolvedTargetLabel.isNotEmpty)) ...[
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        if (match.isSelectedCandidate)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF0C2),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: const Color(0xFFD99B00),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.star_rounded,
+                                  size: 13,
+                                  color: Color(0xFF7A5200),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'SELECTED CANDIDATE',
+                                  style: textTheme.labelSmall?.copyWith(
+                                    color: const Color(0xFF7A5200),
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (showTargetBadge && resolvedTargetLabel.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.secondaryContainer,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              'Criteria: $resolvedTargetLabel',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: scheme.onSecondaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                     const SizedBox(height: 6),
                   ],
@@ -1565,24 +1762,67 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                         ),
                     ],
                   ),
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'View Match Details',
-                          style: textTheme.labelMedium?.copyWith(
-                            color: scheme.primary,
-                            fontWeight: FontWeight.w700,
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      match.isSelectedCandidate
+                          ? FilledButton.tonalIcon(
+                              key: ValueKey(
+                                'toggle_selected_candidate_$candidateKey',
+                              ),
+                              style: FilledButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                              ),
+                              onPressed: isToggling
+                                  ? null
+                                  : () => _toggleSelectedCandidate(match),
+                              icon: const Icon(Icons.star_rounded, size: 17),
+                              label: const Text('Selected Candidate'),
+                            )
+                          : OutlinedButton.icon(
+                              key: ValueKey(
+                                'toggle_selected_candidate_$candidateKey',
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                              ),
+                              onPressed: isToggling
+                                  ? null
+                                  : () => _toggleSelectedCandidate(match),
+                              icon: const Icon(
+                                Icons.star_border_rounded,
+                                size: 17,
+                              ),
+                              label: const Text('Select Candidate'),
+                            ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'View Match Details',
+                            style: textTheme.labelMedium?.copyWith(
+                              color: scheme.primary,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(Icons.arrow_forward,
-                            size: 16, color: scheme.primary),
-                      ],
-                    ),
+                          const SizedBox(width: 4),
+                          Icon(Icons.arrow_forward,
+                              size: 16, color: scheme.primary),
+                        ],
+                      ),
+                    ],
                   ),
                 ],
               );

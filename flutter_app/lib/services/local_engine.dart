@@ -595,10 +595,14 @@ class LocalScoutEngine {
     final g = _normalizeGuestMap(rawG);
     final gid = g['id']?.toString() ?? '';
     int count = 0;
+    int selectedCount = 0;
     double? lowest;
     for (final m in _matches) {
       if (m['guestId']?.toString() != gid) continue;
       count++;
+      if (m['isSelectedCandidate'] == true || m['isSelectedCandidate'] == 1) {
+        selectedCount++;
+      }
       final p = (m['price'] as num?)?.toDouble();
       if (p != null && (lowest == null || p < lowest)) {
         lowest = p;
@@ -607,6 +611,7 @@ class LocalScoutEngine {
     return GuestProfile.fromJson({
       ...g,
       'matchCount': count,
+      'selectedCandidateCount': selectedCount,
       'lowestMatchPrice': lowest,
     });
   }
@@ -744,6 +749,56 @@ class LocalScoutEngine {
         return pa.compareTo(pb);
       });
     return (guest: _hydrateGuest(raw), matches: guestMatches);
+  }
+
+  static Future<
+          ({GuestProfile guest, List<VehicleMatch> matches, VehicleMatch match})>
+      setMatchSelectedCandidate({
+    required String guestId,
+    required String vin,
+    required bool selected,
+  }) async {
+    await ensureInitialized();
+    final gIdx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (gIdx == -1) throw Exception('Guest not found');
+
+    final cleanVin = vin.trim();
+    final mIdx = _matches.indexWhere(
+      (m) =>
+          m['guestId']?.toString() == guestId &&
+          (m['vin']?.toString() == cleanVin || m['id']?.toString() == cleanVin),
+    );
+    if (mIdx == -1) throw Exception('Vehicle match not found');
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final prev = _matches[mIdx];
+    final title = (prev['title']?.toString() ?? '').trim();
+    final updatedMap = <String, dynamic>{
+      ...prev,
+      'isSelectedCandidate': selected,
+      'selectedAt': selected ? nowIso : null,
+      'selectedUpdatedAt': nowIso,
+    };
+    _matches[mIdx] = updatedMap;
+    _guests[gIdx] = <String, dynamic>{
+      ..._guests[gIdx],
+      'updatedAt': nowIso,
+    };
+
+    _recordBackupSnapshotSync(
+      label: selected
+          ? 'Auto-Backup • Selected ${title.isNotEmpty ? title : cleanVin}'
+          : 'Auto-Backup • Unselected ${title.isNotEmpty ? title : cleanVin}',
+    );
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+
+    final refreshed = await getGuestWithMatches(guestId);
+    return (
+      guest: refreshed.guest,
+      matches: refreshed.matches,
+      match: VehicleMatch.fromJson(updatedMap),
+    );
   }
 
   static Future<void> deleteGuest(String guestId) async {
@@ -1457,6 +1512,10 @@ class LocalScoutEngine {
           'lastSeenAt': nowIso,
           'targetId': item['targetId'] ?? '',
           'targetLabel': item['targetLabel'] ?? '',
+          'isSelectedCandidate': prev?['isSelectedCandidate'] == true ||
+              prev?['isSelectedCandidate'] == 1,
+          'selectedAt': prev?['selectedAt'],
+          'selectedUpdatedAt': prev?['selectedUpdatedAt'],
         });
 
         // Fire OS notification ONLY when a brand-new VIN is discovered AFTER initial search
@@ -3086,6 +3145,26 @@ class LocalScoutEngine {
           final existing = _matches[existingIdx];
           final localSeen =
               (existing['lastSeenAt'] ?? existing['foundAt'] ?? '').toString();
+          final rmSelUpd =
+              (rm['selectedUpdatedAt'] ?? rm['selectedAt'] ?? '').toString();
+          final locSelUpd =
+              (existing['selectedUpdatedAt'] ?? existing['selectedAt'] ?? '')
+                  .toString();
+          final remoteSelWins = (rmSelUpd.isNotEmpty &&
+                  rmSelUpd.compareTo(locSelUpd) >= 0) ||
+              (locSelUpd.isEmpty &&
+                  (rm['isSelectedCandidate'] == true ||
+                      rm['isSelectedCandidate'] == 1));
+          final mergedIsSel = remoteSelWins
+              ? (rm['isSelectedCandidate'] == true ||
+                  rm['isSelectedCandidate'] == 1)
+              : (existing['isSelectedCandidate'] == true ||
+                  existing['isSelectedCandidate'] == 1);
+          final mergedSelAt =
+              remoteSelWins ? rm['selectedAt'] : existing['selectedAt'];
+          final mergedSelUpd =
+              remoteSelWins ? rm['selectedUpdatedAt'] : existing['selectedUpdatedAt'];
+
           if (rmSeen.compareTo(localSeen) > 0) {
             final localFound = (existing['foundAt'] ?? rmSeen).toString();
             final remoteFound = (rm['foundAt'] ?? rmSeen).toString();
@@ -3097,6 +3176,17 @@ class LocalScoutEngine {
               ...existing,
               ...rm,
               'foundAt': earliestFound,
+              'isSelectedCandidate': mergedIsSel,
+              'selectedAt': mergedSelAt,
+              'selectedUpdatedAt': mergedSelUpd,
+            };
+            localChanged = true;
+          } else if (rmSelUpd.isNotEmpty && rmSelUpd.compareTo(locSelUpd) > 0) {
+            _matches[existingIdx] = <String, dynamic>{
+              ...existing,
+              'isSelectedCandidate': mergedIsSel,
+              'selectedAt': mergedSelAt,
+              'selectedUpdatedAt': mergedSelUpd,
             };
             localChanged = true;
           }
@@ -3229,7 +3319,10 @@ class LocalScoutEngine {
       ..sort();
 
     final mParts = [...matches]
-        .map((m) => '${m['guestId']}::${m['vin']}::${m['price']}')
+        .map(
+          (m) =>
+              '${m['guestId']}::${m['vin']}::${m['price']}::${(m['isSelectedCandidate'] == true || m['isSelectedCandidate'] == 1) ? '1' : '0'}',
+        )
         .toList()
       ..sort();
 

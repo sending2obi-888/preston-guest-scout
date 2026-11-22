@@ -54,8 +54,8 @@ class _PrestonGuestScoutAppState extends State<PrestonGuestScoutApp> {
         builder: (_) => GuestMatchesScreen(
           guestId: guestId,
           onDataChanged: () {},
-          onSelectMatch: (match, guest) {
-            nav.push(
+          onSelectMatch: (match, guest) async {
+            await nav.push(
               MaterialPageRoute(
                 builder: (_) => MatchDetailScreen(match: match, guest: guest),
               ),
@@ -309,10 +309,14 @@ class _MainShellScreenState extends State<MainShellScreen>
         builder: (_) => GuestMatchesScreen(
           guestId: guestId,
           onDataChanged: _refreshAll,
-          onSelectMatch: (match, guest) {
-            Navigator.of(context).push(
+          onSelectMatch: (match, guest) async {
+            await Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => MatchDetailScreen(match: match, guest: guest),
+                builder: (_) => MatchDetailScreen(
+                  match: match,
+                  guest: guest,
+                  onDataChanged: _refreshAll,
+                ),
               ),
             );
           },

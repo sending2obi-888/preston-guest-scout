@@ -84,6 +84,9 @@ db.exec(`
     last_seen_at TEXT NOT NULL,
     target_id TEXT DEFAULT '',
     target_label TEXT DEFAULT '',
+    is_selected_candidate INTEGER DEFAULT 0,
+    selected_at TEXT,
+    selected_updated_at TEXT,
     UNIQUE(guest_id, vin)
   );
 
@@ -191,6 +194,9 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN doors TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
+  `ALTER TABLE matches ADD COLUMN is_selected_candidate INTEGER DEFAULT 0`,
+  `ALTER TABLE matches ADD COLUMN selected_at TEXT`,
+  `ALTER TABLE matches ADD COLUMN selected_updated_at TEXT`,
   `ALTER TABLE vin_recall_checks ADD COLUMN incomplete_count INTEGER DEFAULT 0`,
   `ALTER TABLE vin_recall_checks ADD COLUMN complete_count INTEGER DEFAULT 0`,
 ]) {
@@ -421,7 +427,7 @@ export function mapGuestRow(row) {
 
   const matchStats = db
     .prepare(
-      'SELECT COUNT(*) AS count, MIN(price) AS lowest_price FROM matches WHERE guest_id = ?'
+      'SELECT COUNT(*) AS count, MIN(price) AS lowest_price, SUM(CASE WHEN is_selected_candidate = 1 THEN 1 ELSE 0 END) AS selected_count FROM matches WHERE guest_id = ?'
     )
     .get(row.id);
 
@@ -458,6 +464,7 @@ export function mapGuestRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at || row.last_searched_at || row.created_at,
     matchCount: Number(matchStats?.count || 0),
+    selectedCandidateCount: Number(matchStats?.selected_count || 0),
     lowestMatchPrice: matchStats?.lowest_price ?? null,
   };
 }
@@ -574,6 +581,9 @@ export function mapMatchRow(row) {
     lastSeenAt: row.last_seen_at,
     targetId: row.target_id || '',
     targetLabel: row.target_label || '',
+    isSelectedCandidate: Boolean(row.is_selected_candidate),
+    selectedAt: row.selected_at || null,
+    selectedUpdatedAt: row.selected_updated_at || null,
   };
 }
 

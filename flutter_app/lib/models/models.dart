@@ -187,6 +187,7 @@ class GuestProfile {
   final String lastSearchSummary;
   final String createdAt;
   final int matchCount;
+  final int selectedCandidateCount;
   final double? lowestMatchPrice;
 
   const GuestProfile({
@@ -220,6 +221,7 @@ class GuestProfile {
     this.lastSearchSummary = '',
     required this.createdAt,
     this.matchCount = 0,
+    this.selectedCandidateCount = 0,
     this.lowestMatchPrice,
   });
 
@@ -357,6 +359,8 @@ class GuestProfile {
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
       createdAt: createdAtStr,
       matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
+      selectedCandidateCount:
+          (json['selectedCandidateCount'] as num?)?.toInt() ?? 0,
       lowestMatchPrice: (json['lowestMatchPrice'] as num?)?.toDouble(),
     );
   }
@@ -476,6 +480,9 @@ class VehicleMatch {
   final String lastSeenAt;
   final String targetId;
   final String targetLabel;
+  final bool isSelectedCandidate;
+  final String? selectedAt;
+  final String? selectedUpdatedAt;
 
   const VehicleMatch({
     required this.id,
@@ -508,9 +515,57 @@ class VehicleMatch {
     required this.lastSeenAt,
     this.targetId = '',
     this.targetLabel = '',
+    this.isSelectedCandidate = false,
+    this.selectedAt,
+    this.selectedUpdatedAt,
   });
 
+  VehicleMatch copyWith({
+    bool? isSelectedCandidate,
+    String? selectedAt,
+    bool clearSelectedAt = false,
+    String? selectedUpdatedAt,
+  }) {
+    return VehicleMatch(
+      id: id,
+      guestId: guestId,
+      vin: vin,
+      stockNumber: stockNumber,
+      title: title,
+      year: year,
+      make: make,
+      model: model,
+      trim: trim,
+      condition: condition,
+      price: price,
+      msrp: msrp,
+      dealerFee: dealerFee,
+      location: location,
+      mileage: mileage,
+      drivetrain: drivetrain,
+      engine: engine,
+      exteriorColor: exteriorColor,
+      interiorColor: interiorColor,
+      photoUrl: photoUrl,
+      listingUrl: listingUrl,
+      matchedFeatures: matchedFeatures,
+      allHighlights: allHighlights,
+      agentSummary: agentSummary,
+      matchScore: matchScore,
+      foundAt: foundAt,
+      searchSlot: searchSlot,
+      lastSeenAt: lastSeenAt,
+      targetId: targetId,
+      targetLabel: targetLabel,
+      isSelectedCandidate: isSelectedCandidate ?? this.isSelectedCandidate,
+      selectedAt: clearSelectedAt ? null : (selectedAt ?? this.selectedAt),
+      selectedUpdatedAt: selectedUpdatedAt ?? this.selectedUpdatedAt,
+    );
+  }
+
   factory VehicleMatch.fromJson(Map<String, dynamic> json) {
+    final rawSelAt = json['selectedAt']?.toString().trim() ?? '';
+    final rawSelUpd = json['selectedUpdatedAt']?.toString().trim() ?? '';
     return VehicleMatch(
       id: json['id']?.toString() ?? '',
       guestId: json['guestId']?.toString() ?? '',
@@ -548,6 +603,10 @@ class VehicleMatch {
       lastSeenAt: json['lastSeenAt']?.toString() ?? '',
       targetId: json['targetId']?.toString() ?? '',
       targetLabel: json['targetLabel']?.toString() ?? '',
+      isSelectedCandidate: json['isSelectedCandidate'] == true ||
+          json['isSelectedCandidate'] == 1,
+      selectedAt: rawSelAt.isEmpty ? null : rawSelAt,
+      selectedUpdatedAt: rawSelUpd.isEmpty ? null : rawSelUpd,
     );
   }
 }

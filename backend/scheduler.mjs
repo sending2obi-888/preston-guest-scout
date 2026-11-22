@@ -225,10 +225,13 @@ function persistEvaluatedMatchesAndNotifications({
         }
       }
     } else if (onlyTargetId && evalRes.candidatesScanned > 0) {
-      db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
-        guest.id,
-        onlyTargetId
-      );
+      const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
+      const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+      for (const r of existingRows) {
+        if (r.target_id === onlyTargetId && !foundVins.has(r.vin)) {
+          delStmt.run(r.id);
+        }
+      }
     }
 
     for (const m of evalRes.matches) {

@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:preston_guest_scout/main.dart';
 import 'package:preston_guest_scout/models/models.dart';
+import 'package:preston_guest_scout/screens/guest_list_screen.dart';
 import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/home_intake_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
@@ -3152,6 +3153,195 @@ void main() {
     expect(find.text('AWD'), findsOneWidget);
 
     LocalScoutEngine.resetForTest();
+  });
+
+  testWidgets(
+      'Specific vehicles can be marked as Selected Candidates, filtered in GuestMatchesScreen, toggled in MatchDetailScreen, badged on GuestListScreen, and preserved across re-scans & cloud sync',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final mockInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FTFW3L87TKA90001',
+        'stockNumber': 'S9001',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'condition': 'New',
+        'price': 51500.0,
+        'location': 'Preston Ford of Hurlock',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Oxford White',
+      },
+      {
+        'vin': '1FTFW5L89TKA90002',
+        'stockNumber': 'S9002',
+        'title': '2026 Ford F-150 Lariat',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'Lariat',
+        'condition': 'New',
+        'price': 58900.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Antimatter Blue',
+      },
+    ];
+
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Jordan Vance',
+      make: 'Ford',
+      model: 'F-150',
+      mockCandidatesOverride: mockInventory,
+    );
+    expect(created.matchesFound, 2);
+    expect(created.guest.selectedCandidateCount, 0);
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1500);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    // 1. Open GuestMatchesScreen and mark the Lariat (1FTFW5L89TKA90002) as a Selected Candidate
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: created.guest.id,
+          onDataChanged: () {},
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('All Matches (2)'), findsOneWidget);
+    expect(find.text('Selected Candidates (0)'), findsOneWidget);
+    expect(find.text('SELECTED CANDIDATE'), findsNothing);
+
+    final lariatToggle = find.byKey(
+      const ValueKey('toggle_selected_candidate_1FTFW5L89TKA90002'),
+    );
+    await tester.ensureVisible(lariatToggle);
+    await tester.tap(lariatToggle);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Selected Candidates (1)'), findsOneWidget);
+    expect(find.text('SELECTED CANDIDATE'), findsOneWidget);
+    expect(find.text('Selected Candidate'), findsOneWidget);
+
+    // 2. Filter to Selected Candidates (1) -> shows ONLY the Lariat and hides the XLT
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('filter_selected_candidates_chip')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('filter_selected_candidates_chip')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2026 Ford F-150 Lariat'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 XLT'), findsNothing);
+
+    // Switch back to All Matches (2)
+    await tester.tap(find.byKey(const ValueKey('filter_all_matches_chip')));
+    await tester.pumpAndSettle();
+    expect(find.text('2026 Ford F-150 XLT'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 Lariat'), findsOneWidget);
+
+    // 3. Re-running live search preserves Selected Candidate status on 1FTFW5L89TKA90002!
+    final rescanned = await LocalScoutEngine.runSearchForSingleGuest(
+      created.guest.id,
+      mockCandidatesOverride: mockInventory,
+    );
+    expect(rescanned.guest.selectedCandidateCount, 1);
+    final lariatAfterRescan = rescanned.matches.firstWhere(
+      (m) => m.vin == '1FTFW5L89TKA90002',
+    );
+    final xltAfterRescan = rescanned.matches.firstWhere(
+      (m) => m.vin == '1FTFW3L87TKA90001',
+    );
+    expect(lariatAfterRescan.isSelectedCandidate, isTrue);
+    expect(xltAfterRescan.isSelectedCandidate, isFalse);
+
+    // 4. MatchDetailScreen also allows marking/unmarking a vehicle as a Selected Candidate
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatchDetailScreen(
+          match: xltAfterRescan,
+          guest: rescanned.guest,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Mark as Selected Candidate'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('detail_toggle_selected_candidate')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('SELECTED CANDIDATE'), findsOneWidget);
+    expect(find.text('Selected Candidate'), findsOneWidget);
+
+    // 5. GuestListScreen displays "2 Selected" badge for Jordan Vance
+    final allGuests = await LocalScoutEngine.getAllGuests();
+    expect(allGuests.single.selectedCandidateCount, 2);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GuestListScreen(
+            guests: allGuests,
+            isLoading: false,
+            onRefresh: () {},
+            onSelectGuest: (_) {},
+            onSwitchToIntake: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(
+        ValueKey('guest_selected_candidates_badge_${created.guest.id}'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('2 Selected'), findsOneWidget);
+
+    // Drain any auto-save debounce timer
+    await tester.pump(const Duration(seconds: 1));
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
   });
 }
 
