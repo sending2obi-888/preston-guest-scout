@@ -610,6 +610,158 @@ export function extractCabStyleFromText(rawText) {
   return '';
 }
 
+export function normalizeDoorsInput(rawDoors) {
+  if (rawDoors == null) return '';
+  const s = String(rawDoors).trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'any' || lower === 'any doors' || lower === 'all' || lower === '0') {
+    return '';
+  }
+  const digitMatch = lower.match(/\b([2345])\b/);
+  if (digitMatch) return digitMatch[1];
+  const prefixDigit = lower.match(/^([2345])(?:[-\s]*(?:doors?|dr\.?))?$/);
+  if (prefixDigit) return prefixDigit[1];
+  if (/\btwo\b/.test(lower)) return '2';
+  if (/\bthree\b/.test(lower)) return '3';
+  if (/\bfour\b/.test(lower)) return '4';
+  if (/\bfive\b/.test(lower)) return '5';
+  return '';
+}
+
+export function extractDoorsFromQuery(rawText) {
+  if (!rawText) return '';
+  const scrubbed = String(rawText).replace(
+    /\b\d[-\s]*door\s+intelligent\s+access\b|\b(?:garage|barn|roll[\s-]*up|rear|cargo)\s+doors?\b/gi,
+    ' '
+  );
+  const numMatch = scrubbed.match(/\b([2345])[-\s]*(?:doors?|dr\.?)\b/i);
+  if (numMatch) return numMatch[1];
+  if (/\btwo[-\s]*doors?\b/i.test(scrubbed)) return '2';
+  if (/\bthree[-\s]*doors?\b/i.test(scrubbed)) return '3';
+  if (/\bfour[-\s]*doors?\b/i.test(scrubbed)) return '4';
+  if (/\bfive[-\s]*doors?\b/i.test(scrubbed)) return '5';
+  return '';
+}
+
+export function formatDoorsLabel(doors) {
+  const clean = normalizeDoorsInput(doors);
+  if (!clean) return '';
+  return `${clean} Doors`;
+}
+
+export function extractDoorsFromVehicle(vc, fullCommentsClean = '') {
+  if (!vc) return '';
+
+  const explicit = normalizeDoorsInput(vc.doors ?? vc.Doors ?? vc.VehicleDoors);
+  if (explicit) return explicit;
+
+  const vin = String(vc.VehicleVin || vc.vin || '').trim().toUpperCase();
+  const modelCode = String(vc.VehicleModelCode || vc.modelCode || '').trim().toUpperCase();
+  const title = String(vc.VehicleName || vc.title || '').trim();
+  const model = String(vc.VehicleModel || vc.model || '').trim();
+  const trim = String(vc.VehicleTrim || vc.trim || '').trim();
+  const bodyStyle = String(vc.VehicleBodyStyle || vc.bodyStyle || '').trim();
+  const bodyType = String(vc.VehicleBodyType || vc.bodyType || '').trim();
+  const bodyCombined = `${bodyStyle} ${bodyType} ${title} ${trim}`;
+
+  // 1. Explicit door count in bodyStyle / bodyType / title / trim (e.g. "Sedan 4 Dr.", "4dr Car", "2-Door")
+  const explicitBodyMatch = bodyCombined.match(/\b([2345])[-\s]*(?:doors?|dr\.?)\b/i);
+  if (explicitBodyMatch) {
+    return explicitBodyMatch[1];
+  }
+
+  const modelTitleLower = `${model} ${title}`.toLowerCase();
+  const lenNum = Number(vc.Length ?? vc.vehicleLength ?? 0) || 0;
+
+  // 2. Full-size Ford Bronco (2-Door vs 4-Door; excludes Bronco Sport which is always 4-Door)
+  const isFullSizeBronco =
+    /\bbronco\b/.test(modelTitleLower) && !/\bbronco\s+sport\b/.test(modelTitleLower);
+  if (isFullSizeBronco) {
+    const code = modelCode || (vin.length >= 7 && vin.startsWith('1FM') ? vin.slice(4, 7) : '');
+    if (/^E\d[AC]$/.test(code)) return '2';
+    if (/^E\d[BDEJ]$/.test(code)) return '4';
+    if (lenNum >= 165 && lenNum < 181) return '2';
+    if (lenNum >= 184) return '4';
+  }
+
+  // 3. Jeep Wrangler (2-Door vs 4-Door Unlimited / 4xe)
+  if (/\bwrangler\b/.test(modelTitleLower)) {
+    if (/\b(?:unlimited|4xe|rubicon\s+392)\b/i.test(`${title} ${trim} ${fullCommentsClean}`)) {
+      return '4';
+    }
+    if (lenNum >= 183) return '4';
+    if (lenNum >= 155 && lenNum < 176) return '2';
+  }
+
+  // 4. Scrubbed build-sheet comments check (ignoring Ford "2-door Intelligent Access" keyless entry!)
+  if (fullCommentsClean) {
+    const scrubbedComments = String(fullCommentsClean).replace(
+      /\b\d[-\s]*door\s+intelligent\s+access\b|\b(?:garage|barn|roll[\s-]*up|rear|cargo|sliding)\s+doors?\b/gi,
+      ' '
+    );
+    const commentDoorMatch = scrubbedComments.match(/\b([2345])[-\s]*(?:doors?|dr\.?)\b/i);
+    if (commentDoorMatch) {
+      return commentDoorMatch[1];
+    }
+  }
+
+  // 5. Pickup Trucks: Regular Cab = 2 Doors; SuperCab / Extended Cab / Crew Cab / SuperCrew = 4 Doors
+  const cab =
+    vc.cabStyle || extractCabStyleFromText(`${bodyStyle} ${bodyType} ${title} ${fullCommentsClean}`);
+  if (cab === 'Regular Cab' || /^1FT[MN]F1/.test(vin)) {
+    return '2';
+  }
+  if (cab === 'Crew Cab' || cab === 'SuperCab') {
+    return '4';
+  }
+  if (/\b(?:maverick|f[\s-]*150\s+lightning|gladiator|ridgeline|santa\s+cruz)\b/.test(modelTitleLower)) {
+    return '4';
+  }
+
+  // 6. 2-Door Coupes, Convertibles, and Sports Cars
+  if (
+    /\b(?:coupe|convertible|roadster|spyder|targa)\b/i.test(bodyCombined) &&
+    !/\b(?:gran\s+coupe|4[-\s]*door\s+coupe|sportback)\b/i.test(bodyCombined)
+  ) {
+    return '2';
+  }
+  if (
+    (/\bmustang\b/.test(modelTitleLower) && !/\bmach[\s-]*e\b/.test(modelTitleLower)) ||
+    /\b(?:corvette|camaro|challenger|miata|mx[\s-]*5|brz|gr86|supra|370z|nissan\s+z)\b/.test(
+      modelTitleLower
+    )
+  ) {
+    return '2';
+  }
+
+  // 7. Hyundai Veloster 3-Door
+  if (/\bveloster\b/.test(modelTitleLower)) {
+    return '3';
+  }
+
+  // 8. Standard 4-Door Sedans, SUVs, Crossovers, Wagons, Hatchbacks, and Minivans
+  if (
+    /\b(?:sedan|sport\s+utility|suv|utility|wagon|minivan|passenger\s+van|hatchback|crossover)\b/i.test(
+      `${bodyStyle} ${bodyType}`
+    ) &&
+    !isFullSizeBronco &&
+    !/\bwrangler\b/.test(modelTitleLower)
+  ) {
+    return '4';
+  }
+
+  if (
+    /\b(?:bronco\s+sport|mach[\s-]*e|explorer|escape|edge|expedition|ecosport|fusion|taurus|nautilus|aviator|corsair|navigator|mkz|mkc|mkx|elantra|sonata|tucson|santa\s+fe|palisade|kona|venue|ioniq|cx[\s-]*\d+|mazda\s*3|mazda\s*6|rogue|murano|pathfinder|armada|kicks|altima|sentra|versa|equinox|traverse|tahoe|suburban|trax|trailblazer|blazer|malibu|compass|cherokee|grand\s+cherokee|wagoneer|durango|pacifica|hornet|telluride|sorento|sportage|carnival|k5|ev6|ev9|outback|forester|crosstrek|ascent|wrx|rav4|highlander|4runner|camry|corolla|sienna|prius|cr[\s-]*v|hr[\s-]*v|pilot|passport|odyssey|accord|civic)\b/.test(
+      modelTitleLower
+    )
+  ) {
+    return '4';
+  }
+
+  return '';
+}
+
 export function extractEngineSpecFromText(rawText) {
   if (!rawText) return '';
   const s = String(rawText);
@@ -894,7 +1046,7 @@ export function parseNaturalLanguageCriteria(guest = {}) {
     }
   }
 
-  // 3. Bed Length & Cab Style
+  // 3. Bed Length, Cab Style & Number of Doors
   const explicitBed = String(guest.bedLength || '').trim();
   const bedLength =
     explicitBed ||
@@ -903,6 +1055,12 @@ export function parseNaturalLanguageCriteria(guest = {}) {
 
   const explicitCab = String(guest.cabStyle || '').trim();
   const cabStyle = explicitCab || extractCabStyleFromText(strictCombined);
+
+  const explicitDoors = normalizeDoorsInput(guest.doors);
+  const doors =
+    explicitDoors ||
+    extractDoorsFromQuery(strictCombined) ||
+    extractDoorsFromQuery(combinedRaw);
 
   // 4. Engine / Powertrain (strict only from non-preference clauses!)
   const explicitEngine = String(guest.engineSpec || '').trim();
@@ -1008,6 +1166,7 @@ export function parseNaturalLanguageCriteria(guest = {}) {
     trim,
     bedLength,
     cabStyle,
+    doors,
     engineSpec,
     condition,
     drivetrain,
@@ -1185,6 +1344,23 @@ export function doesVehicleMatchCabStyle(targetCabStyle, vehicle) {
       `${vehicle?.bodyStyle || ''} ${vehicle?.title || ''} ${vehicle?.commentsSummary || ''}`
     );
   return vCab === targetCabStyle;
+}
+
+export function doesVehicleMatchDoors(targetDoors, vehicle) {
+  const cleanTarget = normalizeDoorsInput(targetDoors);
+  if (!cleanTarget) return true;
+  const vDoors =
+    normalizeDoorsInput(vehicle?.doors) ||
+    extractDoorsFromVehicle(
+      vehicle,
+      vehicle?.fullCommentsSearchText || vehicle?.commentsSummary || ''
+    );
+  if (!vDoors) return false;
+  if (cleanTarget === '5') {
+    const bodyHay = `${vehicle?.bodyStyle || ''} ${vehicle?.bodyType || ''} ${vehicle?.title || ''}`;
+    return vDoors === '5' || (vDoors === '4' && /\b(?:hatchback|sportback|liftback|5[-\s]*dr)\b/i.test(bodyHay));
+  }
+  return vDoors === cleanTarget;
 }
 
 export function doesVehicleMatchEngine(targetEngineSpec, vehicle) {

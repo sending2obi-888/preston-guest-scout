@@ -270,8 +270,10 @@ object NativeBackgroundMatchScanner {
         if (model.isNotEmpty()) parts.add(model)
         if (trim.isNotEmpty()) parts.add(trim)
         val qualifiers = mutableListOf<String>()
+        val doors = target.optString("doors", "").trim()
         val cab = target.optString("cabStyle", "").trim()
         val bed = target.optString("bedLength", "").trim()
+        if (doors.isNotEmpty()) qualifiers.add("$doors Doors")
         if (cab.isNotEmpty()) qualifiers.add(cab)
         if (bed.isNotEmpty()) qualifiers.add("${bed.removeSuffix("'")} ft Bed")
         val base = parts.joinToString(" ")
@@ -281,6 +283,79 @@ object NativeBackgroundMatchScanner {
             base.isEmpty() -> qualifiers.joinToString(" • ")
             else -> "$base • ${qualifiers.joinToString(" • ")}"
         }
+    }
+
+    private fun extractVehicleDoors(
+        vin: String,
+        modelCode: String,
+        title: String,
+        model: String,
+        trim: String,
+        bodyStyle: String,
+        bodyType: String,
+        cabStyle: String,
+        lengthInches: Double,
+        commentsClean: String
+    ): String {
+        val bodyCombined = "$bodyStyle $bodyType $title $trim"
+        val explicitBody = Regex("\\b([2345])[-\\s]*(?:doors?|dr\\.?)\\b", RegexOption.IGNORE_CASE)
+            .find(bodyCombined)
+        if (explicitBody != null) return explicitBody.groupValues[1]
+
+        val modelTitleLower = "$model $title".lowercase(Locale.US)
+        val isFullBronco = Regex("\\bbronco\\b").containsMatchIn(modelTitleLower) &&
+            !Regex("\\bbronco\\s+sport\\b").containsMatchIn(modelTitleLower)
+        if (isFullBronco) {
+            val code = modelCode.uppercase(Locale.US).ifEmpty {
+                if (vin.length >= 7 && vin.startsWith("1FM", ignoreCase = true)) {
+                    vin.substring(4, 7).uppercase(Locale.US)
+                } else ""
+            }
+            if (Regex("^E\\d[AC]$").matches(code)) return "2"
+            if (Regex("^E\\d[BDEJ]$").matches(code)) return "4"
+            if (lengthInches >= 165.0 && lengthInches < 181.0) return "2"
+            if (lengthInches >= 184.0) return "4"
+        }
+
+        if (Regex("\\bwrangler\\b").containsMatchIn(modelTitleLower)) {
+            if (Regex("\\b(?:unlimited|4xe|rubicon\\s+392)\\b", RegexOption.IGNORE_CASE)
+                    .containsMatchIn("$title $trim $commentsClean") || lengthInches >= 183.0
+            ) return "4"
+            if (lengthInches >= 155.0 && lengthInches < 176.0) return "2"
+        }
+
+        if (commentsClean.isNotEmpty()) {
+            val scrubbed = commentsClean.replace(
+                Regex("\\b\\d[-\\s]*door\\s+intelligent\\s+access\\b|\\b(?:garage|barn|roll[\\s-]*up|rear|cargo|sliding)\\s+doors?\\b", RegexOption.IGNORE_CASE),
+                " "
+            )
+            val m = Regex("\\b([2345])[-\\s]*(?:doors?|dr\\.?)\\b", RegexOption.IGNORE_CASE).find(scrubbed)
+            if (m != null) return m.groupValues[1]
+        }
+
+        if (cabStyle == "Regular Cab" || Regex("^1FT[MN]F1", RegexOption.IGNORE_CASE).containsMatchIn(vin)) {
+            return "2"
+        }
+        if (cabStyle == "Crew Cab" || cabStyle == "SuperCab") {
+            return "4"
+        }
+        if (Regex("\\b(?:coupe|convertible|roadster)\\b", RegexOption.IGNORE_CASE).containsMatchIn(bodyCombined) &&
+            !Regex("\\b(?:gran\\s+coupe|4[-\\s]*door\\s+coupe|sportback)\\b", RegexOption.IGNORE_CASE).containsMatchIn(bodyCombined)
+        ) {
+            return "2"
+        }
+        if ((Regex("\\bmustang\\b").containsMatchIn(modelTitleLower) && !Regex("\\bmach[\\s-]*e\\b").containsMatchIn(modelTitleLower)) ||
+            Regex("\\b(?:corvette|camaro|challenger|miata|mx[\\s-]*5|brz|gr86|supra)\\b").containsMatchIn(modelTitleLower)
+        ) {
+            return "2"
+        }
+        if (Regex("\\bveloster\\b").containsMatchIn(modelTitleLower)) return "3"
+        if (Regex("\\b(?:sedan|sport\\s+utility|suv|utility|wagon|minivan|passenger\\s+van|hatchback|crossover)\\b", RegexOption.IGNORE_CASE)
+                .containsMatchIn("$bodyStyle $bodyType") && !isFullBronco && !Regex("\\bwrangler\\b").containsMatchIn(modelTitleLower)
+        ) {
+            return "4"
+        }
+        return ""
     }
 
     private fun bedLengthToFacetValues(bedLength: String): List<String> =
@@ -550,7 +625,10 @@ object NativeBackgroundMatchScanner {
             .trim()
         val titleStr = vc.optString("VehicleName", "")
         val modelStr = vc.optString("VehicleModel", "")
+        val trimStr = vc.optString("VehicleTrim", vc.optString("VehicleRuleAdjustedTrim", "")).trim()
         val bodyStyle = vc.optString("VehicleBodyStyle", vc.optString("VehicleBodyType", ""))
+        val bodyType = vc.optString("VehicleBodyType", "")
+        val modelCode = vc.optString("VehicleModelCode", "").trim()
         val lenInches = vc.optDouble("Length", 0.0)
         val bedLength = extractBedLengthFromVehicleText(
             title = titleStr,
@@ -561,6 +639,18 @@ object NativeBackgroundMatchScanner {
             facetBedLength = facetBedLength
         )
         val cabStyle = extractCabStyle("$bodyStyle $titleStr $commentsClean")
+        val doors = extractVehicleDoors(
+            vin = vin,
+            modelCode = modelCode,
+            title = titleStr,
+            model = modelStr,
+            trim = trimStr,
+            bodyStyle = bodyStyle,
+            bodyType = bodyType,
+            cabStyle = cabStyle,
+            lengthInches = lenInches,
+            commentsClean = commentsClean
+        )
 
         val city = vc.optString("DealerLocatedAtCity", "").trim()
         val state = vc.optString("DealerLocatedAtState", "").trim()
@@ -614,8 +704,9 @@ object NativeBackgroundMatchScanner {
             if (yr > 0) put("year", yr)
             put("make", vc.optString("VehicleMake", ""))
             put("model", modelStr)
-            put("trim", vc.optString("VehicleTrim", vc.optString("VehicleRuleAdjustedTrim", "")).trim())
+            put("trim", trimStr)
             put("bodyStyle", bodyStyle)
+            put("doors", doors)
             put("bedLength", bedLength)
             put("cabStyle", cabStyle)
             put("condition", condition)
@@ -667,6 +758,11 @@ object NativeBackgroundMatchScanner {
             if (!trimRegex.containsMatchIn(vTrim) && !trimRegex.containsMatchIn(vTitle)) {
                 return false
             }
+        }
+        val targetDoors = Regex("\\b([2345])\\b").find(target.optString("doors", ""))?.groupValues?.get(1) ?: ""
+        if (targetDoors.isNotEmpty()) {
+            val vDoors = v.optString("doors", "").trim()
+            if (vDoors != targetDoors) return false
         }
         val targetBed = target.optString("bedLength", "").trim().removeSuffix("'")
         if (targetBed.isNotEmpty()) {

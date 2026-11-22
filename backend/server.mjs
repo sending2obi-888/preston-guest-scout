@@ -101,6 +101,7 @@ function buildNormalizedVehicleTarget(rawSpec, fallbackId, createdAtIso) {
     make: (rawSpec.make || '').trim(),
     model: (rawSpec.model || '').trim(),
     trim: (rawSpec.trim || '').trim(),
+    doors: (rawSpec.doors || '').trim(),
     bedLength: (rawSpec.bedLength || '').trim(),
     cabStyle: (rawSpec.cabStyle || '').trim(),
     engineSpec: (rawSpec.engineSpec || '').trim(),
@@ -123,6 +124,7 @@ function buildNormalizedVehicleTarget(rawSpec, fallbackId, createdAtIso) {
     make: normalized.make || '',
     model: normalized.model || '',
     trim: normalized.trim || '',
+    doors: normalized.doors || '',
     bedLength: normalized.bedLength || '',
     cabStyle: normalized.cabStyle || '',
     engineSpec: normalized.engineSpec || '',
@@ -675,6 +677,7 @@ const server = http.createServer(async (req, res) => {
           newTarget.make ||
             newTarget.model ||
             newTarget.trim ||
+            newTarget.doors ||
             newTarget.bedLength ||
             newTarget.exteriorColor ||
             newTarget.maxPrice ||
@@ -784,6 +787,7 @@ const server = http.createServer(async (req, res) => {
           updatedTarget.make ||
             updatedTarget.model ||
             updatedTarget.trim ||
+            updatedTarget.doors ||
             updatedTarget.bedLength ||
             updatedTarget.exteriorColor ||
             updatedTarget.maxPrice ||

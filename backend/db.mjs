@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   formatBedLengthLabel,
+  formatDoorsLabel,
   parseNaturalLanguageCriteria,
 } from './natural_language_parser.mjs';
 
@@ -187,6 +188,7 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN initial_search_completed INTEGER DEFAULT 0`,
   `ALTER TABLE guests ADD COLUMN seen_match_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN scheduled_call_vins_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE guests ADD COLUMN doors TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
   `ALTER TABLE vin_recall_checks ADD COLUMN incomplete_count INTEGER DEFAULT 0`,
@@ -275,6 +277,7 @@ export function formatVehicleTargetLabel(rawTarget) {
   if (t.trim) parts.push(t.trim);
 
   const qualifiers = [];
+  if (t.doors) qualifiers.push(formatDoorsLabel(t.doors));
   if (t.cabStyle) qualifiers.push(t.cabStyle);
   if (t.bedLength) qualifiers.push(formatBedLengthLabel(t.bedLength));
 
@@ -319,6 +322,7 @@ export function mapGuestRow(row) {
         make: String(norm.make || ''),
         model: String(norm.model || ''),
         trim: String(norm.trim || ''),
+        doors: String(norm.doors || ''),
         bedLength: String(norm.bedLength || ''),
         cabStyle: String(norm.cabStyle || ''),
         engineSpec: String(norm.engineSpec || ''),
@@ -340,6 +344,7 @@ export function mapGuestRow(row) {
       make: row.make || '',
       model: row.model || '',
       trim: row.trim || '',
+      doors: row.doors || '',
       maxPrice: row.max_price ?? null,
       maxMileage: row.max_mileage ?? null,
       drivetrain: row.drivetrain || 'Any',
@@ -355,6 +360,7 @@ export function mapGuestRow(row) {
       make: normPrimary.make || '',
       model: normPrimary.model || '',
       trim: normPrimary.trim || '',
+      doors: normPrimary.doors || '',
       bedLength: normPrimary.bedLength || '',
       cabStyle: normPrimary.cabStyle || '',
       engineSpec: normPrimary.engineSpec || '',
@@ -430,6 +436,7 @@ export function mapGuestRow(row) {
     make: primary.make || '',
     model: primary.model || '',
     trim: primary.trim || '',
+    doors: primary.doors || '',
     bedLength: primary.bedLength || '',
     cabStyle: primary.cabStyle || '',
     engineSpec: primary.engineSpec || '',

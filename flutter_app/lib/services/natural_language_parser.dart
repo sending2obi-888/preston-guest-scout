@@ -1310,6 +1310,211 @@ class NaturalLanguageVehicleParser {
     return '';
   }
 
+  static String normalizeDoorsInput(Object? rawDoors) {
+    if (rawDoors == null) return '';
+    final s = rawDoors.toString().trim();
+    if (s.isEmpty) return '';
+    final lower = s.toLowerCase();
+    if (lower == 'any' ||
+        lower == 'any doors' ||
+        lower == 'all' ||
+        lower == '0') {
+      return '';
+    }
+    final digitMatch = RegExp(r'\b([2345])\b').firstMatch(lower);
+    if (digitMatch != null) return digitMatch.group(1)!;
+    final prefixDigit =
+        RegExp(r'^([2345])(?:[-\s]*(?:doors?|dr\.?))?$').firstMatch(lower);
+    if (prefixDigit != null) return prefixDigit.group(1)!;
+    if (RegExp(r'\btwo\b').hasMatch(lower)) return '2';
+    if (RegExp(r'\bthree\b').hasMatch(lower)) return '3';
+    if (RegExp(r'\bfour\b').hasMatch(lower)) return '4';
+    if (RegExp(r'\bfive\b').hasMatch(lower)) return '5';
+    return '';
+  }
+
+  static String extractDoorsFromQuery(String rawText) {
+    if (rawText.trim().isEmpty) return '';
+    final scrubbed = rawText.replaceAll(
+      RegExp(
+        r'\b\d[-\s]*door\s+intelligent\s+access\b|\b(?:garage|barn|roll[\s-]*up|rear|cargo)\s+doors?\b',
+        caseSensitive: false,
+      ),
+      ' ',
+    );
+    final numMatch = RegExp(
+      r'\b([2345])[-\s]*(?:doors?|dr\.?)\b',
+      caseSensitive: false,
+    ).firstMatch(scrubbed);
+    if (numMatch != null) return numMatch.group(1)!;
+    if (RegExp(r'\btwo[-\s]*doors?\b', caseSensitive: false).hasMatch(scrubbed)) {
+      return '2';
+    }
+    if (RegExp(r'\bthree[-\s]*doors?\b', caseSensitive: false)
+        .hasMatch(scrubbed)) {
+      return '3';
+    }
+    if (RegExp(r'\bfour[-\s]*doors?\b', caseSensitive: false)
+        .hasMatch(scrubbed)) {
+      return '4';
+    }
+    if (RegExp(r'\bfive[-\s]*doors?\b', caseSensitive: false)
+        .hasMatch(scrubbed)) {
+      return '5';
+    }
+    return '';
+  }
+
+  static String formatDoorsLabel(String doors) {
+    final clean = normalizeDoorsInput(doors);
+    if (clean.isEmpty) return '';
+    return '$clean Doors';
+  }
+
+  static String extractDoorsFromVehicle(
+    Map<String, dynamic> v, {
+    String fullCommentsClean = '',
+  }) {
+    final explicit = normalizeDoorsInput(
+      v['doors'] ?? v['Doors'] ?? v['VehicleDoors'],
+    );
+    if (explicit.isNotEmpty) return explicit;
+
+    final vin =
+        (v['VehicleVin'] ?? v['vin'] ?? '').toString().trim().toUpperCase();
+    final modelCode = (v['VehicleModelCode'] ?? v['modelCode'] ?? '')
+        .toString()
+        .trim()
+        .toUpperCase();
+    final title = (v['VehicleName'] ?? v['title'] ?? '').toString().trim();
+    final model = (v['VehicleModel'] ?? v['model'] ?? '').toString().trim();
+    final trim = (v['VehicleTrim'] ?? v['trim'] ?? '').toString().trim();
+    final bodyStyle =
+        (v['VehicleBodyStyle'] ?? v['bodyStyle'] ?? '').toString().trim();
+    final bodyType =
+        (v['VehicleBodyType'] ?? v['bodyType'] ?? '').toString().trim();
+    final bodyCombined = '$bodyStyle $bodyType $title $trim';
+
+    // 1. Explicit door count in bodyStyle / bodyType / title / trim (e.g. "Sedan 4 Dr.", "4dr Car", "2-Door")
+    final explicitBodyMatch = RegExp(
+      r'\b([2345])[-\s]*(?:doors?|dr\.?)\b',
+      caseSensitive: false,
+    ).firstMatch(bodyCombined);
+    if (explicitBodyMatch != null) {
+      return explicitBodyMatch.group(1)!;
+    }
+
+    final modelTitleLower = '$model $title'.toLowerCase();
+    final rawLen = v['Length'] ?? v['vehicleLength'];
+    final lenNum = rawLen is num
+        ? rawLen.toDouble()
+        : (double.tryParse(rawLen?.toString() ?? '') ?? 0.0);
+
+    // 2. Full-size Ford Bronco (2-Door vs 4-Door; excludes Bronco Sport which is always 4-Door)
+    final isFullSizeBronco = RegExp(r'\bbronco\b').hasMatch(modelTitleLower) &&
+        !RegExp(r'\bbronco\s+sport\b').hasMatch(modelTitleLower);
+    if (isFullSizeBronco) {
+      final code = modelCode.isNotEmpty
+          ? modelCode
+          : (vin.length >= 7 && vin.startsWith('1FM')
+              ? vin.substring(4, 7)
+              : '');
+      if (RegExp(r'^E\d[AC]$').hasMatch(code)) return '2';
+      if (RegExp(r'^E\d[BDEJ]$').hasMatch(code)) return '4';
+      if (lenNum >= 165 && lenNum < 181) return '2';
+      if (lenNum >= 184) return '4';
+    }
+
+    // 3. Jeep Wrangler (2-Door vs 4-Door Unlimited / 4xe)
+    if (RegExp(r'\bwrangler\b').hasMatch(modelTitleLower)) {
+      if (RegExp(
+        r'\b(?:unlimited|4xe|rubicon\s+392)\b',
+        caseSensitive: false,
+      ).hasMatch('$title $trim $fullCommentsClean')) {
+        return '4';
+      }
+      if (lenNum >= 183) return '4';
+      if (lenNum >= 155 && lenNum < 176) return '2';
+    }
+
+    // 4. Scrubbed build-sheet comments check (ignoring Ford "2-door Intelligent Access" keyless entry!)
+    if (fullCommentsClean.isNotEmpty) {
+      final scrubbedComments = fullCommentsClean.replaceAll(
+        RegExp(
+          r'\b\d[-\s]*door\s+intelligent\s+access\b|\b(?:garage|barn|roll[\s-]*up|rear|cargo|sliding)\s+doors?\b',
+          caseSensitive: false,
+        ),
+        ' ',
+      );
+      final commentDoorMatch = RegExp(
+        r'\b([2345])[-\s]*(?:doors?|dr\.?)\b',
+        caseSensitive: false,
+      ).firstMatch(scrubbedComments);
+      if (commentDoorMatch != null) {
+        return commentDoorMatch.group(1)!;
+      }
+    }
+
+    // 5. Pickup Trucks: Regular Cab = 2 Doors; SuperCab / Extended Cab / Crew Cab / SuperCrew = 4 Doors
+    final existingCab = (v['cabStyle']?.toString() ?? '').trim();
+    final cab = existingCab.isNotEmpty
+        ? existingCab
+        : extractCabStyleFromText('$bodyStyle $bodyType $title $fullCommentsClean');
+    if (cab == 'Regular Cab' || RegExp(r'^1FT[MN]F1').hasMatch(vin)) {
+      return '2';
+    }
+    if (cab == 'Crew Cab' || cab == 'SuperCab') {
+      return '4';
+    }
+    if (RegExp(
+      r'\b(?:maverick|f[\s-]*150\s+lightning|gladiator|ridgeline|santa\s+cruz)\b',
+    ).hasMatch(modelTitleLower)) {
+      return '4';
+    }
+
+    // 6. 2-Door Coupes, Convertibles, and Sports Cars
+    if (RegExp(
+          r'\b(?:coupe|convertible|roadster|spyder|targa)\b',
+          caseSensitive: false,
+        ).hasMatch(bodyCombined) &&
+        !RegExp(
+          r'\b(?:gran\s+coupe|4[-\s]*door\s+coupe|sportback)\b',
+          caseSensitive: false,
+        ).hasMatch(bodyCombined)) {
+      return '2';
+    }
+    if ((RegExp(r'\bmustang\b').hasMatch(modelTitleLower) &&
+            !RegExp(r'\bmach[\s-]*e\b').hasMatch(modelTitleLower)) ||
+        RegExp(
+          r'\b(?:corvette|camaro|challenger|miata|mx[\s-]*5|brz|gr86|supra|370z|nissan\s+z)\b',
+        ).hasMatch(modelTitleLower)) {
+      return '2';
+    }
+
+    // 7. Hyundai Veloster 3-Door
+    if (RegExp(r'\bveloster\b').hasMatch(modelTitleLower)) {
+      return '3';
+    }
+
+    // 8. Standard 4-Door Sedans, SUVs, Crossovers, Wagons, Hatchbacks, and Minivans
+    if (RegExp(
+          r'\b(?:sedan|sport\s+utility|suv|utility|wagon|minivan|passenger\s+van|hatchback|crossover)\b',
+          caseSensitive: false,
+        ).hasMatch('$bodyStyle $bodyType') &&
+        !isFullSizeBronco &&
+        !RegExp(r'\bwrangler\b').hasMatch(modelTitleLower)) {
+      return '4';
+    }
+
+    if (RegExp(
+      r'\b(?:bronco\s+sport|mach[\s-]*e|explorer|escape|edge|expedition|ecosport|fusion|taurus|nautilus|aviator|corsair|navigator|mkz|mkc|mkx|elantra|sonata|tucson|santa\s+fe|palisade|kona|venue|ioniq|cx[\s-]*\d+|mazda\s*3|mazda\s*6|rogue|murano|pathfinder|armada|kicks|altima|sentra|versa|equinox|traverse|tahoe|suburban|trax|trailblazer|blazer|malibu|compass|cherokee|grand\s+cherokee|wagoneer|durango|pacifica|hornet|telluride|sorento|sportage|carnival|k5|ev6|ev9|outback|forester|crosstrek|ascent|wrx|rav4|highlander|4runner|camry|corolla|sienna|prius|cr[\s-]*v|hr[\s-]*v|pilot|passport|odyssey|accord|civic)\b',
+    ).hasMatch(modelTitleLower)) {
+      return '4';
+    }
+
+    return '';
+  }
+
   static String extractEngineSpecFromText(String rawText) {
     if (rawText.trim().isEmpty) return '';
     final dispMatch = RegExp(
@@ -1652,6 +1857,13 @@ class NaturalLanguageVehicleParser {
         ? explicitCab
         : extractCabStyleFromText(strictCombined);
 
+    final explicitDoors = normalizeDoorsInput(raw['doors']);
+    final doors = explicitDoors.isNotEmpty
+        ? explicitDoors
+        : (extractDoorsFromQuery(strictCombined).isNotEmpty
+            ? extractDoorsFromQuery(strictCombined)
+            : extractDoorsFromQuery(combinedRaw));
+
     final explicitEngine = (raw['engineSpec']?.toString() ?? '').trim();
     final engineSpec = explicitEngine.isNotEmpty
         ? explicitEngine
@@ -1779,6 +1991,7 @@ class NaturalLanguageVehicleParser {
       'make': make,
       'model': model,
       'trim': trim,
+      'doors': doors,
       'bedLength': bedLength,
       'cabStyle': cabStyle,
       'engineSpec': engineSpec,
@@ -1823,6 +2036,9 @@ class NaturalLanguageVehicleParser {
 
     final trim = parsed['trim']?.toString() ?? '';
     if (trim.isNotEmpty) chips.add('Trim: $trim');
+
+    final doors = parsed['doors']?.toString() ?? '';
+    if (doors.isNotEmpty) chips.add('Doors: ${formatDoorsLabel(doors)}');
 
     final bed = parsed['bedLength']?.toString() ?? '';
     if (bed.isNotEmpty) chips.add('Bed: ${formatBedLengthLabel(bed)}');
@@ -2037,6 +2253,37 @@ class NaturalLanguageVehicleParser {
             '${vehicle['bodyStyle'] ?? ''} ${vehicle['title'] ?? ''} ${vehicle['commentsSummary'] ?? ''}',
           );
     return vCab == targetCabStyle;
+  }
+
+  static bool doesVehicleMatchDoors(
+    String targetDoors,
+    Map<String, dynamic> vehicle,
+  ) {
+    final cleanTarget = normalizeDoorsInput(targetDoors);
+    if (cleanTarget.isEmpty) return true;
+    final existingDoors = normalizeDoorsInput(vehicle['doors']);
+    final vDoors = existingDoors.isNotEmpty
+        ? existingDoors
+        : extractDoorsFromVehicle(
+            vehicle,
+            fullCommentsClean:
+                (vehicle['fullCommentsSearchText'] ??
+                        vehicle['commentsSummary'] ??
+                        '')
+                    .toString(),
+          );
+    if (vDoors.isEmpty) return false;
+    if (cleanTarget == '5') {
+      final bodyHay =
+          '${vehicle['bodyStyle'] ?? ''} ${vehicle['bodyType'] ?? ''} ${vehicle['title'] ?? ''}';
+      return vDoors == '5' ||
+          (vDoors == '4' &&
+              RegExp(
+                r'\b(?:hatchback|sportback|liftback|5[-\s]*dr)\b',
+                caseSensitive: false,
+              ).hasMatch(bodyHay));
+    }
+    return vDoors == cleanTarget;
   }
 
   static bool doesVehicleMatchEngine(

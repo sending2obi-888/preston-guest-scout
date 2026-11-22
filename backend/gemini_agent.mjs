@@ -2,12 +2,14 @@ import { getSetting } from './db.mjs';
 import {
   doesVehicleMatchCabStyle,
   doesVehicleMatchColor,
+  doesVehicleMatchDoors,
   doesVehicleMatchEngine,
   doesVehicleMatchModel,
   doesVehicleMatchStrictPackages,
   doesVehicleMatchTrim,
   extractBedLengthFromVehicle,
   formatBedLengthLabel,
+  formatDoorsLabel,
 } from './natural_language_parser.mjs';
 import { normalizeGuestSpecs } from './preston_scraper.mjs';
 
@@ -81,8 +83,11 @@ export function preFilterCandidates(rawGuest, candidates) {
       }
     }
 
-    // 5. Cab Style (Regular Cab / SuperCab / Crew Cab)
+    // 5. Cab Style (Regular Cab / SuperCab / Crew Cab) & Number of Doors (2 / 3 / 4 / 5)
     if (guest.cabStyle && !doesVehicleMatchCabStyle(guest.cabStyle, v)) {
+      return false;
+    }
+    if (guest.doors && !doesVehicleMatchDoors(guest.doors, v)) {
       return false;
     }
 
@@ -191,7 +196,11 @@ export function deterministicEvaluate(rawGuest, candidates) {
       matchedFeatures.push(`${v.trim} Trim`);
     }
 
-    // 3. Cab Style & Engine badges
+    // 3. Cab Style, Doors & Engine badges
+    if (guest.doors) {
+      matchedFeatures.push(`${formatDoorsLabel(guest.doors)} Configuration`);
+      score += 4;
+    }
     if (guest.cabStyle) {
       matchedFeatures.push(v.bodyStyle || guest.cabStyle);
       score += 3;
@@ -308,6 +317,7 @@ export function deterministicEvaluate(rawGuest, candidates) {
       guest.make || null,
       guest.model || null,
       guest.trim ? `${guest.trim} trim` : null,
+      guest.doors ? formatDoorsLabel(guest.doors) : null,
       guest.bedLength ? formatBedLengthLabel(guest.bedLength) : null,
       guest.cabStyle || null,
       guest.drivetrain && guest.drivetrain !== 'Any' ? guest.drivetrain : null,
@@ -398,6 +408,7 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     model: v.model,
     trim: v.trim,
     bodyStyle: v.bodyStyle,
+    doors: v.doors || '',
     bedLength: v.bedLength || '',
     condition: v.condition,
     price: v.price,
@@ -419,6 +430,7 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
     make: guest.make,
     model: guest.model,
     trim: guest.trim,
+    doors: guest.doors || '',
     bedLength: guest.bedLength || '',
     cabStyle: guest.cabStyle || '',
     engineSpec: guest.engineSpec || '',
@@ -435,8 +447,8 @@ export async function evaluateInventoryWithGeminiAgent(rawGuest, candidates) {
   const systemPrompt = `You are the Preston Automotive Group Gemini Inventory Scout Agent.
 Evaluate live vehicle listings from prestonmotor.com against the guest's exact target vehicle specifications and natural-language requirements.
 Rules:
-1. Only include vehicles that strictly satisfy EVERY specified requirement (make, exact model, exact trim, bedLength if specified, cabStyle if specified, drivetrain if specified, price cap if specified, exteriorColor/exteriorColors if specified — when multiple exteriorColors are listed, a vehicle matches if its exterior color matches ANY of the listed colors — and strict packages).
-2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's specs (e.g., "6.5 ft Bed (Verified)", "XLT Trim Package", "4WD Drivetrain", "Oxford White Exterior").
+1. Only include vehicles that strictly satisfy EVERY specified requirement (make, exact model, exact trim, doors if specified, bedLength if specified, cabStyle if specified, drivetrain if specified, price cap if specified, exteriorColor/exteriorColors if specified — when multiple exteriorColors are listed, a vehicle matches if its exterior color matches ANY of the listed colors — and strict packages).
+2. For each matching vehicle, populate "matchedFeatures" with 3 to 8 concrete, specific features of THAT vehicle that directly meet the guest's specs (e.g., "4 Doors Configuration", "6.5 ft Bed (Verified)", "XLT Trim Package", "4WD Drivetrain", "Oxford White Exterior").
 3. Provide a concise, helpful 1-2 sentence "agentSummary" explaining why this specific unit at its Preston dealership location fits the guest.`;
 
   const body = {
@@ -517,6 +529,7 @@ Rules:
       const detFeatures = deterministicByVin.get(m.vin)?.matchedFeatures || [];
       const combinedFeatures = Array.from(
         new Set([
+          ...(guest.doors ? [`${formatDoorsLabel(guest.doors)} Configuration`] : []),
           ...(guest.bedLength ? [`${formatBedLengthLabel(guest.bedLength)} (Verified)`] : []),
           ...(guest.trim ? [`${vehicle.trim || guest.trim} Trim Package`] : []),
           ...(Array.isArray(m.matchedFeatures) ? m.matchedFeatures : []),

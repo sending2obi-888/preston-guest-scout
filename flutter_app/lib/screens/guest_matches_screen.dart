@@ -1216,6 +1216,14 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                         spacing: 8,
                         runSpacing: 6,
                         children: [
+                          if (t.doors.isNotEmpty)
+                            _specChip(
+                              Icons.sensor_door_outlined,
+                              NaturalLanguageVehicleParser.formatDoorsLabel(
+                                t.doors,
+                              ),
+                              scheme,
+                            ),
                           if (t.bedLength.isNotEmpty)
                             _specChip(
                               Icons.straighten_rounded,

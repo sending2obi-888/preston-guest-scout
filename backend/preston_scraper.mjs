@@ -3,6 +3,7 @@ import {
   expandPrestonModelVariants,
   extractBedLengthFromVehicle,
   extractCabStyleFromText,
+  extractDoorsFromVehicle,
   formatBedLengthLabel,
   parseNaturalLanguageCriteria,
 } from './natural_language_parser.mjs';
@@ -186,10 +187,12 @@ function parseVehicleCard(vc, { facetBedLength = '' } = {}) {
   const drivetrain = normalizeDrivetrain(vc, rawHighlights, commentsClean);
   const location = formatDealershipLocation(vc);
   const bodyStyle = vc.VehicleBodyStyle || vc.VehicleBodyType || '';
+  const bodyType = vc.VehicleBodyType || '';
   const bedLength = extractBedLengthFromVehicle(vc, commentsClean, facetBedLength);
   const cabStyle = extractCabStyleFromText(
     `${bodyStyle} ${vc.VehicleName || ''} ${commentsClean}`
   );
+  const doors = extractDoorsFromVehicle(vc, commentsClean);
 
   const highlights = [...rawHighlights];
   if (bedLength) {
@@ -220,6 +223,7 @@ function parseVehicleCard(vc, { facetBedLength = '' } = {}) {
   return {
     vin: vc.VehicleVin,
     stockNumber: vc.VehicleStockNumber || '',
+    modelCode: (vc.VehicleModelCode || '').trim(),
     title: vc.VehicleName || `${vc.VehicleYear} ${vc.VehicleMake} ${vc.VehicleModel}`.trim(),
     year: Number(vc.VehicleYear) || null,
     make: (vc.VehicleMake || '').trim(),
@@ -227,8 +231,10 @@ function parseVehicleCard(vc, { facetBedLength = '' } = {}) {
     trim: (vc.VehicleTrim || vc.VehicleRuleAdjustedTrim || '').trim(),
     condition,
     bodyStyle,
+    bodyType,
     bedLength,
     cabStyle,
+    doors,
     vehicleLength: Number(vc.Length) || null,
     price,
     msrp: prices.msrp || (vc.VehicleMsrp > 0 ? vc.VehicleMsrp : null),

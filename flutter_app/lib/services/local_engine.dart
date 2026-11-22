@@ -291,6 +291,7 @@ class LocalScoutEngine {
       'make': parsed['make'],
       'model': parsed['model'],
       'trim': parsed['trim'],
+      'doors': parsed['doors'],
       'bedLength': parsed['bedLength'],
       'cabStyle': parsed['cabStyle'],
       'engineSpec': parsed['engineSpec'],
@@ -399,6 +400,7 @@ class LocalScoutEngine {
       'make': primary['make'],
       'model': primary['model'],
       'trim': primary['trim'],
+      'doors': primary['doors'],
       'bedLength': primary['bedLength'],
       'cabStyle': primary['cabStyle'],
       'engineSpec': primary['engineSpec'],
@@ -665,6 +667,7 @@ class LocalScoutEngine {
     String make = '',
     String model = '',
     String trim = '',
+    String doors = '',
     double? maxPrice,
     int? maxMileage,
     String drivetrain = 'Any',
@@ -687,6 +690,7 @@ class LocalScoutEngine {
       'make': make,
       'model': model,
       'trim': trim,
+      'doors': doors,
       'maxPrice': maxPrice,
       'maxMileage': maxMileage,
       'drivetrain': drivetrain,
@@ -900,6 +904,7 @@ class LocalScoutEngine {
       make: target.make,
       model: target.model,
       trim: target.trim,
+      doors: target.doors,
       bedLength: target.bedLength,
       cabStyle: target.cabStyle,
       engineSpec: target.engineSpec,
@@ -928,6 +933,7 @@ class LocalScoutEngine {
     String make = '',
     String model = '',
     String trim = '',
+    String doors = '',
     String bedLength = '',
     double? maxPrice,
     int? maxMileage,
@@ -955,6 +961,7 @@ class LocalScoutEngine {
         'make': make,
         'model': model,
         'trim': trim,
+        'doors': doors,
         'bedLength': bedLength,
         'maxPrice': maxPrice,
         'maxMileage': maxMileage,
@@ -972,6 +979,7 @@ class LocalScoutEngine {
     final hasAnyCriteria = newTargetModel.make.isNotEmpty ||
         newTargetModel.model.isNotEmpty ||
         newTargetModel.trim.isNotEmpty ||
+        newTargetModel.doors.isNotEmpty ||
         newTargetModel.bedLength.isNotEmpty ||
         newTargetModel.exteriorColor.isNotEmpty ||
         newTargetModel.maxPrice != null ||
@@ -1044,6 +1052,7 @@ class LocalScoutEngine {
     String make = '',
     String model = '',
     String trim = '',
+    String doors = '',
     String bedLength = '',
     double? maxPrice,
     int? maxMileage,
@@ -1093,6 +1102,7 @@ class LocalScoutEngine {
         'make': make,
         'model': model,
         'trim': trim,
+        'doors': doors,
         'bedLength': bedLength,
         'maxPrice': maxPrice,
         'maxMileage': maxMileage,
@@ -1110,6 +1120,7 @@ class LocalScoutEngine {
     final hasAnyCriteria = updatedTargetModel.make.isNotEmpty ||
         updatedTargetModel.model.isNotEmpty ||
         updatedTargetModel.trim.isNotEmpty ||
+        updatedTargetModel.doors.isNotEmpty ||
         updatedTargetModel.bedLength.isNotEmpty ||
         updatedTargetModel.exteriorColor.isNotEmpty ||
         updatedTargetModel.maxPrice != null ||
@@ -2023,6 +2034,7 @@ class LocalScoutEngine {
 
     final bodyStyle =
         (vc['VehicleBodyStyle'] ?? vc['VehicleBodyType'] ?? '').toString();
+    final bodyType = (vc['VehicleBodyType'] ?? '').toString();
     final bedLength = NaturalLanguageVehicleParser.extractBedLengthFromVehicle(
       vc,
       fullCommentsClean: comments,
@@ -2030,6 +2042,10 @@ class LocalScoutEngine {
     );
     final cabStyle = NaturalLanguageVehicleParser.extractCabStyleFromText(
       '$bodyStyle ${vc['VehicleName'] ?? ''} $comments',
+    );
+    final doors = NaturalLanguageVehicleParser.extractDoorsFromVehicle(
+      vc,
+      fullCommentsClean: comments,
     );
 
     final highlights = <String>[...rawHighlights];
@@ -2092,6 +2108,7 @@ class LocalScoutEngine {
     return {
       'vin': vin,
       'stockNumber': vc['VehicleStockNumber']?.toString() ?? '',
+      'modelCode': (vc['VehicleModelCode']?.toString() ?? '').trim(),
       'title': rawTitle.isNotEmpty ? rawTitle : fallbackTitle,
       'year': parsedYear,
       'make': (vc['VehicleMake']?.toString() ?? '').trim(),
@@ -2100,6 +2117,8 @@ class LocalScoutEngine {
           .toString()
           .trim(),
       'bodyStyle': bodyStyle,
+      'bodyType': bodyType,
+      'doors': doors,
       'bedLength': bedLength,
       'cabStyle': cabStyle,
       'vehicleLength': _asDouble(vc['Length']),
@@ -2134,6 +2153,7 @@ class LocalScoutEngine {
       'make': guest.make,
       'model': guest.model,
       'trim': guest.trim,
+      'doors': guest.doors,
       'bedLength': guest.bedLength,
       'cabStyle': guest.cabStyle,
       'engineSpec': guest.engineSpec,
@@ -2152,6 +2172,7 @@ class LocalScoutEngine {
     final targetMake = (spec['make']?.toString() ?? '').trim();
     final targetModel = (spec['model']?.toString() ?? '').trim();
     final targetTrim = (spec['trim']?.toString() ?? '').trim();
+    final targetDoors = (spec['doors']?.toString() ?? '').trim();
     final targetBed = (spec['bedLength']?.toString() ?? '').trim();
     final targetCab = (spec['cabStyle']?.toString() ?? '').trim();
     final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
@@ -2184,6 +2205,11 @@ class LocalScoutEngine {
 
       if (targetTrim.isNotEmpty &&
           !NaturalLanguageVehicleParser.doesVehicleMatchTrim(targetTrim, v)) {
+        return false;
+      }
+
+      if (targetDoors.isNotEmpty &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchDoors(targetDoors, v)) {
         return false;
       }
 
@@ -2291,6 +2317,7 @@ class LocalScoutEngine {
     final strictFiltered = _preFilter(guest, filtered);
     final targetMake = (spec['make']?.toString() ?? '').trim();
     final targetTrim = (spec['trim']?.toString() ?? '').trim();
+    final targetDoors = (spec['doors']?.toString() ?? '').trim();
     final targetBed = (spec['bedLength']?.toString() ?? '').trim();
     final targetCab = (spec['cabStyle']?.toString() ?? '').trim();
     final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
@@ -2329,6 +2356,12 @@ class LocalScoutEngine {
         score += 5;
       } else if (vTrim.isNotEmpty) {
         matched.add('$vTrim Trim');
+      }
+
+      if (targetDoors.isNotEmpty) {
+        matched.add(
+            '${NaturalLanguageVehicleParser.formatDoorsLabel(targetDoors)} Configuration');
+        score += 4;
       }
 
       if (targetCab.isNotEmpty) {
@@ -2478,6 +2511,7 @@ class LocalScoutEngine {
                   'model': v['model'],
                   'trim': v['trim'],
                   'bodyStyle': v['bodyStyle'],
+                  'doors': v['doors'],
                   'bedLength': v['bedLength'],
                   'condition': v['condition'],
                   'price': v['price'],
@@ -2501,7 +2535,7 @@ class LocalScoutEngine {
                   'parts': [
                     {
                       'text':
-                          'Evaluate live prestonmotor.com vehicles against the guest\'s exact requirements (make, exact model, exact trim, bedLength, cabStyle, drivetrain, exteriorColors — matching ANY listed color when multiple colors are chosen — and budget). Only include vehicles that satisfy every specified criterion. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
+                          'Evaluate live prestonmotor.com vehicles against the guest\'s exact requirements (make, exact model, exact trim, doors, bedLength, cabStyle, drivetrain, exteriorColors — matching ANY listed color when multiple colors are chosen — and budget). Only include vehicles that satisfy every specified criterion. Return JSON with overallSummary and matches (array of {vin, matchScore, matchedFeatures, agentSummary}).'
                     }
                   ]
                 },
@@ -2517,6 +2551,7 @@ class LocalScoutEngine {
                             'make': guest.make,
                             'model': guest.model,
                             'trim': guest.trim,
+                            'doors': guest.doors,
                             'bedLength': guest.bedLength,
                             'cabStyle': guest.cabStyle,
                             'drivetrain': guest.drivetrain,
@@ -2589,6 +2624,8 @@ class LocalScoutEngine {
                     .map((e) => e.toString())
                     .toList();
             final combinedFeatures = <String>{
+              if (guest.doors.isNotEmpty)
+                '${NaturalLanguageVehicleParser.formatDoorsLabel(guest.doors)} Configuration',
               if (guest.bedLength.isNotEmpty)
                 '${NaturalLanguageVehicleParser.formatBedLengthLabel(guest.bedLength)} (Verified)',
               if (guest.trim.isNotEmpty)
@@ -3177,7 +3214,7 @@ class LocalScoutEngine {
               .whereType<Map>()
               .map(
                 (t) =>
-                    '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
+                    '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['doors']}|${t['bedLength']}|${t['cabStyle']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
               )
               .join(';;');
           final notes = (norm['clientNotes'] as List<dynamic>? ?? [])
@@ -3206,7 +3243,7 @@ class LocalScoutEngine {
         .whereType<Map>()
         .map(
           (t) =>
-              '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
+              '${t['condition']}|${t['minYear']}|${t['maxYear']}|${t['make']}|${t['model']}|${t['trim']}|${t['doors']}|${t['bedLength']}|${t['cabStyle']}|${t['maxPrice']}|${t['maxMileage']}|${t['drivetrain']}|${t['exteriorColor']}|${(t['features'] as List<dynamic>? ?? []).join(',')}|${t['notes']}',
         )
         .join(';;');
     final notes = (g['clientNotes'] as List<dynamic>? ?? [])

@@ -42,9 +42,18 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
 
   String _condition = 'Any';
   String _drivetrain = 'Any';
+  String _doors = '';
   List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
   bool _isSubmitting = false;
+
+  static const List<(String, String)> _doorOptions = [
+    ('', 'Any Doors'),
+    ('2', '2 Doors'),
+    ('3', '3 Doors'),
+    ('4', '4 Doors'),
+    ('5', '5 Doors'),
+  ];
 
   static const List<String> _prestonMakes = [
     'Ford',
@@ -118,6 +127,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     setState(() {
       _condition = 'Any';
       _drivetrain = 'Any';
+      _doors = '';
       _selectedColors = [];
       _selectedFeatures.clear();
     });
@@ -149,6 +159,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
     final combinedColors = _effectiveExteriorColorString();
     final hasAnyVehicleSpec = _makeCtrl.text.trim().isNotEmpty ||
         _modelCtrl.text.trim().isNotEmpty ||
+        _doors.isNotEmpty ||
         _maxPriceCtrl.text.trim().isNotEmpty ||
         _notesCtrl.text.trim().isNotEmpty ||
         combinedColors.isNotEmpty ||
@@ -158,7 +169,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              'Please enter at least a Make, Model, Max Price, Color, or Requirements note for the Gemini Agent.'),
+              'Please enter at least a Make, Model, Number of Doors, Max Price, Color, or Requirements note for the Gemini Agent.'),
         ),
       );
       return;
@@ -176,6 +187,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
         make: _makeCtrl.text.trim(),
         model: _modelCtrl.text.trim(),
         trim: _trimCtrl.text.trim(),
+        doors: _doors,
         maxPrice: _parseMaxPrice(_maxPriceCtrl.text),
         maxMileage: int.tryParse(
             _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), '')),
@@ -489,10 +501,10 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                         ),
                         const SizedBox(height: 16),
 
-                        // Make / Model / Trim
+                        // Make / Model / Trim / Number of Doors
                         LayoutBuilder(
                           builder: (context, constraints) {
-                            final wide = constraints.maxWidth > 620;
+                            final wide = constraints.maxWidth > 720;
                             final makeField = TextFormField(
                               controller: _makeCtrl,
                               onChanged: (_) => setState(() {}),
@@ -506,7 +518,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                               controller: _modelCtrl,
                               decoration: const InputDecoration(
                                 labelText: 'Model',
-                                hintText: 'e.g. F-250, Nautilus, Bronco Sport',
+                                hintText: 'e.g. F-250, Nautilus, Bronco',
                                 prefixIcon: Icon(Icons.commute_outlined),
                               ),
                             );
@@ -518,15 +530,40 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 prefixIcon: Icon(Icons.tune_outlined),
                               ),
                             );
+                            final doorsField = DropdownButtonFormField<String>(
+                              key: const ValueKey('number_of_doors_field'),
+                              isExpanded: true,
+                              initialValue: _doors,
+                              decoration: const InputDecoration(
+                                labelText: 'Number of Doors',
+                                prefixIcon: Icon(Icons.sensor_door_outlined),
+                              ),
+                              items: _doorOptions
+                                  .map(
+                                    (opt) => DropdownMenuItem<String>(
+                                      value: opt.$1,
+                                      child: Text(
+                                        opt.$2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (v) {
+                                setState(() => _doors = v ?? '');
+                              },
+                            );
 
                             if (wide) {
                               return Row(
                                 children: [
-                                  Expanded(child: makeField),
+                                  Expanded(flex: 3, child: makeField),
                                   const SizedBox(width: 12),
-                                  Expanded(child: modelField),
+                                  Expanded(flex: 3, child: modelField),
                                   const SizedBox(width: 12),
-                                  Expanded(child: trimField),
+                                  Expanded(flex: 3, child: trimField),
+                                  const SizedBox(width: 12),
+                                  Expanded(flex: 3, child: doorsField),
                                 ],
                               );
                             }
@@ -537,6 +574,8 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                                 modelField,
                                 const SizedBox(height: 12),
                                 trimField,
+                                const SizedBox(height: 12),
+                                doorsField,
                               ],
                             );
                           },
@@ -755,7 +794,8 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                           ),
                         ),
                         if (_notesCtrl.text.trim().isNotEmpty ||
-                            _selectedColors.isNotEmpty) ...[
+                            _selectedColors.isNotEmpty ||
+                            _doors.isNotEmpty) ...[
                           const SizedBox(height: 12),
                           _buildParsedCriteriaBanner(scheme, textTheme),
                         ],
@@ -842,6 +882,7 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       'make': _makeCtrl.text.trim(),
       'model': _modelCtrl.text.trim(),
       'trim': _trimCtrl.text.trim(),
+      'doors': _doors,
       'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
       'maxMileage': int.tryParse(
         _maxMileageCtrl.text.replaceAll(RegExp(r'[^0-9]'), ''),

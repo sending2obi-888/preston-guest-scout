@@ -2845,7 +2845,196 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
   });
+
+  testWidgets(
+      'HomeIntakeScreen ("Guest & Vehicle" input page) exposes Number of Doors field and shows live Doors preview chip',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1100);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HomeIntakeScreen(
+            status: const SystemStatus(geminiConfigured: true),
+            onGuestCreated: () {},
+            onOpenGuestMatches: (_) {},
+            onOpenSettings: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final doorsField = find.byKey(const ValueKey('number_of_doors_field'));
+    expect(doorsField, findsOneWidget);
+    expect(find.text('Number of Doors'), findsOneWidget);
+    expect(find.text('Any Doors'), findsOneWidget);
+
+    // Open dropdown and select "2 Doors"
+    await tester.tap(doorsField);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('2 Doors').last);
+    await tester.pumpAndSettle();
+
+    final summaryBox =
+        find.byKey(const ValueKey('parsed_natural_language_summary'));
+    expect(summaryBox, findsOneWidget);
+    expect(
+      find.descendant(of: summaryBox, matching: find.text('Doors: 2 Doors')),
+      findsOneWidget,
+    );
+
+    LocalScoutEngine.resetForTest();
+  });
+
+  test(
+      'Number of Doors accurately filters 2-Door vs 4-Door vehicles (including Bronco E6A/E7B with "2-door Intelligent Access" and F-150 Regular Cab vs SuperCrew)',
+      () async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final bronco2Door = LocalScoutEngine.parseVehicleCardForTest({
+      'VehicleVin': '1FMDE6AH5TLB91567',
+      'VehicleModelCode': 'E6A',
+      'VehicleYear': '2026',
+      'VehicleMake': 'Ford',
+      'VehicleModel': 'Bronco',
+      'VehicleTrim': 'Base',
+      'VehicleName': '2026 Ford Bronco Base',
+      'VehicleBodyStyle': 'Sport Utility',
+      'VehicleBodyType': 'SUV',
+      'VehicleCondition': 'New',
+      'VehicleInternetPrice': '41500',
+      'Length': '173.7',
+      'VehicleLocationLabel': 'Preston Ford of Hurlock',
+    })!;
+
+    // Real 4-Door Bronco Big Bend whose Equipment Group 222A mentions "2-door Intelligent Access"
+    final bronco4Door = LocalScoutEngine.parseVehicleCardForTest({
+      'VehicleVin': '1FMDE7BHXTLB59525',
+      'VehicleModelCode': 'E7B',
+      'VehicleYear': '2026',
+      'VehicleMake': 'Ford',
+      'VehicleModel': 'Bronco',
+      'VehicleTrim': 'Big Bend',
+      'VehicleName': '2026 Ford Bronco Big Bend',
+      'VehicleBodyStyle': 'Sport Utility',
+      'VehicleBodyType': 'SUV',
+      'VehicleCondition': 'New',
+      'VehicleInternetPrice': '46900',
+      'Length': '189.4',
+      'VehicleLocationLabel': 'Preston Ford Aberdeen',
+      'VehicleComments':
+          'Includes Equipment Group 222A, 2-door Intelligent Access, dual-zone climate control.',
+    })!;
+
+    final f150RegCab2Door = LocalScoutEngine.parseVehicleCardForTest({
+      'VehicleVin': '1FTMF1KP4TKD16220',
+      'VehicleYear': '2026',
+      'VehicleMake': 'Ford',
+      'VehicleModel': 'F-150',
+      'VehicleTrim': 'XL',
+      'VehicleName': '2026 Ford F-150 XL',
+      'VehicleBodyStyle': 'Regular Cab Pickup',
+      'VehicleCondition': 'New',
+      'VehicleInternetPrice': '41290',
+      'Length': '227.7',
+      'VehicleLocationLabel': 'Boulevard Ford of Millsboro',
+    })!;
+
+    final f150SuperCrew4Door = LocalScoutEngine.parseVehicleCardForTest({
+      'VehicleVin': '1FTFW3L87TKE99999',
+      'VehicleYear': '2026',
+      'VehicleMake': 'Ford',
+      'VehicleModel': 'F-150',
+      'VehicleTrim': 'XLT',
+      'VehicleName': '2026 Ford F-150 XLT',
+      'VehicleBodyStyle': 'SuperCrew',
+      'VehicleCondition': 'New',
+      'VehicleInternetPrice': '52400',
+      'Length': '231.7',
+      'VehicleLocationLabel': 'Preston Ford of Denton',
+    })!;
+
+    expect(bronco2Door['doors'], '2');
+    expect(bronco4Door['doors'], '4');
+    expect(f150RegCab2Door['doors'], '2');
+    expect(f150SuperCrew4Door['doors'], '4');
+
+    final inventory = [
+      bronco2Door,
+      bronco4Door,
+      f150RegCab2Door,
+      f150SuperCrew4Door,
+    ];
+
+    // Guest looking specifically for a 2-Door Ford Bronco -> matches ONLY 1FMDE6AH5TLB91567
+    final twoDoorBroncoRes = await LocalScoutEngine.createGuest(
+      name: 'Alex Carter',
+      make: 'Ford',
+      model: 'Bronco',
+      doors: '2',
+      mockCandidatesOverride: inventory,
+    );
+    expect(twoDoorBroncoRes.guest.doors, '2');
+    expect(twoDoorBroncoRes.guest.targetVehicleLabel, 'Ford Bronco • 2 Doors');
+    expect(twoDoorBroncoRes.matchesFound, 1);
+
+    final twoDoorMatches = await LocalScoutEngine.getGuestWithMatches(
+      twoDoorBroncoRes.guest.id,
+    );
+    expect(twoDoorMatches.matches.single.vin, '1FMDE6AH5TLB91567');
+    expect(
+      twoDoorMatches.matches.single.matchedFeatures,
+      contains('2 Doors Configuration'),
+    );
+
+    // Updating the search to 4 Doors -> switches match to 1FMDE7BHXTLB59525
+    final updatedFourDoor = await LocalScoutEngine.updateVehicleTargetOnGuest(
+      guestId: twoDoorBroncoRes.guest.id,
+      targetId: twoDoorBroncoRes.guest.effectiveTargets.first.id,
+      make: 'Ford',
+      model: 'Bronco',
+      doors: '4',
+      mockCandidatesOverride: inventory,
+    );
+    expect(updatedFourDoor.guest.doors, '4');
+    expect(updatedFourDoor.matches.length, 1);
+    expect(updatedFourDoor.matches.single.vin, '1FMDE7BHXTLB59525');
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
 }
+
 
 
 

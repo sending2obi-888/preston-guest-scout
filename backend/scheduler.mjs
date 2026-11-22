@@ -139,6 +139,7 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
       trim: target.trim || '',
       bedLength: target.bedLength || '',
       cabStyle: target.cabStyle || '',
+      doors: target.doors || '',
       engineSpec: target.engineSpec || '',
       maxPrice: target.maxPrice,
       maxMileage: target.maxMileage,

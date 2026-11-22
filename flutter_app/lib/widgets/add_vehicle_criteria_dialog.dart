@@ -34,6 +34,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
 
   String _condition = 'Any';
   String _drivetrain = 'Any';
+  String _doors = '';
   String _bedLength = '';
   List<String> _selectedColors = [];
   final Set<String> _selectedFeatures = {};
@@ -43,9 +44,18 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
   String _lastNoteSyncedMake = '';
   String _lastNoteSyncedModel = '';
   String _lastNoteSyncedTrim = '';
+  String _lastNoteSyncedDoors = '';
   String _lastNoteSyncedBed = '';
 
   bool get _isEditing => widget.existingTarget != null;
+
+  static const List<(String, String)> _doorOptions = [
+    ('', 'Any Doors'),
+    ('2', '2 Doors'),
+    ('3', '3 Doors'),
+    ('4', '4 Doors'),
+    ('5', '5 Doors'),
+  ];
 
   static const List<String> _prestonMakes = [
     'Ford',
@@ -89,9 +99,12 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     if (t != null) {
       const validConditions = {'Any', 'New', 'Pre-Owned', 'CPO'};
       const validDrivetrains = {'Any', '4WD', 'AWD', 'FWD', 'RWD'};
+      const validDoors = {'', '2', '3', '4', '5'};
       _condition = validConditions.contains(t.condition) ? t.condition : 'Any';
       _drivetrain =
           validDrivetrains.contains(t.drivetrain) ? t.drivetrain : 'Any';
+      final normDoors = NaturalLanguageVehicleParser.normalizeDoorsInput(t.doors);
+      _doors = validDoors.contains(normDoors) ? normDoors : '';
       _bedLength = t.bedLength;
       _makeCtrl.text = t.make;
       _modelCtrl.text = t.model;
@@ -114,6 +127,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
         _lastNoteSyncedMake = noteParsed['make']?.toString() ?? '';
         _lastNoteSyncedModel = noteParsed['model']?.toString() ?? '';
         _lastNoteSyncedTrim = noteParsed['trim']?.toString() ?? '';
+        _lastNoteSyncedDoors = noteParsed['doors']?.toString() ?? '';
         _lastNoteSyncedBed = noteParsed['bedLength']?.toString() ?? '';
       }
     }
@@ -142,6 +156,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       final newMake = noteParsed['make']?.toString() ?? '';
       final newModel = noteParsed['model']?.toString() ?? '';
       final newTrim = noteParsed['trim']?.toString() ?? '';
+      final newDoors = noteParsed['doors']?.toString() ?? '';
       final newBed = noteParsed['bedLength']?.toString() ?? '';
 
       if (_makeCtrl.text.trim() == _lastNoteSyncedMake && newMake.isNotEmpty) {
@@ -157,6 +172,10 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
           newTrim != _lastNoteSyncedTrim) {
         _trimCtrl.text = newTrim;
         _lastNoteSyncedTrim = newTrim;
+      }
+      if (_doors == _lastNoteSyncedDoors && newDoors != _lastNoteSyncedDoors) {
+        _doors = newDoors;
+        _lastNoteSyncedDoors = newDoors;
       }
       if (_bedLength == _lastNoteSyncedBed && newBed != _lastNoteSyncedBed) {
         _bedLength = newBed;
@@ -204,7 +223,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       _exteriorColorCtrl.text,
     );
 
-    // When editing an existing target, if the user explicitly cleared Trim or Bed Length,
+    // When editing an existing target, if the user explicitly cleared Trim, Doors, or Bed Length,
     // strip the old token from raw notes so natural-language parsing doesn't re-apply it.
     if (_isEditing) {
       final prev = widget.existingTarget!;
@@ -213,6 +232,18 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
             .replaceAll(
               RegExp('\\b${RegExp.escape(prev.trim)}\\b[.,;]*',
                   caseSensitive: false),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (_doors.isEmpty && prev.doors.isNotEmpty && notes.isNotEmpty) {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'\b(?:[2345]|two|three|four|five)[-\s]*(?:doors?|dr\.?)[.,;]*',
+                caseSensitive: false,
+              ),
               ' ',
             )
             .replaceAll(RegExp(r'\s+'), ' ')
@@ -235,6 +266,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
     final hasAnyCriteria = make.isNotEmpty ||
         model.isNotEmpty ||
         trim.isNotEmpty ||
+        _doors.isNotEmpty ||
         _bedLength.isNotEmpty ||
         notes.isNotEmpty ||
         combinedColors.isNotEmpty ||
@@ -271,6 +303,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
           make: make,
           model: model,
           trim: trim,
+          doors: _doors,
           bedLength: _bedLength,
           maxPrice: maxPrice,
           maxMileage: maxMileage,
@@ -288,6 +321,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
           make: make,
           model: model,
           trim: trim,
+          doors: _doors,
           bedLength: _bedLength,
           maxPrice: maxPrice,
           maxMileage: maxMileage,
@@ -595,24 +629,57 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                     ),
 
                     const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: _drivetrain,
-                      decoration: const InputDecoration(
-                        labelText: 'Drivetrain',
-                        prefixIcon: Icon(Icons.settings_outlined),
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                            value: 'Any', child: Text('Any Drivetrain')),
-                        DropdownMenuItem(
-                            value: '4WD', child: Text('4WD / 4x4')),
-                        DropdownMenuItem(value: 'AWD', child: Text('AWD')),
-                        DropdownMenuItem(value: 'FWD', child: Text('FWD')),
-                        DropdownMenuItem(value: 'RWD', child: Text('RWD')),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            isExpanded: true,
+                            initialValue: _drivetrain,
+                            decoration: const InputDecoration(
+                              labelText: 'Drivetrain',
+                              prefixIcon: Icon(Icons.settings_outlined),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                  value: 'Any', child: Text('Any Drivetrain')),
+                              DropdownMenuItem(
+                                  value: '4WD', child: Text('4WD / 4x4')),
+                              DropdownMenuItem(value: 'AWD', child: Text('AWD')),
+                              DropdownMenuItem(value: 'FWD', child: Text('FWD')),
+                              DropdownMenuItem(value: 'RWD', child: Text('RWD')),
+                            ],
+                            onChanged: (v) {
+                              if (v != null) setState(() => _drivetrain = v);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            key: const ValueKey('dialog_doors_dropdown'),
+                            isExpanded: true,
+                            initialValue: _doors,
+                            decoration: const InputDecoration(
+                              labelText: 'Number of Doors',
+                              prefixIcon: Icon(Icons.sensor_door_outlined),
+                            ),
+                            items: _doorOptions
+                                .map(
+                                  (opt) => DropdownMenuItem<String>(
+                                    value: opt.$1,
+                                    child: Text(
+                                      opt.$2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (v) {
+                              setState(() => _doors = v ?? '');
+                            },
+                          ),
+                        ),
                       ],
-                      onChanged: (v) {
-                        if (v != null) setState(() => _drivetrain = v);
-                      },
                     ),
 
                     const SizedBox(height: 12),
@@ -730,6 +797,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                     ),
                     if (_notesCtrl.text.trim().isNotEmpty ||
                         _selectedColors.isNotEmpty ||
+                        _doors.isNotEmpty ||
                         _isEditing) ...[
                       const SizedBox(height: 10),
                       Builder(
@@ -742,6 +810,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
                             'make': _makeCtrl.text.trim(),
                             'model': _modelCtrl.text.trim(),
                             'trim': _trimCtrl.text.trim(),
+                            'doors': _doors,
                             'bedLength': _bedLength,
                             'maxPrice': _parseMaxPrice(_maxPriceCtrl.text),
                             'maxMileage': int.tryParse(

@@ -8,6 +8,7 @@ class VehicleSearchTarget {
   final String make;
   final String model;
   final String trim;
+  final String doors;
   final String bedLength;
   final String cabStyle;
   final String engineSpec;
@@ -27,6 +28,7 @@ class VehicleSearchTarget {
     this.make = '',
     this.model = '',
     this.trim = '',
+    this.doors = '',
     this.bedLength = '',
     this.cabStyle = '',
     this.engineSpec = '',
@@ -49,6 +51,7 @@ class VehicleSearchTarget {
       make: norm['make']?.toString() ?? '',
       model: norm['model']?.toString() ?? '',
       trim: norm['trim']?.toString() ?? '',
+      doors: norm['doors']?.toString() ?? '',
       bedLength: norm['bedLength']?.toString() ?? '',
       cabStyle: norm['cabStyle']?.toString() ?? '',
       engineSpec: norm['engineSpec']?.toString() ?? '',
@@ -73,6 +76,7 @@ class VehicleSearchTarget {
         'make': make,
         'model': model,
         'trim': trim,
+        'doors': doors,
         'bedLength': bedLength,
         'cabStyle': cabStyle,
         'engineSpec': engineSpec,
@@ -100,6 +104,9 @@ class VehicleSearchTarget {
     if (trim.isNotEmpty) parts.add(trim);
 
     final qualifiers = <String>[];
+    if (doors.isNotEmpty) {
+      qualifiers.add(NaturalLanguageVehicleParser.formatDoorsLabel(doors));
+    }
     if (cabStyle.isNotEmpty) qualifiers.add(cabStyle);
     if (bedLength.isNotEmpty) {
       qualifiers.add(NaturalLanguageVehicleParser.formatBedLengthLabel(bedLength));
@@ -160,6 +167,7 @@ class GuestProfile {
   final String make;
   final String model;
   final String trim;
+  final String doors;
   final String bedLength;
   final String cabStyle;
   final String engineSpec;
@@ -192,6 +200,7 @@ class GuestProfile {
     this.make = '',
     this.model = '',
     this.trim = '',
+    this.doors = '',
     this.bedLength = '',
     this.cabStyle = '',
     this.engineSpec = '',
@@ -250,6 +259,7 @@ class GuestProfile {
           'make': json['make']?.toString() ?? '',
           'model': json['model']?.toString() ?? '',
           'trim': json['trim']?.toString() ?? '',
+          'doors': json['doors']?.toString() ?? '',
           'bedLength': json['bedLength']?.toString() ?? '',
           'cabStyle': json['cabStyle']?.toString() ?? '',
           'engineSpec': json['engineSpec']?.toString() ?? '',
@@ -327,6 +337,7 @@ class GuestProfile {
       make: first.make,
       model: first.model,
       trim: first.trim,
+      doors: first.doors,
       bedLength: first.bedLength,
       cabStyle: first.cabStyle,
       engineSpec: first.engineSpec,
@@ -364,6 +375,7 @@ class GuestProfile {
         'make': make,
         'model': model,
         'trim': trim,
+        'doors': doors,
         'bedLength': bedLength,
         'cabStyle': cabStyle,
         'engineSpec': engineSpec,
@@ -401,6 +413,8 @@ class GuestProfile {
         ..write(t.model)
         ..write(' ')
         ..write(t.trim)
+        ..write(' ')
+        ..write(t.doors.isNotEmpty ? '${t.doors} doors' : '')
         ..write(' ')
         ..write(t.bedLength)
         ..write(' ')
