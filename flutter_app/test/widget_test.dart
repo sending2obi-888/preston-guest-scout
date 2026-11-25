@@ -10,6 +10,8 @@ import 'package:preston_guest_scout/screens/home_intake_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
 import 'package:preston_guest_scout/screens/vin_recall_screen.dart';
 import 'package:preston_guest_scout/services/calendar_service.dart';
+import 'package:preston_guest_scout/services/document_equivalent_service.dart';
+import 'package:preston_guest_scout/services/document_picker_service.dart';
 import 'package:preston_guest_scout/services/google_drive_sync_service.dart';
 import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
@@ -3495,6 +3497,563 @@ void main() {
     LocalScoutEngine.resetForTest();
     tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  test(
+      'scan2026NautilusHybridsRecallFree filters strictly to 2026 Lincoln Nautilus Hybrids and excludes VINs with active/incomplete recalls',
+      () async {
+    LocalScoutEngine.resetForTest();
+
+    final mockInventory = <Map<String, dynamic>>[
+      // 1. Clean 2026 Lincoln Nautilus Hybrid (0 active recalls) -> MUST INCLUDE
+      {
+        'vin': '5LMPJ9J41TJ069532',
+        'stockNumber': 'GDX532',
+        'title': '2026 Lincoln Nautilus Black Label',
+        'year': 2026,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Black Label',
+        'condition': 'New',
+        'price': 82504.0,
+        'location': 'Boulevard Lincoln (Millsboro, DE)',
+        'drivetrain': 'AWD',
+        'engine': '4 Cylinder Engine',
+        'fuelType': 'Gas/Electric Hybrid',
+        'exteriorColor': 'Diamond Red',
+      },
+      // 2. 2026 Lincoln Nautilus Hybrid WITH active open recall 26V688000 / 26S75 -> MUST EXCLUDE
+      {
+        'vin': '5LMPJ8K40TJ031668',
+        'stockNumber': 'LM26065',
+        'title': '2026 Lincoln Nautilus Reserve',
+        'year': 2026,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Reserve',
+        'condition': 'New',
+        'price': 65989.0,
+        'location': 'Boulevard Lincoln (Millsboro, DE)',
+        'drivetrain': 'AWD',
+        'engine': '2.0L GTDI FHEV',
+        'fuelType': 'Gas/Electric Hybrid',
+      },
+      // 3. Non-Hybrid 2026 Lincoln Nautilus (Gasoline only) -> MUST IGNORE
+      {
+        'vin': '5LMPJ8KA1TJ057119',
+        'stockNumber': 'GDX554',
+        'title': '2026 Lincoln Nautilus Reserve',
+        'year': 2026,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Reserve',
+        'condition': 'New',
+        'price': 62439.0,
+        'location': 'Boulevard Lincoln (Millsboro, DE)',
+        'drivetrain': 'AWD',
+        'engine': '4 Cylinder Engine',
+        'fuelType': 'Gasoline Fuel',
+      },
+      // 4. 2024 Pre-Owned Lincoln Nautilus Hybrid -> MUST IGNORE (not 2026)
+      {
+        'vin': '5LMPJ8K4XRJ816904',
+        'stockNumber': 'H260930A',
+        'title': '2024 Lincoln Nautilus Reserve',
+        'year': 2024,
+        'make': 'Lincoln',
+        'model': 'Nautilus',
+        'trim': 'Reserve',
+        'condition': 'Used',
+        'price': 43600.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': 'AWD',
+        'fuelType': 'Gas/Electric Hybrid',
+      },
+    ];
+
+    final sharedModelRecalls = <NhtsaRecallCampaign>[
+      const NhtsaRecallCampaign(
+        campaignNumber: '26V688000',
+        oemRecallNumber: '26S75',
+        manufacturer: 'Ford Motor Company',
+        component: 'POWER TRAIN:AUTOMATIC TRANSMISSION',
+        reportDate: 'Oct 20, 2026',
+        reportIsoDate: '2026-10-20',
+        summary:
+            '2026-2027 Nautilus Hybrid Integrated Park Module (IPM) recall.',
+        remedy:
+            'Dealers will replace the Integrated Park Module. Ford recall number is 26S75.',
+        remedyAvailable: false,
+      ),
+    ];
+
+    final scan = await NhtsaRecallService.scan2026NautilusHybridsRecallFree(
+      nautilusInventory: mockInventory,
+      mockSharedModelRecalls: sharedModelRecalls,
+      mockPerVinInspector: (vin) async {
+        if (vin == '5LMPJ8KA1TJ057119') {
+          return (
+            vehicle: DecodedVinVehicle(
+              vin: vin,
+              year: 2026,
+              make: 'Lincoln',
+              model: 'Nautilus',
+              trim: 'Reserve',
+              fuelType: 'Gasoline',
+              displacementL: '2.0',
+            ),
+            openCheck: const VinOpenRecallLookup(
+              verified: true,
+              openRecallCount: 0,
+            ),
+          );
+        }
+        if (vin == '5LMPJ8K40TJ031668') {
+          return (
+            vehicle: DecodedVinVehicle(
+              vin: vin,
+              year: 2026,
+              make: 'Lincoln',
+              model: 'Nautilus',
+              trim: 'Reserve',
+              fuelType: 'Gasoline • Strong HEV (Hybrid Electric Vehicle)',
+              displacementL: '2.0',
+            ),
+            openCheck: const VinOpenRecallLookup(
+              verified: true,
+              openRecallCount: 1,
+              openRecalls: [
+                VinOpenRecallRecord(
+                  recallDate: '10/26/2026',
+                  recallType: 'Safety',
+                  nhtsaPrefix: '26V688',
+                  oemRecallNumber: '26S75',
+                  description:
+                      'PARK LOCK ACTUATOR REPLACEMENT AND SOBDMC UPDATE',
+                  statusText: 'Remedy Not Available',
+                ),
+              ],
+            ),
+          );
+        }
+        return (
+          vehicle: DecodedVinVehicle(
+            vin: vin,
+            year: 2026,
+            make: 'Lincoln',
+            model: 'Nautilus',
+            trim: 'Black Label',
+            fuelType: 'Gasoline • Strong HEV (Hybrid Electric Vehicle)',
+            displacementL: '2.0',
+          ),
+          openCheck: const VinOpenRecallLookup(
+            verified: true,
+            openRecallCount: 0,
+          ),
+        );
+      },
+    );
+
+    expect(scan.total2026NautilusInStock, 3);
+    expect(scan.totalHybridsInStock, 2);
+    expect(scan.recallFreeCount, 1);
+    expect(scan.excludedActiveRecallCount, 1);
+    expect(scan.recallFreeVehicles.single.vin, '5LMPJ9J41TJ069532');
+    expect(scan.recallFreeVehicles.single.stockNumber, 'GDX532');
+    expect(
+      scan.recallFreeVehicles.single.title,
+      '2026 Lincoln Nautilus Black Label Hybrid',
+    );
+    expect(scan.excludedActiveRecallVins.single.vin, '5LMPJ8K40TJ031668');
+  });
+
+  testWidgets(
+      'VinRecallScreen displays dedicated 2026 Lincoln Nautilus Hybrid recall-free section and inspects clean VIN on tap',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'recallChecks': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    NhtsaRecallService.mockNautilusHybridScanHandler =
+        ({bool forceRefresh = false}) async {
+      return const NautilusHybridRecallScanResult(
+        checkedAt: '2026-11-25T15:30:00Z',
+        agentMode: 'gemini-url-context (gemini-2.5-flash)',
+        nhtsaReferenceUrl: 'https://www.nhtsa.gov/recalls',
+        total2026NautilusInStock: 13,
+        totalHybridsInStock: 9,
+        recallFreeCount: 1,
+        excludedActiveRecallCount: 8,
+        geminiSummary:
+            'Gemini cross-referenced all 9 in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com against www.nhtsa.gov/recalls: 1 vehicle has 0 active/incomplete recalls.',
+        recallFreeVehicles: [
+          RecallFreeNautilusHybridVehicle(
+            vin: '5LMPJ9J41TJ069532',
+            stockNumber: 'GDX532',
+            title: '2026 Lincoln Nautilus Black Label Hybrid',
+            trim: 'Black Label',
+            condition: 'New',
+            price: 82504,
+            location: 'Boulevard Lincoln (Millsboro, DE)',
+            drivetrain: 'AWD',
+            engine: '2.0L Turbo Hybrid (FHEV)',
+            geminiVerificationNote:
+                'Confirmed 0 active/incomplete recalls on www.nhtsa.gov/recalls — ready for delivery.',
+          ),
+        ],
+        excludedActiveRecallVins: [
+          ExcludedNautilusHybridSummary(
+            vin: '5LMPJ8K40TJ031668',
+            stockNumber: 'LM26065',
+            title: '2026 Lincoln Nautilus Reserve',
+            trim: 'Reserve',
+            incompleteCount: 1,
+            activeCampaigns: ['26V688000 (OEM 26S75)'],
+          ),
+        ],
+      );
+    };
+
+    NhtsaRecallService.mockCheckHandler = (vin) async {
+      return VinRecallCheckResult(
+        id: 'recall-nautilus-clean',
+        vin: vin,
+        nhtsaUrl: 'https://www.nhtsa.gov/recalls?vin=$vin',
+        checkedAt: '2026-11-25T15:31:00Z',
+        agentMode: 'gemini (gemini-2.5-flash)',
+        vehicleTitle: '2026 Lincoln Nautilus Black Label',
+        vehicle: DecodedVinVehicle(
+          vin: vin,
+          year: 2026,
+          make: 'Lincoln',
+          model: 'Nautilus',
+          trim: 'Black Label',
+          fuelType: 'Gasoline • Strong HEV (Hybrid Electric Vehicle)',
+        ),
+        hasRecalls: false,
+        recallCount: 0,
+        incompleteCount: 0,
+        completeCount: 3,
+        verdictHeadline:
+            '0 Incomplete Recalls • 3 Complete Recalls for 2026 Lincoln Nautilus Black Label',
+        geminiSummary: '0 active recalls remain on VIN $vin.',
+        recommendedAction: 'Ready for guest delivery.',
+      );
+    };
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1400);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: VinRecallScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('nautilus_hybrid_recall_free_section')),
+      findsOneWidget,
+    );
+    expect(
+      find.text('2026 Lincoln Nautilus Hybrid — In-Stock Without Active Recall'),
+      findsOneWidget,
+    );
+    expect(find.text('1 Recall-Free Ready'), findsOneWidget);
+    expect(
+      find.text('9 Hybrids Scanned on prestonmotor.com'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('2026 Lincoln Nautilus Black Label Hybrid'),
+      findsOneWidget,
+    );
+    expect(find.text('0 ACTIVE RECALLS • READY'), findsOneWidget);
+
+    // Expand excluded active-recall hybrids
+    await tester.tap(
+      find.byKey(const ValueKey('toggle_excluded_nautilus_hybrids_button')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('Excluded: 26V688000 (OEM 26S75)'),
+      findsOneWidget,
+    );
+
+    // Tap "Inspect Full Recall Report" on the recall-free Nautilus Hybrid
+    final inspectBtn =
+        find.byKey(const ValueKey('inspect_nautilus_vin_5LMPJ9J41TJ069532'));
+    await tester.ensureVisible(inspectBtn);
+    await tester.tap(inspectBtn);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        '0 Incomplete Recalls • 3 Complete Recalls for 2026 Lincoln Nautilus Black Label',
+      ),
+      findsOneWidget,
+    );
+
+    NhtsaRecallService.mockNautilusHybridScanHandler = null;
+    NhtsaRecallService.mockCheckHandler = null;
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  test(
+      'DocumentEquivalentService ranks closest equivalent vehicles across prestonmotor.com even when no identical vehicle exists',
+      () async {
+    const docText =
+        'Competitor Quote: 2026 Subaru Outback Touring XT AWD (\$44,500) with Leather Seats, Sunroof/Moonroof, Heated Seats, Apple CarPlay.';
+    final doc = PickedDocumentFile(
+      fileName: 'subaru_outback_quote.txt',
+      mimeType: 'text/plain',
+      sizeBytes: docText.length,
+      base64Data: base64Encode(utf8.encode(docText)),
+    );
+
+    final mockCatalog = <Map<String, dynamic>>[
+      // Cross-brand midsize AWD SUV equivalent at similar price & luxury trim -> MUST RANK #1
+      {
+        'vin': 'JM3KJHAA0T1100001',
+        'stockNumber': 'MZ2601',
+        'title': '2026 Mazda CX-70 Turbo Premium AWD',
+        'year': 2026,
+        'make': 'Mazda',
+        'model': 'CX-70',
+        'trim': 'Turbo Premium',
+        'condition': 'New',
+        'price': 45200.0,
+        'location': 'Preston Mazda (Hurlock, MD)',
+        'drivetrain': 'AWD',
+        'engine': '3.3L Turbo',
+        'fuelType': 'Gasoline',
+        'highlights': [
+          'Leather Seats',
+          'Sunroof/Moonroof',
+          'Heated Seats',
+          'Apple CarPlay',
+        ],
+      },
+      // Mismatched body class (Pickup Truck at $72K) -> MUST RANK MUCH LOWER
+      {
+        'vin': '1FT8W3BT0TED99901',
+        'stockNumber': 'FD9901',
+        'title': '2026 Ford F-350 Lariat Crew Cab 4WD',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-350',
+        'trim': 'Lariat',
+        'condition': 'New',
+        'price': 74900.0,
+        'location': 'Preston Ford Hurlock, MD',
+        'drivetrain': '4WD',
+        'engine': '6.7L Power Stroke Diesel',
+        'fuelType': 'Diesel',
+        'highlights': ['Tow Hitch'],
+      },
+    ];
+
+    final res = await DocumentEquivalentService.findClosestEquivalents(
+      document: doc,
+      entireCatalog: mockCatalog,
+    );
+
+    expect(res.totalInventoryScanned, 2);
+    expect(res.equivalents.length, 2);
+    expect(res.equivalents.first.vin, 'JM3KJHAA0T1100001');
+    expect(
+      res.equivalents.first.similarityScore,
+      greaterThan(res.equivalents.last.similarityScore),
+    );
+  });
+
+  testWidgets(
+      'HomeIntakeScreen uploads a document, displays Gemini closest equivalent vehicles across prestonmotor.com, and applies specs to form',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+
+    DocumentPickerService.mockPickDocumentHandler = () async {
+      return PickedDocumentFile(
+        fileName: 'window_sticker_highlander_hybrid.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 245760,
+        base64Data: base64Encode(utf8.encode('%PDF-1.4 mock window sticker')),
+      );
+    };
+
+    DocumentEquivalentService.mockSearchHandler = ({
+      required PickedDocumentFile document,
+      String extraNotes = '',
+    }) async {
+      return DocumentEquivalentSearchResult(
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        analyzedAt: '2026-11-25T15:40:00Z',
+        agentMode: 'gemini (gemini-2.5-flash)',
+        totalInventoryScanned: 3370,
+        documentSummary:
+            'Window sticker for a 2026 Toyota Grand Highlander Hybrid Limited AWD (\$54,820).',
+        overallSummary:
+            'Gemini scanned all 3,370 prestonmotor.com vehicles and ranked the closest 3-row Hybrid AWD equivalents.',
+        extractedGuestName: 'Elena Vance',
+        referenceVehicle: const DocumentExtractedVehicleProfile(
+          condition: 'New',
+          year: 2026,
+          minYear: 2025,
+          maxYear: 2027,
+          make: 'Toyota',
+          model: 'Grand Highlander',
+          trim: 'Limited',
+          bodyCategory: '3-Row SUV',
+          doors: '4',
+          drivetrain: 'AWD',
+          powertrain: 'Hybrid',
+          targetPrice: 54820,
+          keyFeatures: ['Leather Seats', '3rd Row Seating'],
+        ),
+        equivalents: const [
+          EquivalentVehicleMatch(
+            vin: '5TDAAAB50TS158808',
+            stockNumber: 'ET26104',
+            title: '2026 Toyota Grand Highlander Limited',
+            year: 2026,
+            make: 'Toyota',
+            model: 'Grand Highlander',
+            trim: 'Limited',
+            condition: 'New',
+            price: 54942,
+            location: 'Preston Toyota (Easton, MD)',
+            drivetrain: 'AWD',
+            fuelType: 'Gas/Electric Hybrid',
+            similarityScore: 98,
+            matchTier: 'Exact / Near-Identical Match',
+            whyEquivalent:
+                'Near-identical 2026 Grand Highlander Limited Hybrid AWD in stock at Preston Toyota within \$122 of sticker.',
+            matchingHighlights: [
+              'Same Toyota Grand Highlander Model',
+              'Hybrid Powertrain',
+              'AWD Drivetrain',
+            ],
+            keyDifferences: ['Celestial Silver exterior vs. Wind Chill Pearl'],
+          ),
+          EquivalentVehicleMatch(
+            vin: 'JM3KKDHC0T1409954',
+            stockNumber: 'MZ26088',
+            title: '2026 Mazda CX-90 S Premium Sport',
+            year: 2026,
+            make: 'Mazda',
+            model: 'CX-90',
+            trim: 'S Premium Sport',
+            condition: 'New',
+            price: 54389,
+            location: 'Preston Mazda (Hurlock, MD)',
+            drivetrain: 'AWD',
+            similarityScore: 92,
+            matchTier: 'Closest Cross-Brand Equivalent',
+            whyEquivalent:
+                'Closest cross-brand 3-row AWD SUV at Preston Mazda priced \$431 below sticker.',
+            matchingHighlights: [
+              'Direct 3-Row SUV Equivalent (Mazda CX-90)',
+              'AWD Drivetrain',
+            ],
+            keyDifferences: [
+              'Mazda CX-90 equivalent to Toyota Grand Highlander',
+            ],
+          ),
+        ],
+      );
+    };
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 1400);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: HomeIntakeScreen(
+            status: const SystemStatus(geminiConfigured: true),
+            onGuestCreated: () {},
+            onOpenGuestMatches: (_) {},
+            onOpenSettings: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final uploadBtn =
+        find.byKey(const ValueKey('upload_document_equivalents_button'));
+    expect(uploadBtn, findsOneWidget);
+
+    await tester.tap(uploadBtn);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('document_equivalents_results_section')),
+      findsOneWidget,
+    );
+    expect(
+      find.text('3,370 prestonmotor.com Vehicles Scanned'),
+      findsOneWidget,
+    );
+    expect(find.text('98% Closest Match'), findsOneWidget);
+    expect(find.text('92% Closest Match'), findsOneWidget);
+    expect(
+      find.text('2026 Toyota Grand Highlander Limited'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('2026 Mazda CX-90 S Premium Sport'),
+      findsOneWidget,
+    );
+    // Extracted guest name automatically pre-fills blank Guest Full Name field
+    expect(find.text('Elena Vance'), findsOneWidget);
+
+    // Tap "Use This Vehicle in Search Form" on the Mazda CX-90 cross-brand equivalent
+    final useMazdaBtn =
+        find.byKey(const ValueKey('use_equivalent_vehicle_JM3KKDHC0T1409954'));
+    await tester.ensureVisible(useMazdaBtn);
+    await tester.tap(useMazdaBtn);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Mazda'), findsOneWidget);
+    expect(find.text('CX-90'), findsOneWidget);
+
+    DocumentPickerService.mockPickDocumentHandler = null;
+    DocumentEquivalentService.mockSearchHandler = null;
+    LocalScoutEngine.resetForTest();
   });
 }
 

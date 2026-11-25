@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
 import 'calendar_service.dart';
+import 'document_equivalent_service.dart';
+import 'document_picker_service.dart';
 import 'match_notification_service.dart';
 import 'natural_language_parser.dart';
 import 'nhtsa_recall_service.dart';
@@ -1902,7 +1904,7 @@ class LocalScoutEngine {
         }).timeout(const Duration(seconds: 20));
 
         if (res.statusCode != 200) {
-          if (attempt == 0) {
+          if (attempt == 0 && res.statusCode != 400) {
             await Future<void>.delayed(const Duration(milliseconds: 350));
             continue;
           }
@@ -1938,7 +1940,7 @@ class LocalScoutEngine {
         final computedPages =
             pageSize > 0 ? (totalCount / pageSize).ceil() : 1;
         final rawTotalPages = _asInt(paging?['TotalPages']) ?? computedPages;
-        final totalPages = rawTotalPages.clamp(1, 25);
+        final totalPages = rawTotalPages.clamp(1, 45);
 
         return (vehicles: out, totalPages: totalPages);
       } catch (_) {
@@ -1960,6 +1962,7 @@ class LocalScoutEngine {
     Map<String, String> params, {
     double? maxPrice,
     String facetBedLength = '',
+    int concurrency = 3,
   }) async {
     final first = await _querySingleCosmosPage(
       client,
@@ -1971,7 +1974,6 @@ class LocalScoutEngine {
     final all = <Map<String, dynamic>>[...first.vehicles];
     if (first.totalPages <= 1) return all;
 
-    const concurrency = 3;
     for (int startPt = 2;
         startPt <= first.totalPages;
         startPt += concurrency) {
@@ -3901,10 +3903,14 @@ class LocalScoutEngine {
 
     if (cleanStatus == 'auto' || cleanStatus == 'reset') {
       _recallStatusOverrides.remove(key);
+      _cachedNautilusHybridScan = null;
+      _cachedNautilusHybridScanAt = null;
       return checkVinRecalls(validation.vin);
     }
 
     _recallStatusOverrides[key] = cleanStatus;
+    _cachedNautilusHybridScan = null;
+    _cachedNautilusHybridScanAt = null;
     final cachedJson = _recallResultsByVin[validation.vin];
     if (cachedJson == null) {
       return checkVinRecalls(validation.vin);
@@ -3916,6 +3922,150 @@ class LocalScoutEngine {
       {cleanCampaign: cleanStatus},
     );
     return _saveAndReturnRecallResult(updated);
+  }
+
+  static List<Map<String, dynamic>> _cachedFullCatalog = [];
+  static DateTime? _cachedFullCatalogAt;
+  static NautilusHybridRecallScanResult? _cachedNautilusHybridScan;
+  static DateTime? _cachedNautilusHybridScanAt;
+
+  static Future<List<Map<String, dynamic>>> fetchEntirePrestonCatalog({
+    bool forceRefresh = false,
+  }) async {
+    final now = DateTime.now();
+    if (!forceRefresh &&
+        _cachedFullCatalog.isNotEmpty &&
+        _cachedFullCatalogAt != null &&
+        now.difference(_cachedFullCatalogAt!) < const Duration(minutes: 5)) {
+      return _cachedFullCatalog;
+    }
+
+    final client = http.Client();
+    try {
+      await _refreshPrestonConfig(client);
+      final results = await Future.wait([
+        _queryAllCosmosPages(
+          client,
+          _newPageId,
+          const {},
+          concurrency: 6,
+        ),
+        _queryAllCosmosPages(
+          client,
+          _usedPageId,
+          const {},
+          concurrency: 6,
+        ),
+      ]);
+      final byVin = <String, Map<String, dynamic>>{};
+      for (final list in results) {
+        for (final v in list) {
+          final vin = v['vin']?.toString() ?? '';
+          if (vin.isEmpty) continue;
+          byVin.putIfAbsent(vin, () => v);
+        }
+      }
+      final merged = byVin.values.toList();
+      if (merged.isNotEmpty) {
+        _cachedFullCatalog = merged;
+        _cachedFullCatalogAt = now;
+      }
+      return merged;
+    } finally {
+      client.close();
+    }
+  }
+
+  static Future<NautilusHybridRecallScanResult>
+      scan2026NautilusHybridsRecallFree({
+    bool forceRefresh = false,
+    @visibleForTesting List<Map<String, dynamic>>? mockInventoryOverride,
+    @visibleForTesting
+    Future<({DecodedVinVehicle vehicle, VinOpenRecallLookup openCheck})>
+            Function(String vin)?
+        mockPerVinInspector,
+    @visibleForTesting List<NhtsaRecallCampaign>? mockSharedModelRecalls,
+  }) async {
+    if (NhtsaRecallService.hasMockNautilusHybridScanHandler) {
+      return NhtsaRecallService.scan2026NautilusHybridsRecallFree(
+        nautilusInventory: const [],
+        forceRefresh: forceRefresh,
+      );
+    }
+    await ensureInitialized();
+
+    final now = DateTime.now();
+    if (!forceRefresh &&
+        mockInventoryOverride == null &&
+        _cachedNautilusHybridScan != null &&
+        _cachedNautilusHybridScanAt != null &&
+        now.difference(_cachedNautilusHybridScanAt!) <
+            const Duration(minutes: 3)) {
+      return _cachedNautilusHybridScan!;
+    }
+
+    List<Map<String, dynamic>> nautilusInv;
+    if (mockInventoryOverride != null) {
+      nautilusInv = mockInventoryOverride;
+    } else {
+      final probeGuest = GuestProfile(
+        id: 'probe-2026-nautilus-hybrid',
+        name: '2026 Lincoln Nautilus Probe',
+        condition: 'Any',
+        make: 'Lincoln',
+        model: 'Nautilus',
+        createdAt: DateTime.now().toUtc().toIso8601String(),
+      );
+      nautilusInv = await _fetchPrestonCandidates(probeGuest);
+    }
+
+    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+    final model =
+        (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash').trim();
+
+    final result = await NhtsaRecallService.scan2026NautilusHybridsRecallFree(
+      nautilusInventory: nautilusInv,
+      forceRefresh: forceRefresh,
+      geminiApiKey: apiKey,
+      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
+      getManualOverridesForVin: _getRecallOverridesForVin,
+      mockPerVinInspector: mockPerVinInspector,
+      mockSharedModelRecalls: mockSharedModelRecalls,
+    );
+
+    if (mockInventoryOverride == null && result.total2026NautilusInStock > 0) {
+      _cachedNautilusHybridScan = result;
+      _cachedNautilusHybridScanAt = DateTime.now();
+    }
+    return result;
+  }
+
+  static Future<DocumentEquivalentSearchResult>
+      findEquivalentVehiclesFromDocument({
+    required PickedDocumentFile document,
+    String extraNotes = '',
+    @visibleForTesting List<Map<String, dynamic>>? mockCatalogOverride,
+  }) async {
+    if (DocumentEquivalentService.hasMockSearchHandler) {
+      return DocumentEquivalentService.findClosestEquivalents(
+        document: document,
+        entireCatalog: const <Map<String, dynamic>>[],
+        extraNotes: extraNotes,
+      );
+    }
+    await ensureInitialized();
+    final catalog = mockCatalogOverride ?? await fetchEntirePrestonCatalog();
+    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+    final model =
+        (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash').trim();
+
+    return DocumentEquivalentService.findClosestEquivalents(
+      document: document,
+      entireCatalog: catalog,
+      geminiApiKey: apiKey,
+      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
+      extraNotes: extraNotes,
+    );
   }
 
   @visibleForTesting
@@ -3931,6 +4081,10 @@ class LocalScoutEngine {
     _initialized = false;
     _isRepairingZeroScannedGuests = false;
     _configFetchedAt = null;
+    _cachedFullCatalog = [];
+    _cachedFullCatalogAt = null;
+    _cachedNautilusHybridScan = null;
+    _cachedNautilusHybridScanAt = null;
     _guests = [];
     _matches = [];
     _notifications = [];

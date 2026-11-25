@@ -47,6 +47,13 @@ class NhtsaRecallService {
   @visibleForTesting
   static Future<VinRecallCheckResult> Function(String vin)? mockCheckHandler;
 
+  @visibleForTesting
+  static Future<NautilusHybridRecallScanResult> Function({bool forceRefresh})?
+      mockNautilusHybridScanHandler;
+
+  static bool get hasMockNautilusHybridScanHandler =>
+      mockNautilusHybridScanHandler != null;
+
   /// Validates and normalizes a standard 17-character VIN (rejecting I, O, Q).
   static ({bool valid, String vin, String error}) validateAndNormalizeVin(
     String rawVin,
@@ -797,7 +804,8 @@ class NhtsaRecallService {
         continue;
       }
       if (!isHybrid &&
-          RegExp(r'\bhev\b', caseSensitive: false).hasMatch(lowerCand) &&
+          RegExp(r'\bf?hev\b|\bhybrid\b', caseSensitive: false)
+              .hasMatch(lowerCand) &&
           !RegExp(r'\bphev\b', caseSensitive: false).hasMatch(lowerCand)) {
         continue;
       }
@@ -840,6 +848,16 @@ class NhtsaRecallService {
     }
 
     candidates.add(baseModel);
+    final isPlugInOverall =
+        RegExp(r'plug[\s\-]*in|phev', caseSensitive: false).hasMatch(fuelLower);
+    final isHybridOverall = !isPlugInOverall &&
+        RegExp(r'hybrid|hev', caseSensitive: false).hasMatch(fuelLower);
+    if (isHybridOverall &&
+        !RegExp(r'\bhybrid\b|\bf?hev\b', caseSensitive: false)
+            .hasMatch(baseModel)) {
+      candidates.add('${baseModel.toUpperCase()} HYBRID');
+      candidates.add('${baseModel.toUpperCase()} FHEV');
+    }
     return candidates.toList();
   }
 
@@ -1503,6 +1521,482 @@ class NhtsaRecallService {
       geminiSummary: geminiSummary,
       recommendedAction: recommendedAction,
       recalls: reconciled.recalls,
+    );
+  }
+
+  /// Determines whether a vehicle from prestonmotor.com + NHTSA vPIC decode is genuinely
+  /// a 2026 Lincoln Nautilus Hybrid (FHEV / Strong HEV), excluding gas-only 2.0L units.
+  static bool is2026LincolnNautilusHybrid(
+    Map<String, dynamic> srpVehicle,
+    DecodedVinVehicle decodedVehicle,
+  ) {
+    final srpYear = (srpVehicle['year'] as num?)?.toInt() ??
+        int.tryParse(srpVehicle['year']?.toString() ?? '');
+    final year = decodedVehicle.year ?? srpYear;
+    if (year != 2026) return false;
+
+    final makeModelText =
+        '${decodedVehicle.make} ${decodedVehicle.model} ${srpVehicle['make'] ?? ''} ${srpVehicle['model'] ?? ''} ${srpVehicle['title'] ?? ''}'
+            .toLowerCase();
+    if (!makeModelText.contains('lincoln') ||
+        !makeModelText.contains('nautilus')) {
+      return false;
+    }
+
+    final vpicFuel = decodedVehicle.fuelType.trim().toLowerCase();
+    if (vpicFuel.isNotEmpty) {
+      if (RegExp(r'hybrid|\bhev\b|\bfhev\b|electric', caseSensitive: false)
+          .hasMatch(vpicFuel)) {
+        return true;
+      }
+      if (vpicFuel == 'gasoline') {
+        return false;
+      }
+    }
+
+    final srpPowertrain =
+        '${srpVehicle['fuelType'] ?? ''} ${srpVehicle['engine'] ?? ''} ${srpVehicle['title'] ?? ''} ${srpVehicle['trim'] ?? ''} ${srpVehicle['commentsSummary'] ?? ''}'
+            .toLowerCase();
+    if (RegExp(r'hybrid|\bfhev\b|\bhev\b|gas/electric', caseSensitive: false)
+        .hasMatch(srpPowertrain)) {
+      return true;
+    }
+
+    final cleanVin = (srpVehicle['vin']?.toString() ?? decodedVehicle.vin)
+        .trim()
+        .toUpperCase();
+    if (cleanVin.startsWith('5LMPJ') &&
+        cleanVin.length == 17 &&
+        cleanVin[7] == '4') {
+      return true;
+    }
+    return false;
+  }
+
+  /// Checks all in-stock 2026 Lincoln Nautilus Hybrid VINs from `prestonmotor.com`
+  /// against `https://www.nhtsa.gov/recalls`, live per-VIN open recall records, and Gemini,
+  /// returning ONLY vehicles that do NOT have an active/incomplete recall.
+  static Future<NautilusHybridRecallScanResult>
+      scan2026NautilusHybridsRecallFree({
+    required List<Map<String, dynamic>> nautilusInventory,
+    bool forceRefresh = false,
+    String geminiApiKey = '',
+    String geminiModel = 'gemini-2.5-flash',
+    Map<String, String> Function(String vin)? getManualOverridesForVin,
+    Future<({DecodedVinVehicle vehicle, VinOpenRecallLookup openCheck})>
+            Function(String vin)?
+        mockPerVinInspector,
+    List<NhtsaRecallCampaign>? mockSharedModelRecalls,
+  }) async {
+    if (mockNautilusHybridScanHandler != null) {
+      return mockNautilusHybridScanHandler!(forceRefresh: forceRefresh);
+    }
+    final y2026Candidates = nautilusInventory.where((v) {
+      final yr = (v['year'] as num?)?.toInt() ??
+          int.tryParse(v['year']?.toString() ?? '');
+      if (yr == 2026) return true;
+      return RegExp(r'\b2026\b').hasMatch(v['title']?.toString() ?? '');
+    }).toList();
+
+    List<NhtsaRecallCampaign> sharedRecalls;
+    bool nhtsaReachable = true;
+    if (y2026Candidates.isEmpty) {
+      sharedRecalls = const [];
+    } else if (mockSharedModelRecalls != null) {
+      sharedRecalls = mockSharedModelRecalls;
+    } else {
+      const dummyHybrid = DecodedVinVehicle(
+        vin: '5LMPJ8K40TJ000000',
+        year: 2026,
+        make: 'Lincoln',
+        model: 'Nautilus',
+        fuelType: 'Gasoline • Strong HEV (Hybrid Electric Vehicle)',
+        displacementL: '2.0',
+        doors: '4',
+      );
+      final sharedFetched = await _fetchNhtsaRecallsForVehicle(dummyHybrid);
+      sharedRecalls = sharedFetched.recalls;
+      nhtsaReachable = sharedFetched.nhtsaSiteReachable;
+    }
+
+    final inspected = <({
+      Map<String, dynamic> srpVehicle,
+      DecodedVinVehicle decoded,
+      String vin,
+      String nhtsaUrl,
+      bool vinCompletionVerified,
+      int incompleteCount,
+      int completeCount,
+      List<String> openCampaignLabels,
+    })>[];
+
+    const batchSize = 4;
+    for (var i = 0; i < y2026Candidates.length; i += batchSize) {
+      final end = (i + batchSize < y2026Candidates.length)
+          ? i + batchSize
+          : y2026Candidates.length;
+      final slice = y2026Candidates.sublist(i, end);
+
+      final sliceResults = await Future.wait(
+        slice.map((srpVehicle) async {
+          final rawVin = srpVehicle['vin']?.toString() ?? '';
+          final validation = validateAndNormalizeVin(rawVin);
+          if (!validation.valid) return null;
+          final vin = validation.vin;
+
+          DecodedVinVehicle decoded;
+          VinOpenRecallLookup openCheck;
+          if (mockPerVinInspector != null) {
+            final mocked = await mockPerVinInspector(vin);
+            decoded = mocked.vehicle;
+            openCheck = mocked.openCheck;
+          } else {
+            DecodedVinVehicle? decTmp;
+            VinOpenRecallLookup openTmp =
+                const VinOpenRecallLookup(verified: false);
+            await Future.wait([
+              () async {
+                try {
+                  final d = await _decodeVinViaVpic(vin);
+                  decTmp = d.vehicle;
+                } catch (_) {}
+              }(),
+              () async {
+                openTmp = await _fetchVinSpecificOpenRecalls(vin);
+              }(),
+            ]);
+            decoded = decTmp ??
+                DecodedVinVehicle(
+                  vin: vin,
+                  year: (srpVehicle['year'] as num?)?.toInt() ?? 2026,
+                  make: (srpVehicle['make']?.toString() ?? 'Lincoln').trim(),
+                  model: (srpVehicle['model']?.toString() ?? 'Nautilus').trim(),
+                  trim: (srpVehicle['trim']?.toString() ?? '').trim(),
+                  fuelType: (srpVehicle['fuelType']?.toString() ?? '').trim(),
+                  engine: (srpVehicle['engine']?.toString() ?? '').trim(),
+                  displacementL: '2.0',
+                  driveType:
+                      (srpVehicle['drivetrain']?.toString() ?? 'AWD').trim(),
+                );
+            openCheck = openTmp;
+          }
+
+          if (!is2026LincolnNautilusHybrid(srpVehicle, decoded)) {
+            return null;
+          }
+
+          final annotated = _annotateDeterministically(decoded, sharedRecalls);
+          final overrides = getManualOverridesForVin != null
+              ? getManualOverridesForVin(vin)
+              : const <String, String>{};
+          final reconciled = reconcileVinRecallCompletion(
+            decoded: decoded,
+            recalls: annotated,
+            vinOpenCheck: openCheck,
+            manualOverrides: overrides,
+          );
+
+          final openLabels = reconciled.recalls
+              .where((r) => r.isIncomplete)
+              .map(
+                (r) => r.oemRecallNumber.isNotEmpty
+                    ? '${r.campaignNumber} (OEM ${r.oemRecallNumber})'
+                    : r.campaignNumber,
+              )
+              .toList();
+
+          return (
+            srpVehicle: srpVehicle,
+            decoded: decoded,
+            vin: vin,
+            nhtsaUrl: '$nhtsaRecallsWebUrl?vin=${Uri.encodeComponent(vin)}',
+            vinCompletionVerified: reconciled.vinCompletionVerified,
+            incompleteCount: reconciled.incompleteCount,
+            completeCount: reconciled.completeCount,
+            openCampaignLabels: openLabels,
+          );
+        }),
+      );
+
+      for (final item in sliceResults) {
+        if (item != null) inspected.add(item);
+      }
+    }
+
+    final cleanKey = geminiApiKey.trim();
+    final cleanModel =
+        geminiModel.trim().isNotEmpty ? geminiModel.trim() : 'gemini-2.5-flash';
+    String agentMode = nhtsaReachable
+        ? 'nhtsa.gov/recalls + vin-live-status'
+        : 'nhtsa-smart-analyzer';
+    final geminiNotesByVin = <String, String>{};
+    String geminiSummary = '';
+
+    if (cleanKey.isNotEmpty && inspected.isNotEmpty) {
+      final endpoint = Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/models/${Uri.encodeComponent(cleanModel)}:generateContent?key=${Uri.encodeComponent(cleanKey)}',
+      );
+      final promptInput = {
+        'referenceWebsite': nhtsaRecallsWebUrl,
+        'dealershipInventorySource': 'https://www.prestonmotor.com',
+        'targetVehicle': '2026 Lincoln Nautilus Hybrid',
+        'total2026NautilusInStock': y2026Candidates.length,
+        'total2026NautilusHybridsInStock': inspected.length,
+        'inspectedHybridVins': inspected
+            .map(
+              (h) => {
+                'vin': h.vin,
+                'stockNumber': h.srpVehicle['stockNumber'],
+                'title': h.srpVehicle['title'],
+                'trim': h.srpVehicle['trim'] ?? h.decoded.trim,
+                'price': h.srpVehicle['price'],
+                'location': h.srpVehicle['location'],
+                'nhtsaVinUrl': h.nhtsaUrl,
+                'vpicFuelType': h.decoded.fuelType,
+                'vinCompletionVerified': h.vinCompletionVerified,
+                'incompleteRecallCount': h.incompleteCount,
+                'completeRecallCount': h.completeCount,
+                'activeIncompleteCampaigns': h.openCampaignLabels,
+              },
+            )
+            .toList(),
+      };
+
+      const systemPrompt =
+          'You are the Preston Automotive Group Gemini NHTSA Recall Inspector. '
+          'Cross-reference every in-stock 2026 Lincoln Nautilus Hybrid VIN from prestonmotor.com against https://www.nhtsa.gov/recalls and live per-VIN recall completion data. '
+          'Identify ONLY the 2026 Lincoln Nautilus Hybrid VINs that do NOT have an active/incomplete recall (incompleteRecallCount == 0 and vinCompletionVerified == true). '
+          'Explicitly summarize in geminiSummary how many 2026 Lincoln Nautilus Hybrids are in stock, how many have 0 active/incomplete recalls via www.nhtsa.gov/recalls, and how many are excluded due to active recalls.';
+
+      Map<String, dynamic>? parsedGemini;
+      bool usedGrounded = false;
+
+      try {
+        final r1 = await http
+            .post(
+              endpoint,
+              headers: const {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'systemInstruction': {
+                  'parts': [
+                    {'text': systemPrompt}
+                  ],
+                },
+                'tools': [
+                  {'urlContext': <String, dynamic>{}}
+                ],
+                'contents': [
+                  {
+                    'role': 'user',
+                    'parts': [
+                      {
+                        'text':
+                            'Cross-reference $nhtsaRecallsWebUrl for all in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com and return ONLY valid JSON with keys: geminiSummary (string), vinAssessments (array of {vin, hasActiveRecall, verificationNote}).\n\nData:\n${jsonEncode(promptInput)}',
+                      }
+                    ],
+                  }
+                ],
+                'generationConfig': {'temperature': 0.1},
+              }),
+            )
+            .timeout(const Duration(seconds: 25));
+
+        if (r1.statusCode == 200) {
+          final d1 = jsonDecode(r1.body) as Map<String, dynamic>;
+          final parts = ((d1['candidates'] as List?)?.firstOrNull
+                  as Map?)?['content']?['parts'] as List? ??
+              const [];
+          final rawText = parts
+              .map((p) => (p as Map?)?['text']?.toString() ?? '')
+              .join('\n')
+              .trim();
+          final match = RegExp(r'\{[\s\S]*\}').firstMatch(rawText);
+          if (match != null) {
+            parsedGemini = jsonDecode(match.group(0)!) as Map<String, dynamic>;
+            usedGrounded = true;
+          }
+        }
+      } catch (_) {}
+
+      if (parsedGemini == null) {
+        try {
+          final r2 = await http
+              .post(
+                endpoint,
+                headers: const {'Content-Type': 'application/json'},
+                body: jsonEncode({
+                  'systemInstruction': {
+                    'parts': [
+                      {'text': systemPrompt}
+                    ],
+                  },
+                  'contents': [
+                    {
+                      'role': 'user',
+                      'parts': [
+                        {'text': jsonEncode(promptInput)}
+                      ],
+                    }
+                  ],
+                  'generationConfig': {
+                    'temperature': 0.1,
+                    'responseMimeType': 'application/json',
+                    'responseSchema': {
+                      'type': 'OBJECT',
+                      'properties': {
+                        'geminiSummary': {'type': 'STRING'},
+                        'vinAssessments': {
+                          'type': 'ARRAY',
+                          'items': {
+                            'type': 'OBJECT',
+                            'properties': {
+                              'vin': {'type': 'STRING'},
+                              'hasActiveRecall': {'type': 'BOOLEAN'},
+                              'verificationNote': {'type': 'STRING'},
+                            },
+                            'required': [
+                              'vin',
+                              'hasActiveRecall',
+                              'verificationNote',
+                            ],
+                          },
+                        },
+                      },
+                      'required': ['geminiSummary', 'vinAssessments'],
+                    },
+                  },
+                }),
+              )
+              .timeout(const Duration(seconds: 25));
+
+          if (r2.statusCode == 200) {
+            final d2 = jsonDecode(r2.body) as Map<String, dynamic>;
+            final raw2 = (((d2['candidates'] as List?)?.firstOrNull
+                            as Map?)?['content']?['parts'] as List?)
+                        ?.firstOrNull?['text']
+                        ?.toString() ??
+                    '{}';
+            parsedGemini = jsonDecode(raw2) as Map<String, dynamic>;
+          }
+        } catch (_) {}
+      }
+
+      if (parsedGemini != null) {
+        agentMode = usedGrounded
+            ? 'gemini-url-context ($cleanModel)'
+            : 'gemini ($cleanModel)';
+        geminiSummary = (parsedGemini['geminiSummary']?.toString() ?? '').trim();
+        for (final va
+            in (parsedGemini['vinAssessments'] as List<dynamic>? ?? const [])) {
+          if (va is Map &&
+              va['vin'] != null &&
+              va['verificationNote'] != null) {
+            geminiNotesByVin[va['vin'].toString().trim().toUpperCase()] =
+                va['verificationNote'].toString().trim();
+          }
+        }
+      }
+    }
+
+    final recallFreeVehicles = <RecallFreeNautilusHybridVehicle>[];
+    final excludedList = <ExcludedNautilusHybridSummary>[];
+
+    for (final h in inspected) {
+      final v = h.srpVehicle;
+      final isClean = h.incompleteCount == 0 && h.vinCompletionVerified;
+      final rawTitle = (v['title']?.toString() ?? '2026 Lincoln Nautilus').trim();
+      final displayTitle = RegExp(r'hybrid', caseSensitive: false).hasMatch(rawTitle)
+          ? rawTitle
+          : '$rawTitle Hybrid';
+      final rawEng = (v['engine']?.toString() ?? '').trim();
+
+      if (isClean) {
+        recallFreeVehicles.add(
+          RecallFreeNautilusHybridVehicle(
+            vin: h.vin,
+            stockNumber: (v['stockNumber']?.toString() ?? '').trim(),
+            title: displayTitle,
+            year: 2026,
+            make: (v['make']?.toString() ?? 'Lincoln').trim(),
+            model: (v['model']?.toString() ?? 'Nautilus').trim(),
+            trim: (v['trim']?.toString() ?? h.decoded.trim).trim(),
+            condition: (v['condition']?.toString() ?? 'New').trim(),
+            price: (v['price'] as num?)?.toDouble(),
+            msrp: (v['msrp'] as num?)?.toDouble(),
+            location:
+                (v['location']?.toString() ?? 'Preston Automotive Group').trim(),
+            mileage: (v['mileage'] as num?)?.toInt() ?? 0,
+            drivetrain:
+                (v['drivetrain']?.toString() ?? h.decoded.driveType).trim(),
+            engine: RegExp(r'fhev|hybrid', caseSensitive: false).hasMatch(rawEng)
+                ? rawEng
+                : '2.0L Turbo Hybrid (FHEV)',
+            fuelType: (v['fuelType']?.toString() ?? '').trim().isNotEmpty
+                ? v['fuelType'].toString().trim()
+                : h.decoded.fuelType,
+            exteriorColor: (v['exteriorColor']?.toString() ?? '').trim(),
+            interiorColor: (v['interiorColor']?.toString() ?? '').trim(),
+            photoUrl: (v['photoUrl']?.toString() ?? '').trim(),
+            listingUrl:
+                (v['listingUrl']?.toString() ?? 'https://www.prestonmotor.com')
+                    .trim(),
+            nhtsaUrl: h.nhtsaUrl,
+            incompleteCount: 0,
+            completeCount: h.completeCount,
+            vinCompletionVerified: true,
+            geminiVerificationNote: geminiNotesByVin[h.vin] ??
+                'Verified 0 active/incomplete recalls on VIN ${h.vin} against www.nhtsa.gov/recalls and live per-VIN recall records — ready for immediate guest delivery.',
+          ),
+        );
+      } else {
+        excludedList.add(
+          ExcludedNautilusHybridSummary(
+            vin: h.vin,
+            stockNumber: (v['stockNumber']?.toString() ?? '').trim(),
+            title: rawTitle,
+            trim: (v['trim']?.toString() ?? h.decoded.trim).trim(),
+            incompleteCount: h.incompleteCount,
+            activeCampaigns: h.openCampaignLabels,
+          ),
+        );
+      }
+    }
+
+    recallFreeVehicles.sort((a, b) {
+      final pa = a.price ?? double.maxFinite;
+      final pb = b.price ?? double.maxFinite;
+      return pa.compareTo(pb);
+    });
+
+    if (geminiSummary.isEmpty) {
+      if (inspected.isEmpty) {
+        geminiSummary =
+            'Scanned prestonmotor.com live Lincoln inventory and cross-referenced $nhtsaRecallsWebUrl: 0 in-stock 2026 Lincoln Nautilus Hybrid vehicles were found at this moment.';
+      } else if (recallFreeVehicles.isEmpty) {
+        geminiSummary =
+            'Checked all ${inspected.length} in-stock 2026 Lincoln Nautilus Hybrid VIN(s) on prestonmotor.com against $nhtsaRecallsWebUrl: 0 units are currently free of active/incomplete recalls (${excludedList.length} unit(s) excluded due to open recall campaign(s)).';
+      } else {
+        final sampleCampaign =
+            excludedList.isNotEmpty && excludedList.first.activeCampaigns.isNotEmpty
+                ? excludedList.first.activeCampaigns.first
+                : 'open NHTSA safety recall';
+        geminiSummary = excludedList.isNotEmpty
+            ? 'Checked all ${inspected.length} in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com against $nhtsaRecallsWebUrl: ${recallFreeVehicles.length} vehicle${recallFreeVehicles.length == 1 ? ' has' : 's have'} 0 active/incomplete recalls and ${recallFreeVehicles.length == 1 ? 'is' : 'are'} ready for delivery (${excludedList.length} other Hybrid unit${excludedList.length == 1 ? ' was' : 's were'} excluded due to active recall $sampleCampaign).'
+            : 'Checked all ${inspected.length} in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com against $nhtsaRecallsWebUrl: all ${recallFreeVehicles.length} vehicles have 0 active/incomplete recalls.';
+      }
+    }
+
+    return NautilusHybridRecallScanResult(
+      checkedAt: DateTime.now().toUtc().toIso8601String(),
+      agentMode: agentMode,
+      nhtsaReferenceUrl: nhtsaRecallsWebUrl,
+      total2026NautilusInStock: y2026Candidates.length,
+      totalHybridsInStock: inspected.length,
+      recallFreeCount: recallFreeVehicles.length,
+      excludedActiveRecallCount: excludedList.length,
+      geminiSummary: geminiSummary,
+      recallFreeVehicles: recallFreeVehicles,
+      excludedActiveRecallVins: excludedList,
     );
   }
 }

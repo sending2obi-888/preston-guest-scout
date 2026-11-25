@@ -22,6 +22,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.CalendarContract
+import android.provider.OpenableColumns
+import android.util.Base64
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.UserRecoverableAuthException
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -32,6 +34,7 @@ import com.google.android.gms.common.api.Scope
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
 import java.util.Calendar
@@ -57,6 +60,8 @@ class MainActivity : FlutterActivity() {
         private const val REQ_RUNTIME_PERMISSIONS = 9004
         private const val REQ_CALENDAR_PERMISSIONS = 9005
         private const val REQ_NOTIFICATION_PERMISSIONS = 9006
+        private const val REQ_PICK_DOCUMENT = 9007
+        private const val MAX_DOCUMENT_BYTES = 18 * 1024 * 1024
         private const val DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
         private const val DEFAULT_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
@@ -84,6 +89,7 @@ class MainActivity : FlutterActivity() {
     private var pendingSignInResult: MethodChannel.Result? = null
     private var pendingCalendarPermResult: MethodChannel.Result? = null
     private var pendingNotifPermResult: MethodChannel.Result? = null
+    private var pendingDocPickerResult: MethodChannel.Result? = null
     private var pendingDriveScope: String = DEFAULT_DRIVE_SCOPE
     private var pendingConsentEmail: String? = null
     private var pendingConsentDisplayName: String? = null
@@ -697,6 +703,129 @@ class MainActivity : FlutterActivity() {
             } else {
                 res.error("CONSENT_DENIED", "Google Drive storage permission was not granted.", null)
             }
+            return
+        }
+
+        if (requestCode == REQ_PICK_DOCUMENT) {
+            val cb = pendingDocPickerResult ?: return
+            pendingDocPickerResult = null
+            val uri = data?.data
+            if (resultCode != Activity.RESULT_OK || uri == null) {
+                cb.success(hashMapOf<String, Any?>("picked" to false))
+                return
+            }
+
+            Thread {
+                try {
+                    var fileName = "uploaded-document"
+                    var declaredSize = -1L
+                    contentResolver.query(
+                        uri,
+                        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
+                                val n = cursor.getString(nameIdx)?.trim()
+                                if (!n.isNullOrEmpty()) fileName = n
+                            }
+                            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                                declaredSize = cursor.getLong(sizeIdx)
+                            }
+                        }
+                    }
+
+                    if (declaredSize > MAX_DOCUMENT_BYTES) {
+                        runOnUiThread {
+                            cb.error(
+                                "FILE_TOO_LARGE",
+                                "Document exceeds 18 MB limit. Please upload a smaller PDF, image, or text document.",
+                                null
+                            )
+                        }
+                        return@Thread
+                    }
+
+                    val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                    val out = ByteArrayOutputStream()
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        val buffer = ByteArray(16 * 1024)
+                        var total = 0
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            total += read
+                            if (total > MAX_DOCUMENT_BYTES) {
+                                runOnUiThread {
+                                    cb.error(
+                                        "FILE_TOO_LARGE",
+                                        "Document exceeds 18 MB limit. Please upload a smaller PDF, image, or text document.",
+                                        null
+                                    )
+                                }
+                                return@Thread
+                            }
+                            out.write(buffer, 0, read)
+                        }
+                    }
+
+                    val bytes = out.toByteArray()
+                    val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    val payload = hashMapOf<String, Any?>(
+                        "picked" to true,
+                        "fileName" to fileName,
+                        "mimeType" to mimeType,
+                        "sizeBytes" to bytes.size,
+                        "base64Data" to b64
+                    )
+                    runOnUiThread {
+                        cb.success(payload)
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        cb.error(
+                            "DOCUMENT_READ_ERROR",
+                            e.localizedMessage ?: "Unable to read the selected document.",
+                            null
+                        )
+                    }
+                }
+            }.start()
+            return
+        }
+    }
+
+    private fun launchNativeDocumentPicker(callbackResult: MethodChannel.Result) {
+        pendingDocPickerResult?.success(hashMapOf<String, Any?>("picked" to false))
+        pendingDocPickerResult = callbackResult
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf(
+                        "application/pdf",
+                        "image/*",
+                        "text/*",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "application/msword",
+                        "application/json"
+                    )
+                )
+            }
+            startActivityForResult(intent, REQ_PICK_DOCUMENT)
+        } catch (e: Exception) {
+            pendingDocPickerResult = null
+            callbackResult.error(
+                "DOCUMENT_PICKER_ERROR",
+                e.localizedMessage ?: "Unable to open system document picker.",
+                null
+            )
         }
     }
 
@@ -742,6 +871,9 @@ class MainActivity : FlutterActivity() {
                     )
                     PrestonGuestWidgetProvider.updateAllWidgets(this)
                     result.success(true)
+                }
+                "pickDocumentFile" -> {
+                    launchNativeDocumentPicker(result)
                 }
                 else -> result.notImplemented()
             }

@@ -187,6 +187,73 @@
           return false;
         }
       };
+
+      // Cross-browser document file picker for HomeIntakeScreen Equivalent-Vehicle upload
+      window.prestonPickDocumentFile = function () {
+        return new Promise(function (resolve) {
+          try {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.pdf,.png,.jpg,.jpeg,.webp,.gif,.heic,.txt,.csv,.tsv,.md,.json,.html,.htm,.xml,.docx,.doc,application/pdf,image/*,text/*';
+            input.style.display = 'none';
+            document.body.appendChild(input);
+
+            let settled = false;
+            const finish = function (payload) {
+              if (settled) return;
+              settled = true;
+              try { document.body.removeChild(input); } catch (_) {}
+              resolve(JSON.stringify(payload));
+            };
+
+            input.addEventListener('cancel', function () {
+              finish({ picked: false });
+            });
+
+            input.addEventListener('change', function () {
+              const file = input.files && input.files[0];
+              if (!file) {
+                finish({ picked: false });
+                return;
+              }
+              if (file.size > 18 * 1024 * 1024) {
+                finish({
+                  picked: false,
+                  error: 'Document exceeds 18 MB limit. Please upload a smaller PDF, image, or text document.'
+                });
+                return;
+              }
+              const reader = new FileReader();
+              reader.onload = function () {
+                const rawResult = String(reader.result || '');
+                const commaIdx = rawResult.indexOf(',');
+                const b64 = commaIdx >= 0 ? rawResult.slice(commaIdx + 1) : rawResult;
+                finish({
+                  picked: true,
+                  fileName: file.name || 'uploaded-document',
+                  mimeType: file.type || 'application/octet-stream',
+                  sizeBytes: file.size || 0,
+                  base64Data: b64
+                });
+              };
+              reader.onerror = function () {
+                finish({
+                  picked: false,
+                  error: 'Unable to read the selected file in browser.'
+                });
+              };
+              reader.readAsDataURL(file);
+            });
+
+            input.click();
+          } catch (e) {
+            resolve(JSON.stringify({
+              picked: false,
+              error: (e && e.message) || 'Unable to open browser file picker.'
+            }));
+          }
+        });
+      };
     })();
   </script>
 </head>

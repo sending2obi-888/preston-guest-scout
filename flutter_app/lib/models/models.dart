@@ -1638,3 +1638,530 @@ class RecentVinRecallEntry {
       };
 }
 
+class ExcludedNautilusHybridSummary {
+  final String vin;
+  final String stockNumber;
+  final String title;
+  final String trim;
+  final int incompleteCount;
+  final List<String> activeCampaigns;
+
+  const ExcludedNautilusHybridSummary({
+    required this.vin,
+    this.stockNumber = '',
+    this.title = '2026 Lincoln Nautilus Hybrid',
+    this.trim = '',
+    this.incompleteCount = 1,
+    this.activeCampaigns = const [],
+  });
+
+  factory ExcludedNautilusHybridSummary.fromJson(Map<String, dynamic> json) {
+    return ExcludedNautilusHybridSummary(
+      vin: json['vin']?.toString() ?? '',
+      stockNumber: json['stockNumber']?.toString() ?? '',
+      title: json['title']?.toString() ?? '2026 Lincoln Nautilus Hybrid',
+      trim: json['trim']?.toString() ?? '',
+      incompleteCount: (json['incompleteCount'] as num?)?.toInt() ?? 1,
+      activeCampaigns: (json['activeCampaigns'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .where((s) => s.isNotEmpty)
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'stockNumber': stockNumber,
+        'title': title,
+        'trim': trim,
+        'incompleteCount': incompleteCount,
+        'activeCampaigns': activeCampaigns,
+      };
+}
+
+class RecallFreeNautilusHybridVehicle {
+  final String vin;
+  final String stockNumber;
+  final String title;
+  final int year;
+  final String make;
+  final String model;
+  final String trim;
+  final String condition;
+  final double? price;
+  final double? msrp;
+  final String location;
+  final int mileage;
+  final String drivetrain;
+  final String engine;
+  final String fuelType;
+  final String exteriorColor;
+  final String interiorColor;
+  final String photoUrl;
+  final String listingUrl;
+  final String nhtsaUrl;
+  final int incompleteCount;
+  final int completeCount;
+  final bool vinCompletionVerified;
+  final String geminiVerificationNote;
+
+  const RecallFreeNautilusHybridVehicle({
+    required this.vin,
+    this.stockNumber = '',
+    required this.title,
+    this.year = 2026,
+    this.make = 'Lincoln',
+    this.model = 'Nautilus',
+    this.trim = '',
+    this.condition = 'New',
+    this.price,
+    this.msrp,
+    this.location = 'Preston Automotive Group',
+    this.mileage = 0,
+    this.drivetrain = 'AWD',
+    this.engine = '2.0L Turbo Hybrid (FHEV)',
+    this.fuelType = 'Gas/Electric Hybrid',
+    this.exteriorColor = '',
+    this.interiorColor = '',
+    this.photoUrl = '',
+    this.listingUrl = 'https://www.prestonmotor.com',
+    this.nhtsaUrl = 'https://www.nhtsa.gov/recalls',
+    this.incompleteCount = 0,
+    this.completeCount = 0,
+    this.vinCompletionVerified = true,
+    this.geminiVerificationNote = '',
+  });
+
+  factory RecallFreeNautilusHybridVehicle.fromJson(Map<String, dynamic> json) {
+    final vinStr = json['vin']?.toString() ?? '';
+    return RecallFreeNautilusHybridVehicle(
+      vin: vinStr,
+      stockNumber: json['stockNumber']?.toString() ?? '',
+      title: json['title']?.toString() ?? '2026 Lincoln Nautilus Hybrid',
+      year: (json['year'] as num?)?.toInt() ?? 2026,
+      make: json['make']?.toString() ?? 'Lincoln',
+      model: json['model']?.toString() ?? 'Nautilus',
+      trim: json['trim']?.toString() ?? '',
+      condition: json['condition']?.toString() ?? 'New',
+      price: (json['price'] as num?)?.toDouble(),
+      msrp: (json['msrp'] as num?)?.toDouble(),
+      location: json['location']?.toString() ?? 'Preston Automotive Group',
+      mileage: (json['mileage'] as num?)?.toInt() ?? 0,
+      drivetrain: json['drivetrain']?.toString() ?? 'AWD',
+      engine: json['engine']?.toString() ?? '2.0L Turbo Hybrid (FHEV)',
+      fuelType: json['fuelType']?.toString() ?? 'Gas/Electric Hybrid',
+      exteriorColor: json['exteriorColor']?.toString() ?? '',
+      interiorColor: json['interiorColor']?.toString() ?? '',
+      photoUrl: json['photoUrl']?.toString() ?? '',
+      listingUrl:
+          json['listingUrl']?.toString() ?? 'https://www.prestonmotor.com',
+      nhtsaUrl: json['nhtsaUrl']?.toString() ??
+          'https://www.nhtsa.gov/recalls?vin=${Uri.encodeComponent(vinStr)}',
+      incompleteCount: (json['incompleteCount'] as num?)?.toInt() ?? 0,
+      completeCount: (json['completeCount'] as num?)?.toInt() ?? 0,
+      vinCompletionVerified: json['vinCompletionVerified'] != false,
+      geminiVerificationNote:
+          json['geminiVerificationNote']?.toString() ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'stockNumber': stockNumber,
+        'title': title,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'condition': condition,
+        'price': price,
+        'msrp': msrp,
+        'location': location,
+        'mileage': mileage,
+        'drivetrain': drivetrain,
+        'engine': engine,
+        'fuelType': fuelType,
+        'exteriorColor': exteriorColor,
+        'interiorColor': interiorColor,
+        'photoUrl': photoUrl,
+        'listingUrl': listingUrl,
+        'nhtsaUrl': nhtsaUrl,
+        'incompleteCount': incompleteCount,
+        'completeCount': completeCount,
+        'vinCompletionVerified': vinCompletionVerified,
+        'geminiVerificationNote': geminiVerificationNote,
+      };
+}
+
+class NautilusHybridRecallScanResult {
+  final String checkedAt;
+  final String agentMode;
+  final String nhtsaReferenceUrl;
+  final int total2026NautilusInStock;
+  final int totalHybridsInStock;
+  final int recallFreeCount;
+  final int excludedActiveRecallCount;
+  final String geminiSummary;
+  final List<RecallFreeNautilusHybridVehicle> recallFreeVehicles;
+  final List<ExcludedNautilusHybridSummary> excludedActiveRecallVins;
+
+  const NautilusHybridRecallScanResult({
+    required this.checkedAt,
+    this.agentMode = 'gemini',
+    this.nhtsaReferenceUrl = 'https://www.nhtsa.gov/recalls',
+    this.total2026NautilusInStock = 0,
+    this.totalHybridsInStock = 0,
+    this.recallFreeCount = 0,
+    this.excludedActiveRecallCount = 0,
+    this.geminiSummary = '',
+    this.recallFreeVehicles = const [],
+    this.excludedActiveRecallVins = const [],
+  });
+
+  factory NautilusHybridRecallScanResult.fromJson(Map<String, dynamic> json) {
+    final cleanList = (json['recallFreeVehicles'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map(
+          (e) => RecallFreeNautilusHybridVehicle.fromJson(
+            Map<String, dynamic>.from(e),
+          ),
+        )
+        .toList();
+    final excludedList =
+        (json['excludedActiveRecallVins'] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .map(
+              (e) => ExcludedNautilusHybridSummary.fromJson(
+                Map<String, dynamic>.from(e),
+              ),
+            )
+            .toList();
+    return NautilusHybridRecallScanResult(
+      checkedAt: json['checkedAt']?.toString() ?? '',
+      agentMode: json['agentMode']?.toString() ?? 'gemini',
+      nhtsaReferenceUrl:
+          json['nhtsaReferenceUrl']?.toString() ?? 'https://www.nhtsa.gov/recalls',
+      total2026NautilusInStock:
+          (json['total2026NautilusInStock'] as num?)?.toInt() ?? 0,
+      totalHybridsInStock:
+          (json['totalHybridsInStock'] as num?)?.toInt() ??
+              (cleanList.length + excludedList.length),
+      recallFreeCount:
+          (json['recallFreeCount'] as num?)?.toInt() ?? cleanList.length,
+      excludedActiveRecallCount:
+          (json['excludedActiveRecallCount'] as num?)?.toInt() ??
+              excludedList.length,
+      geminiSummary: json['geminiSummary']?.toString() ?? '',
+      recallFreeVehicles: cleanList,
+      excludedActiveRecallVins: excludedList,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'checkedAt': checkedAt,
+        'agentMode': agentMode,
+        'nhtsaReferenceUrl': nhtsaReferenceUrl,
+        'total2026NautilusInStock': total2026NautilusInStock,
+        'totalHybridsInStock': totalHybridsInStock,
+        'recallFreeCount': recallFreeCount,
+        'excludedActiveRecallCount': excludedActiveRecallCount,
+        'geminiSummary': geminiSummary,
+        'recallFreeVehicles':
+            recallFreeVehicles.map((v) => v.toJson()).toList(),
+        'excludedActiveRecallVins':
+            excludedActiveRecallVins.map((e) => e.toJson()).toList(),
+      };
+}
+
+class DocumentExtractedVehicleProfile {
+  final String condition;
+  final int? year;
+  final int? minYear;
+  final int? maxYear;
+  final String make;
+  final String model;
+  final String trim;
+  final String bodyCategory;
+  final String doors;
+  final String cabStyle;
+  final String bedLength;
+  final String drivetrain;
+  final String powertrain;
+  final String engineSpec;
+  final double? targetPrice;
+  final int? maxMileage;
+  final String exteriorColor;
+  final String interiorColor;
+  final List<String> keyFeatures;
+  final List<Map<String, String>> equivalentPrestonModels;
+
+  const DocumentExtractedVehicleProfile({
+    this.condition = 'Any',
+    this.year,
+    this.minYear,
+    this.maxYear,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.bodyCategory = 'SUV / Crossover',
+    this.doors = '',
+    this.cabStyle = '',
+    this.bedLength = '',
+    this.drivetrain = 'Any',
+    this.powertrain = 'Any',
+    this.engineSpec = '',
+    this.targetPrice,
+    this.maxMileage,
+    this.exteriorColor = '',
+    this.interiorColor = '',
+    this.keyFeatures = const [],
+    this.equivalentPrestonModels = const [],
+  });
+
+  factory DocumentExtractedVehicleProfile.fromJson(Map<String, dynamic> json) {
+    final equivRaw = json['equivalentPrestonModels'] as List<dynamic>? ?? const [];
+    final equivParsed = <Map<String, String>>[];
+    for (final item in equivRaw) {
+      if (item is Map) {
+        final mk = (item['make']?.toString() ?? '').trim();
+        final md = (item['model']?.toString() ?? '').trim();
+        if (mk.isNotEmpty || md.isNotEmpty) {
+          equivParsed.add({'make': mk, 'model': md});
+        }
+      }
+    }
+    return DocumentExtractedVehicleProfile(
+      condition: json['condition']?.toString() ?? 'Any',
+      year: (json['year'] as num?)?.toInt(),
+      minYear: (json['minYear'] as num?)?.toInt(),
+      maxYear: (json['maxYear'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      bodyCategory: json['bodyCategory']?.toString() ?? 'SUV / Crossover',
+      doors: json['doors']?.toString() ?? '',
+      cabStyle: json['cabStyle']?.toString() ?? '',
+      bedLength: json['bedLength']?.toString() ?? '',
+      drivetrain: json['drivetrain']?.toString() ?? 'Any',
+      powertrain: json['powertrain']?.toString() ?? 'Any',
+      engineSpec: json['engineSpec']?.toString() ?? '',
+      targetPrice: (json['targetPrice'] as num?)?.toDouble(),
+      maxMileage: (json['maxMileage'] as num?)?.toInt(),
+      exteriorColor: json['exteriorColor']?.toString() ?? '',
+      interiorColor: json['interiorColor']?.toString() ?? '',
+      keyFeatures: (json['keyFeatures'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .where((s) => s.isNotEmpty)
+          .toList(),
+      equivalentPrestonModels: equivParsed,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'condition': condition,
+        'year': year,
+        'minYear': minYear,
+        'maxYear': maxYear,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'bodyCategory': bodyCategory,
+        'doors': doors,
+        'cabStyle': cabStyle,
+        'bedLength': bedLength,
+        'drivetrain': drivetrain,
+        'powertrain': powertrain,
+        'engineSpec': engineSpec,
+        'targetPrice': targetPrice,
+        'maxMileage': maxMileage,
+        'exteriorColor': exteriorColor,
+        'interiorColor': interiorColor,
+        'keyFeatures': keyFeatures,
+        'equivalentPrestonModels': equivalentPrestonModels,
+      };
+}
+
+class EquivalentVehicleMatch {
+  final String vin;
+  final String stockNumber;
+  final String title;
+  final int? year;
+  final String make;
+  final String model;
+  final String trim;
+  final String condition;
+  final double? price;
+  final double? msrp;
+  final String location;
+  final int mileage;
+  final String drivetrain;
+  final String engine;
+  final String fuelType;
+  final String exteriorColor;
+  final String interiorColor;
+  final String photoUrl;
+  final String listingUrl;
+  final int similarityScore;
+  final String matchTier;
+  final String whyEquivalent;
+  final List<String> matchingHighlights;
+  final List<String> keyDifferences;
+
+  const EquivalentVehicleMatch({
+    required this.vin,
+    this.stockNumber = '',
+    required this.title,
+    this.year,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.condition = '',
+    this.price,
+    this.msrp,
+    this.location = 'Preston Automotive Group',
+    this.mileage = 0,
+    this.drivetrain = '',
+    this.engine = '',
+    this.fuelType = '',
+    this.exteriorColor = '',
+    this.interiorColor = '',
+    this.photoUrl = '',
+    this.listingUrl = 'https://www.prestonmotor.com',
+    this.similarityScore = 88,
+    this.matchTier = 'Closest Equivalent',
+    this.whyEquivalent = '',
+    this.matchingHighlights = const [],
+    this.keyDifferences = const [],
+  });
+
+  factory EquivalentVehicleMatch.fromJson(Map<String, dynamic> json) {
+    return EquivalentVehicleMatch(
+      vin: json['vin']?.toString() ?? '',
+      stockNumber: json['stockNumber']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      year: (json['year'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      condition: json['condition']?.toString() ?? '',
+      price: (json['price'] as num?)?.toDouble(),
+      msrp: (json['msrp'] as num?)?.toDouble(),
+      location: json['location']?.toString() ?? 'Preston Automotive Group',
+      mileage: (json['mileage'] as num?)?.toInt() ?? 0,
+      drivetrain: json['drivetrain']?.toString() ?? '',
+      engine: json['engine']?.toString() ?? '',
+      fuelType: json['fuelType']?.toString() ?? '',
+      exteriorColor: json['exteriorColor']?.toString() ?? '',
+      interiorColor: json['interiorColor']?.toString() ?? '',
+      photoUrl: json['photoUrl']?.toString() ?? '',
+      listingUrl:
+          json['listingUrl']?.toString() ?? 'https://www.prestonmotor.com',
+      similarityScore: (json['similarityScore'] as num?)?.toInt() ?? 88,
+      matchTier: json['matchTier']?.toString() ?? 'Closest Equivalent',
+      whyEquivalent: json['whyEquivalent']?.toString() ?? '',
+      matchingHighlights:
+          (json['matchingHighlights'] as List<dynamic>? ?? const [])
+              .map((e) => e.toString())
+              .where((s) => s.isNotEmpty)
+              .toList(),
+      keyDifferences: (json['keyDifferences'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .where((s) => s.isNotEmpty)
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'stockNumber': stockNumber,
+        'title': title,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'condition': condition,
+        'price': price,
+        'msrp': msrp,
+        'location': location,
+        'mileage': mileage,
+        'drivetrain': drivetrain,
+        'engine': engine,
+        'fuelType': fuelType,
+        'exteriorColor': exteriorColor,
+        'interiorColor': interiorColor,
+        'photoUrl': photoUrl,
+        'listingUrl': listingUrl,
+        'similarityScore': similarityScore,
+        'matchTier': matchTier,
+        'whyEquivalent': whyEquivalent,
+        'matchingHighlights': matchingHighlights,
+        'keyDifferences': keyDifferences,
+      };
+}
+
+class DocumentEquivalentSearchResult {
+  final String fileName;
+  final String mimeType;
+  final String analyzedAt;
+  final String agentMode;
+  final int totalInventoryScanned;
+  final String documentSummary;
+  final String overallSummary;
+  final String extractedGuestName;
+  final DocumentExtractedVehicleProfile referenceVehicle;
+  final List<EquivalentVehicleMatch> equivalents;
+
+  const DocumentEquivalentSearchResult({
+    required this.fileName,
+    this.mimeType = 'application/octet-stream',
+    required this.analyzedAt,
+    this.agentMode = 'gemini',
+    this.totalInventoryScanned = 0,
+    this.documentSummary = '',
+    this.overallSummary = '',
+    this.extractedGuestName = '',
+    this.referenceVehicle = const DocumentExtractedVehicleProfile(),
+    this.equivalents = const [],
+  });
+
+  factory DocumentEquivalentSearchResult.fromJson(Map<String, dynamic> json) {
+    return DocumentEquivalentSearchResult(
+      fileName: json['fileName']?.toString() ?? 'uploaded-document',
+      mimeType: json['mimeType']?.toString() ?? 'application/octet-stream',
+      analyzedAt: json['analyzedAt']?.toString() ?? '',
+      agentMode: json['agentMode']?.toString() ?? 'gemini',
+      totalInventoryScanned:
+          (json['totalInventoryScanned'] as num?)?.toInt() ?? 0,
+      documentSummary: json['documentSummary']?.toString() ?? '',
+      overallSummary: json['overallSummary']?.toString() ?? '',
+      extractedGuestName: json['extractedGuestName']?.toString() ?? '',
+      referenceVehicle: DocumentExtractedVehicleProfile.fromJson(
+        Map<String, dynamic>.from(
+          json['referenceVehicle'] as Map? ?? const {},
+        ),
+      ),
+      equivalents: (json['equivalents'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map(
+            (e) => EquivalentVehicleMatch.fromJson(
+              Map<String, dynamic>.from(e),
+            ),
+          )
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'fileName': fileName,
+        'mimeType': mimeType,
+        'analyzedAt': analyzedAt,
+        'agentMode': agentMode,
+        'totalInventoryScanned': totalInventoryScanned,
+        'documentSummary': documentSummary,
+        'overallSummary': overallSummary,
+        'extractedGuestName': extractedGuestName,
+        'referenceVehicle': referenceVehicle.toJson(),
+        'equivalents': equivalents.map((e) => e.toJson()).toList(),
+      };
+}
+

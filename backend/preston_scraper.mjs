@@ -302,7 +302,7 @@ async function fetchSingleCosmosPage(
       const pageSize = Number(paging.PageSize) || 96;
       const computedPages =
         pageSize > 0 ? Math.ceil(totalCount / pageSize) : Number(paging.TotalPages) || 1;
-      const totalPages = Math.min(25, Math.max(1, Number(paging.TotalPages) || computedPages));
+      const totalPages = Math.min(45, Math.max(1, Number(paging.TotalPages) || computedPages));
 
       return { vehicles, totalPages, totalCount };
     } catch (err) {
@@ -323,7 +323,7 @@ async function fetchAllCosmosPages(
   dealerId,
   pageId,
   paramsObj,
-  { maxPrice = null, facetBedLength = '' } = {}
+  { maxPrice = null, facetBedLength = '', concurrency = 3 } = {}
 ) {
   const firstPage = await fetchSingleCosmosPage(dealerId, pageId, paramsObj, 1, 1, {
     facetBedLength,
@@ -334,7 +334,6 @@ async function fetchAllCosmosPages(
     return allVehicles;
   }
 
-  const concurrency = 3;
   for (let startPt = 2; startPt <= firstPage.totalPages; startPt += concurrency) {
     const pageNums = [];
     for (let pt = startPt; pt < startPt + concurrency && pt <= firstPage.totalPages; pt++) {
@@ -538,4 +537,48 @@ export async function searchPrestonInventory(rawGuest) {
   }
 
   return Array.from(byVin.values());
+}
+
+let cachedFullCatalog = {
+  vehicles: [],
+  fetchedAt: 0,
+};
+
+/**
+ * Fetches the ENTIRE live prestonmotor.com inventory across all New and Pre-Owned/CPO pages
+ * (with a 5-minute TTL cache) so Gemini document-equivalence matching evaluates every vehicle
+ * across all Preston Automotive Group dealerships.
+ */
+export async function fetchEntirePrestonInventory({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    cachedFullCatalog.vehicles.length > 0 &&
+    now - cachedFullCatalog.fetchedAt < 5 * 60 * 1000
+  ) {
+    return cachedFullCatalog.vehicles;
+  }
+
+  const cfg = await refreshDealerOnConfig();
+  const [newList, usedList] = await Promise.all([
+    fetchAllCosmosPages(cfg.dealerId, cfg.newPageId, {}, { concurrency: 6 }).catch(() => []),
+    fetchAllCosmosPages(cfg.dealerId, cfg.usedPageId, {}, { concurrency: 6 }).catch(() => []),
+  ]);
+
+  const byVin = new Map();
+  for (const v of [...newList, ...usedList]) {
+    if (!v?.vin) continue;
+    if (!byVin.has(v.vin)) {
+      byVin.set(v.vin, v);
+    }
+  }
+
+  const merged = Array.from(byVin.values());
+  if (merged.length > 0) {
+    cachedFullCatalog = {
+      vehicles: merged,
+      fetchedAt: now,
+    };
+  }
+  return merged;
 }

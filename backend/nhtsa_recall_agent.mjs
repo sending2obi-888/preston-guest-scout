@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { db, getSetting } from './db.mjs';
+import { searchPrestonInventory } from './preston_scraper.mjs';
 
 const VPIC_BASE = 'https://vpic.nhtsa.dot.gov/api/vehicles';
 const NHTSA_API_BASE = 'https://api.nhtsa.gov';
@@ -244,26 +245,30 @@ export function parseVinOpenRecallHtml(html) {
   };
 }
 
-async function fetchVinSpecificOpenRecalls(vin) {
-  try {
-    const sv = encodeURIComponent(encodeVinUtf16LeBase64(vin));
-    const url = `${PRESTON_AUTOCHECK_URL}?sv=${sv}&ac=${PRESTON_AUTOCHECK_ACCOUNT}`;
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-        Accept: 'text/html,application/xhtml+xml',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) {
-      return { verified: false, openRecallCount: null, openRecalls: [] };
+async function fetchVinSpecificOpenRecalls(vin, retries = 1) {
+  const sv = encodeURIComponent(encodeVinUtf16LeBase64(vin));
+  const url = `${PRESTON_AUTOCHECK_URL}?sv=${sv}&ac=${PRESTON_AUTOCHECK_ACCOUNT}`;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const parsed = parseVinOpenRecallHtml(html);
+        if (parsed.verified || attempt === retries) return parsed;
+      }
+    } catch {
+      if (attempt === retries) break;
     }
-    const html = await res.text();
-    return parseVinOpenRecallHtml(html);
-  } catch {
-    return { verified: false, openRecallCount: null, openRecalls: [] };
+    await new Promise((r) => setTimeout(r, 250));
   }
+  return { verified: false, openRecallCount: null, openRecalls: [] };
 }
 
 function titleCaseMake(rawMake) {
@@ -423,7 +428,7 @@ export function selectMatchingNhtsaRecallModels(decodedVehicle, nhtsaModels = []
     const isHybrid = !isPlugIn && /hybrid|hev/i.test(fuelLower);
     const isElectric = /electric|bev/i.test(fuelLower) && !/hybrid|hev/i.test(fuelLower);
     if (!isPlugIn && /\bphev\b|plug[\s-]*in/i.test(lowerCand)) continue;
-    if (!isHybrid && /\bhev\b/i.test(lowerCand) && !/\bphev\b/i.test(lowerCand)) continue;
+    if (!isHybrid && /\bf?hev\b|\bhybrid\b/i.test(lowerCand) && !/\bphev\b/i.test(lowerCand)) continue;
     if (!isElectric && /\bbev\b|\belectric\b|\blightning\b|\bev\b/i.test(lowerCand)) continue;
     if ((isPlugIn || isHybrid || isElectric) && /\bgas\b/i.test(lowerCand)) continue;
 
@@ -447,6 +452,14 @@ export function selectMatchingNhtsaRecallModels(decodedVehicle, nhtsaModels = []
   }
 
   candidates.add(baseModel);
+  if (
+    !/plug[\s-]*in|phev/i.test(fuelLower) &&
+    /hybrid|hev/i.test(fuelLower) &&
+    !/\bhybrid\b|\bf?hev\b/i.test(baseModel)
+  ) {
+    candidates.add(`${baseModel.toUpperCase()} HYBRID`);
+    candidates.add(`${baseModel.toUpperCase()} FHEV`);
+  }
   return Array.from(candidates);
 }
 
@@ -1371,6 +1384,8 @@ export async function updateVinRecallCampaignStatus({
     ).run(vin, campaignNumber, normalizedStatus, nowIso);
   }
 
+  invalidateNautilusHybridScanCache();
+
   const existingRow = db
     .prepare('SELECT result_json FROM vin_recall_checks WHERE vin = ?')
     .get(vin);
@@ -1455,4 +1470,427 @@ export async function updateVinRecallCampaignStatus({
   } catch {}
 
   return updatedPayload;
+}
+
+let cachedNautilusHybridScan = {
+  payload: null,
+  fetchedAt: 0,
+};
+
+export function invalidateNautilusHybridScanCache() {
+  cachedNautilusHybridScan = {
+    payload: null,
+    fetchedAt: 0,
+  };
+}
+
+/**
+ * Determines whether a vehicle from prestonmotor.com + NHTSA vPIC decode is genuinely
+ * a 2026 Lincoln Nautilus Hybrid (FHEV / Strong HEV), excluding gas-only 2.0L units.
+ */
+export function is2026LincolnNautilusHybrid(srpVehicle = {}, decodedVehicle = {}) {
+  const year = Number(decodedVehicle.year || srpVehicle.year) || null;
+  if (year !== 2026) return false;
+
+  const makeModelText = `${decodedVehicle.make || ''} ${decodedVehicle.model || ''} ${
+    srpVehicle.make || ''
+  } ${srpVehicle.model || ''} ${srpVehicle.title || ''}`.toLowerCase();
+  if (!makeModelText.includes('lincoln') || !makeModelText.includes('nautilus')) {
+    return false;
+  }
+
+  const vpicFuel = String(decodedVehicle.fuelType || '').toLowerCase();
+  if (vpicFuel) {
+    // NHTSA vPIC decodes 2026 Nautilus Hybrid as "Gasoline • Strong HEV (Hybrid Electric Vehicle)"
+    // and non-hybrid 2.0L gas units as plain "Gasoline".
+    if (/hybrid|\bhev\b|\bfhev\b|electric/i.test(vpicFuel)) {
+      return true;
+    }
+    if (vpicFuel === 'gasoline') {
+      return false;
+    }
+  }
+
+  const srpPowertrain = `${srpVehicle.fuelType || ''} ${srpVehicle.engine || ''} ${
+    srpVehicle.title || ''
+  } ${srpVehicle.trim || ''} ${srpVehicle.commentsSummary || ''}`.toLowerCase();
+  if (/hybrid|\bfhev\b|\bhev\b|gas\/electric/i.test(srpPowertrain)) {
+    return true;
+  }
+
+  const cleanVin = String(srpVehicle.vin || decodedVehicle.vin || '')
+    .trim()
+    .toUpperCase();
+  if (cleanVin.startsWith('5LMPJ') && cleanVin.length === 17 && cleanVin[7] === '4') {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Fetches all in-stock 2026 Lincoln Nautilus Hybrid vehicles from prestonmotor.com,
+ * decodes & checks each VIN against https://www.nhtsa.gov/recalls + live per-VIN open recall
+ * records + Gemini, and returns ONLY those vehicles with 0 active/incomplete recalls.
+ */
+export async function scan2026NautilusHybridsRecallFree({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    cachedNautilusHybridScan.payload &&
+    now - cachedNautilusHybridScan.fetchedAt < 3 * 60 * 1000
+  ) {
+    return cachedNautilusHybridScan.payload;
+  }
+
+  const allNautilus = await searchPrestonInventory({
+    make: 'Lincoln',
+    model: 'Nautilus',
+    condition: 'Any',
+  });
+
+  const y2026Candidates = allNautilus.filter((v) => {
+    const yr = Number(v.year) || null;
+    if (yr === 2026) return true;
+    return /\b2026\b/.test(String(v.title || ''));
+  });
+
+  // Fetch NHTSA 2026 Lincoln Nautilus Hybrid model-level recall campaigns once for cross-referencing
+  const dummyHybridDecoded = {
+    vin: '5LMPJ8K40TJ000000',
+    year: 2026,
+    make: 'Lincoln',
+    model: 'Nautilus',
+    fuelType: 'Gasoline • Strong HEV (Hybrid Electric Vehicle)',
+    displacementL: '2.0',
+    doors: '4',
+  };
+  const sharedNhtsaModelLookup = await fetchNhtsaRecallsForDecodedVehicle(dummyHybridDecoded);
+
+  // Inspect each 2026 Nautilus VIN in gentle concurrent batches of 4
+  const inspectedHybrids = [];
+  const batchSize = 4;
+  for (let i = 0; i < y2026Candidates.length; i += batchSize) {
+    const slice = y2026Candidates.slice(i, i + batchSize);
+    const sliceResults = await Promise.all(
+      slice.map(async (srpVehicle) => {
+        const validation = validateAndNormalizeVin(srpVehicle.vin);
+        if (!validation.valid) return null;
+        const vin = validation.vin;
+
+        const [decoded, vinOpenCheck] = await Promise.all([
+          decodeVinViaVpic(vin).catch(() => ({
+            vin,
+            year: srpVehicle.year || 2026,
+            make: srpVehicle.make || 'Lincoln',
+            model: srpVehicle.model || 'Nautilus',
+            trim: srpVehicle.trim || '',
+            fuelType: srpVehicle.fuelType || '',
+            engine: srpVehicle.engine || '',
+            displacementL: '2.0',
+            driveType: srpVehicle.drivetrain || 'AWD',
+          })),
+          fetchVinSpecificOpenRecalls(vin, 1),
+        ]);
+
+        if (!is2026LincolnNautilusHybrid(srpVehicle, decoded)) {
+          return null;
+        }
+
+        const annotated = annotateRecallApplicabilityDeterministically(
+          decoded,
+          sharedNhtsaModelLookup.recalls
+        );
+        const overridesMap = getOverridesMapForVin(vin);
+        const reconciled = reconcileVinRecallCompletion({
+          decoded,
+          recalls: annotated,
+          vinOpenCheck,
+          overridesMap,
+        });
+
+        const openCampaignLabels = reconciled.recalls
+          .filter(
+            (r) =>
+              r.completionStatus === 'incomplete' ||
+              r.completionStatus === 'incomplete_no_remedy' ||
+              r.completionStatus === 'unverified'
+          )
+          .map((r) =>
+            r.oemRecallNumber
+              ? `${r.campaignNumber} (OEM ${r.oemRecallNumber})`
+              : r.campaignNumber
+          );
+
+        return {
+          srpVehicle,
+          decoded,
+          vin,
+          nhtsaUrl: `${NHTSA_RECALLS_WEB_URL}?vin=${encodeURIComponent(vin)}`,
+          vinCompletionVerified: reconciled.vinCompletionVerified,
+          incompleteCount: reconciled.incompleteCount,
+          completeCount: reconciled.completeCount,
+          openCampaignLabels,
+          reconciledRecalls: reconciled.recalls,
+        };
+      })
+    );
+
+    for (const item of sliceResults) {
+      if (item) inspectedHybrids.push(item);
+    }
+  }
+
+  const apiKey = getSetting('gemini_api_key');
+  const model = getSetting('gemini_model') || 'gemini-2.5-flash';
+  let agentMode = sharedNhtsaModelLookup.nhtsaSiteReachable
+    ? 'nhtsa.gov/recalls + vin-live-status'
+    : 'nhtsa-smart-analyzer';
+
+  const geminiNotesByVin = new Map();
+  let geminiSummary = '';
+
+  if (apiKey && inspectedHybrids.length > 0) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      model
+    )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    const promptInput = {
+      referenceWebsite: NHTSA_RECALLS_WEB_URL,
+      dealershipInventorySource: 'https://www.prestonmotor.com',
+      targetVehicle: '2026 Lincoln Nautilus Hybrid',
+      total2026NautilusInStock: y2026Candidates.length,
+      total2026NautilusHybridsInStock: inspectedHybrids.length,
+      nhtsaHybridModelCampaigns: sharedNhtsaModelLookup.recalls.map((r) => ({
+        campaignNumber: r.campaignNumber,
+        oemRecallNumber: r.oemRecallNumber,
+        component: r.component,
+        summary: r.summary,
+        remedyAvailable: r.remedyAvailable,
+      })),
+      inspectedHybridVins: inspectedHybrids.map((h) => ({
+        vin: h.vin,
+        stockNumber: h.srpVehicle.stockNumber,
+        title: h.srpVehicle.title,
+        trim: h.srpVehicle.trim || h.decoded.trim,
+        price: h.srpVehicle.price,
+        location: h.srpVehicle.location,
+        nhtsaVinUrl: h.nhtsaUrl,
+        vpicFuelType: h.decoded.fuelType,
+        vinCompletionVerified: h.vinCompletionVerified,
+        incompleteRecallCount: h.incompleteCount,
+        completeRecallCount: h.completeCount,
+        activeIncompleteCampaigns: h.openCampaignLabels,
+      })),
+    };
+
+    const systemPrompt = `You are the Preston Automotive Group Gemini NHTSA Recall Inspector.
+Cross-reference every in-stock 2026 Lincoln Nautilus Hybrid VIN from prestonmotor.com against https://www.nhtsa.gov/recalls and live per-VIN recall completion data.
+Rules:
+1. Identify ONLY the 2026 Lincoln Nautilus Hybrid VINs that do NOT have an active/incomplete recall (incompleteRecallCount === 0 and vinCompletionVerified === true).
+2. Explicitly mention in "geminiSummary" how many 2026 Lincoln Nautilus Hybrids are currently in stock on prestonmotor.com, how many have 0 active/incomplete recalls via https://www.nhtsa.gov/recalls, and how many are excluded due to an active/incomplete recall (such as 26V688000 / OEM 26S75).
+3. For each VIN in "vinAssessments", provide a concise 1-sentence "verificationNote" explaining its recall-free readiness (or active recall exclusion) cross-referenced with www.nhtsa.gov/recalls.`;
+
+    let parsedGemini = null;
+    let usedGrounded = false;
+
+    try {
+      const groundedRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          tools: [{ urlContext: {} }],
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Cross-reference ${NHTSA_RECALLS_WEB_URL} for all in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com and return ONLY valid JSON with keys: geminiSummary (string), vinAssessments (array of {vin, hasActiveRecall, verificationNote}).\n\nData:\n${JSON.stringify(
+                    promptInput
+                  )}`,
+                },
+              ],
+            },
+          ],
+          generationConfig: { temperature: 0.1 },
+        }),
+        signal: AbortSignal.timeout(25000),
+      });
+
+      if (groundedRes.ok) {
+        const d1 = await groundedRes.json();
+        const raw1 = (d1?.candidates?.[0]?.content?.parts || [])
+          .map((p) => p?.text || '')
+          .join('\n')
+          .trim();
+        const jsonMatch = raw1.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          parsedGemini = JSON.parse(jsonMatch[0]);
+          usedGrounded = true;
+        }
+      }
+    } catch {
+      // Fall back to structured responseSchema call
+    }
+
+    if (!parsedGemini) {
+      try {
+        const schemaRes = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: 'user', parts: [{ text: JSON.stringify(promptInput) }] }],
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'OBJECT',
+                properties: {
+                  geminiSummary: { type: 'STRING' },
+                  vinAssessments: {
+                    type: 'ARRAY',
+                    items: {
+                      type: 'OBJECT',
+                      properties: {
+                        vin: { type: 'STRING' },
+                        hasActiveRecall: { type: 'BOOLEAN' },
+                        verificationNote: { type: 'STRING' },
+                      },
+                      required: ['vin', 'hasActiveRecall', 'verificationNote'],
+                    },
+                  },
+                },
+                required: ['geminiSummary', 'vinAssessments'],
+              },
+            },
+          }),
+          signal: AbortSignal.timeout(25000),
+        });
+
+        if (schemaRes.ok) {
+          const d2 = await schemaRes.json();
+          const raw2 = d2?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+          parsedGemini = JSON.parse(raw2);
+        }
+      } catch {
+        parsedGemini = null;
+      }
+    }
+
+    if (parsedGemini) {
+      agentMode = usedGrounded
+        ? `gemini-url-context (${model})`
+        : `gemini (${model})`;
+      geminiSummary = String(parsedGemini.geminiSummary || '').trim();
+      for (const va of parsedGemini.vinAssessments || []) {
+        if (va?.vin && va?.verificationNote) {
+          geminiNotesByVin.set(
+            String(va.vin).trim().toUpperCase(),
+            String(va.verificationNote).trim()
+          );
+        }
+      }
+    }
+  }
+
+  const recallFreeVehicles = [];
+  const excludedActiveRecallVins = [];
+
+  for (const h of inspectedHybrids) {
+    const v = h.srpVehicle;
+    const isClean = h.incompleteCount === 0 && h.vinCompletionVerified;
+    const defaultCleanNote = `Verified 0 active/incomplete recalls on VIN ${h.vin} against www.nhtsa.gov/recalls and live per-VIN recall records — ready for immediate guest delivery.`;
+
+    if (isClean) {
+      recallFreeVehicles.push({
+        vin: h.vin,
+        stockNumber: v.stockNumber || '',
+        title:
+          /hybrid/i.test(v.title || '')
+            ? v.title
+            : `${v.title || '2026 Lincoln Nautilus'} Hybrid`.replace(/\s+/g, ' ').trim(),
+        year: 2026,
+        make: v.make || 'Lincoln',
+        model: v.model || 'Nautilus',
+        trim: v.trim || h.decoded.trim || '',
+        condition: v.condition || 'New',
+        price: v.price ?? null,
+        msrp: v.msrp ?? null,
+        location: v.location || 'Preston Automotive Group',
+        mileage: typeof v.mileage === 'number' ? v.mileage : 0,
+        drivetrain: v.drivetrain || h.decoded.driveType || 'AWD',
+        engine:
+          v.engine && /fhev|hybrid/i.test(v.engine)
+            ? v.engine
+            : '2.0L Turbo Hybrid (FHEV)',
+        fuelType: v.fuelType || h.decoded.fuelType || 'Gas/Electric Hybrid',
+        exteriorColor: v.exteriorColor || '',
+        interiorColor: v.interiorColor || '',
+        photoUrl: v.photoUrl || '',
+        listingUrl: v.listingUrl || 'https://www.prestonmotor.com',
+        nhtsaUrl: h.nhtsaUrl,
+        incompleteCount: 0,
+        completeCount: h.completeCount,
+        vinCompletionVerified: true,
+        geminiVerificationNote: geminiNotesByVin.get(h.vin) || defaultCleanNote,
+      });
+    } else {
+      excludedActiveRecallVins.push({
+        vin: h.vin,
+        stockNumber: v.stockNumber || '',
+        title: v.title || '2026 Lincoln Nautilus',
+        trim: v.trim || h.decoded.trim || '',
+        incompleteCount: h.incompleteCount,
+        activeCampaigns: h.openCampaignLabels,
+      });
+    }
+  }
+
+  recallFreeVehicles.sort((a, b) => {
+    const pa = a.price ?? Number.MAX_SAFE_INTEGER;
+    const pb = b.price ?? Number.MAX_SAFE_INTEGER;
+    return pa - pb;
+  });
+
+  if (!geminiSummary) {
+    if (inspectedHybrids.length === 0) {
+      geminiSummary = `Scanned prestonmotor.com live Lincoln inventory and cross-referenced ${NHTSA_RECALLS_WEB_URL}: 0 in-stock 2026 Lincoln Nautilus Hybrid vehicles were found at this moment.`;
+    } else if (recallFreeVehicles.length === 0) {
+      geminiSummary = `Checked all ${inspectedHybrids.length} in-stock 2026 Lincoln Nautilus Hybrid VIN(s) on prestonmotor.com against ${NHTSA_RECALLS_WEB_URL}: 0 units are currently free of active/incomplete recalls (${excludedActiveRecallVins.length} unit(s) excluded due to open recall campaign(s)).`;
+    } else {
+      const sampleCampaign =
+        excludedActiveRecallVins[0]?.activeCampaigns?.[0] || 'open NHTSA safety recall';
+      geminiSummary =
+        excludedActiveRecallVins.length > 0
+          ? `Checked all ${inspectedHybrids.length} in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com against ${NHTSA_RECALLS_WEB_URL}: ${recallFreeVehicles.length} vehicle${
+              recallFreeVehicles.length === 1 ? ' has' : 's have'
+            } 0 active/incomplete recalls and ${
+              recallFreeVehicles.length === 1 ? 'is' : 'are'
+            } ready for delivery (${excludedActiveRecallVins.length} other Hybrid unit${
+              excludedActiveRecallVins.length === 1 ? ' was' : 's were'
+            } excluded due to active recall ${sampleCampaign}).`
+          : `Checked all ${inspectedHybrids.length} in-stock 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com against ${NHTSA_RECALLS_WEB_URL}: all ${recallFreeVehicles.length} vehicles have 0 active/incomplete recalls.`;
+    }
+  }
+
+  const payload = {
+    checkedAt: new Date().toISOString(),
+    agentMode,
+    nhtsaReferenceUrl: NHTSA_RECALLS_WEB_URL,
+    total2026NautilusInStock: y2026Candidates.length,
+    totalHybridsInStock: inspectedHybrids.length,
+    recallFreeCount: recallFreeVehicles.length,
+    excludedActiveRecallCount: excludedActiveRecallVins.length,
+    geminiSummary,
+    recallFreeVehicles,
+    excludedActiveRecallVins,
+  };
+
+  cachedNautilusHybridScan = {
+    payload,
+    fetchedAt: Date.now(),
+  };
+
+  return payload;
 }

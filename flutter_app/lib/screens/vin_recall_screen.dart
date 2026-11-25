@@ -52,6 +52,10 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
   String? _errorMessage;
   VinRecallCheckResult? _result;
   List<RecentVinRecallEntry> _recentChecks = const [];
+  NautilusHybridRecallScanResult? _nautilusHybridScan;
+  bool _loadingNautilusHybrids = false;
+  String? _nautilusHybridError;
+  bool _showExcludedNautilusHybrids = false;
 
   @override
   void initState() {
@@ -63,6 +67,7 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     _vinController = TextEditingController(text: initVin);
     _vinController.addListener(_onVinTextChanged);
     unawaited(_loadRecentChecks());
+    unawaited(_loadNautilusHybridScan());
     if (widget.autoCheckOnInit && initVin.length == 17) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _runRecallCheck();
@@ -90,6 +95,42 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
     final recent = await ApiService.fetchRecentVinRecallChecks();
     if (!mounted) return;
     setState(() => _recentChecks = recent);
+  }
+
+  Future<void> _loadNautilusHybridScan({bool forceRefresh = false}) async {
+    if (_loadingNautilusHybrids) return;
+    setState(() {
+      _loadingNautilusHybrids = true;
+      _nautilusHybridError = null;
+    });
+    try {
+      final scan = await ApiService.fetchRecallFree2026NautilusHybrids(
+        forceRefresh: forceRefresh,
+      );
+      if (!mounted) return;
+      setState(() {
+        _nautilusHybridScan = scan;
+        _loadingNautilusHybrids = false;
+      });
+    } catch (err) {
+      if (!mounted) return;
+      setState(() {
+        _nautilusHybridError =
+            err.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+        _loadingNautilusHybrids = false;
+      });
+    }
+  }
+
+  Future<void> _openListingUrl(String urlStr) async {
+    final uri = Uri.tryParse(urlStr.trim());
+    if (uri == null) return;
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Vehicle Listing URL: $urlStr')),
+      );
+    }
   }
 
   Future<void> _pasteFromClipboard() async {
@@ -187,6 +228,10 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
         _recentChecks = updated.recent;
         _updatingCampaign = null;
       });
+      if (res.vehicle.year == 2026 &&
+          res.vehicle.model.toLowerCase().contains('nautilus')) {
+        unawaited(_loadNautilusHybridScan(forceRefresh: true));
+      }
       final actionWord = nextStatus == 'complete'
           ? 'Marked Complete'
           : (nextStatus == 'incomplete'
@@ -522,6 +567,9 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
                   _buildRecallCampaignsSection(context, _result!),
                 ],
               ],
+
+              const SizedBox(height: 20),
+              _buildNautilusHybridRecallFreeSection(context),
 
               if (_recentChecks.isNotEmpty) ...[
                 const SizedBox(height: 22),
@@ -1522,6 +1570,624 @@ class _VinRecallScreenState extends State<VinRecallScreen> {
               );
             }),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNautilusHybridRecallFreeSection(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final scan = _nautilusHybridScan;
+    final currencyFmt = NumberFormat.currency(symbol: '\$', decimalDigits: 0);
+
+    return Card(
+      key: const ValueKey('nautilus_hybrid_recall_free_section'),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: const Color(0xFF146C2E).withValues(alpha: 0.38),
+          width: 1.4,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 10,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(9),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE6F4EA),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.electric_car_rounded,
+                        color: Color(0xFF146C2E),
+                        size: 22,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '2026 Lincoln Nautilus Hybrid — In-Stock Without Active Recall',
+                            style: textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Live prestonmotor.com inventory cross-referenced per VIN via Gemini & www.nhtsa.gov/recalls',
+                            style: textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.tonalIcon(
+                      key: const ValueKey('refresh_nautilus_hybrid_scan_button'),
+                      onPressed: _loadingNautilusHybrids
+                          ? null
+                          : () => _loadNautilusHybridScan(forceRefresh: true),
+                      icon: _loadingNautilusHybrids
+                          ? const SizedBox(
+                              width: 15,
+                              height: 15,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh_rounded, size: 17),
+                      label: Text(
+                        _loadingNautilusHybrids
+                            ? 'Scanning Hybrids…'
+                            : 'Refresh Scan',
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+
+            if (_loadingNautilusHybrids && scan == null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        'Scanning live 2026 Lincoln Nautilus Hybrid VINs on prestonmotor.com and checking www.nhtsa.gov/recalls with Gemini…',
+                        style: textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (_nautilusHybridError != null && scan == null) ...[
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline_rounded,
+                        color: scheme.error, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _nautilusHybridError!,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onErrorContainer,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (scan != null) ...[
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _buildNautilusScanStatPill(
+                    context,
+                    label:
+                        '${scan.recallFreeCount} Recall-Free Ready',
+                    icon: Icons.verified_rounded,
+                    fg: const Color(0xFF0F5223),
+                    bg: const Color(0xFFE6F4EA),
+                  ),
+                  _buildNautilusScanStatPill(
+                    context,
+                    label:
+                        '${scan.totalHybridsInStock} Hybrids Scanned on prestonmotor.com',
+                    icon: Icons.directions_car_filled_outlined,
+                    fg: scheme.onSecondaryContainer,
+                    bg: scheme.secondaryContainer,
+                  ),
+                  if (scan.excludedActiveRecallCount > 0)
+                    _buildNautilusScanStatPill(
+                      context,
+                      label:
+                          '${scan.excludedActiveRecallCount} Excluded (Active Recall)',
+                      icon: Icons.block_rounded,
+                      fg: const Color(0xFF7A4100),
+                      bg: const Color(0xFFFFF3DA),
+                    ),
+                  if (scan.checkedAt.isNotEmpty)
+                    Text(
+                      'Updated ${_formatCheckedTimestamp(scan.checkedAt)} • ${scan.agentMode}',
+                      style: textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
+              ),
+              if (scan.geminiSummary.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.auto_awesome,
+                          size: 17, color: scheme.primary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          scan.geminiSummary,
+                          style: textTheme.bodySmall?.copyWith(height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              if (scan.recallFreeVehicles.isEmpty)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: scheme.outlineVariant),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.info_outline_rounded,
+                        color: scheme.primary,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          scan.totalHybridsInStock == 0
+                              ? 'No in-stock 2026 Lincoln Nautilus Hybrid vehicles were returned from prestonmotor.com right now. Tap "Refresh Scan" to check live inventory.'
+                              : 'All ${scan.totalHybridsInStock} in-stock 2026 Lincoln Nautilus Hybrid unit(s) currently have an active/incomplete recall on file at www.nhtsa.gov/recalls.',
+                          style: textTheme.bodySmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                ...scan.recallFreeVehicles.map(
+                  (vehicle) => _buildRecallFreeNautilusCard(
+                    context,
+                    vehicle,
+                    currencyFmt,
+                  ),
+                ),
+              if (scan.excludedActiveRecallVins.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: const ValueKey(
+                      'toggle_excluded_nautilus_hybrids_button',
+                    ),
+                    onPressed: () => setState(
+                      () => _showExcludedNautilusHybrids =
+                          !_showExcludedNautilusHybrids,
+                    ),
+                    icon: Icon(
+                      _showExcludedNautilusHybrids
+                          ? Icons.expand_less_rounded
+                          : Icons.expand_more_rounded,
+                      size: 18,
+                    ),
+                    label: Text(
+                      _showExcludedNautilusHybrids
+                          ? 'Hide ${scan.excludedActiveRecallCount} Excluded Hybrid(s) With Active Recall'
+                          : 'View ${scan.excludedActiveRecallCount} Excluded Hybrid(s) Held by Active Recall',
+                    ),
+                  ),
+                ),
+                if (_showExcludedNautilusHybrids)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF8EB),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFB06000).withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: scan.excludedActiveRecallVins.map((ex) {
+                        final campaigns = ex.activeCampaigns.isNotEmpty
+                            ? ex.activeCampaigns.join(', ')
+                            : '${ex.incompleteCount} open recall(s)';
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              const Icon(
+                                Icons.warning_amber_rounded,
+                                size: 15,
+                                color: Color(0xFFB06000),
+                              ),
+                              Text(
+                                ex.trim.isNotEmpty
+                                    ? '2026 Nautilus ${ex.trim} Hybrid'
+                                    : ex.title,
+                                style: textTheme.bodySmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  color: const Color(0xFF3C2400),
+                                ),
+                              ),
+                              CopyableIdentifierBadge.vin(
+                                ex.vin,
+                                compact: true,
+                              ),
+                              if (ex.stockNumber.isNotEmpty)
+                                CopyableIdentifierBadge.stock(
+                                  ex.stockNumber,
+                                  compact: true,
+                                ),
+                              Text(
+                                'Excluded: $campaigns',
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: const Color(0xFF7A4100),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNautilusScanStatPill(
+    BuildContext context, {
+    required String label,
+    required IconData icon,
+    required Color fg,
+    required Color bg,
+  }) {
+    final textTheme = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: fg),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: textTheme.labelSmall?.copyWith(
+              color: fg,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecallFreeNautilusCard(
+    BuildContext context,
+    RecallFreeNautilusHybridVehicle v,
+    NumberFormat currencyFmt,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final resolvedPhoto = ApiService.resolveVehiclePhotoUrl(v.photoUrl);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        key: ValueKey('recall_free_nautilus_${v.vin}'),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: const Color(0xFF146C2E).withValues(alpha: 0.45),
+            width: 1.3,
+          ),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (resolvedPhoto.isNotEmpty) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.network(
+                      resolvedPhoto,
+                      width: 112,
+                      height: 82,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Container(
+                        width: 112,
+                        height: 82,
+                        color: scheme.surfaceContainerHighest,
+                        child: Icon(
+                          Icons.directions_car_filled_rounded,
+                          color: scheme.primary,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF146C2E),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.verified_rounded,
+                                  size: 13,
+                                  color: Colors.white,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '0 ACTIVE RECALLS • READY',
+                                  style: textTheme.labelSmall?.copyWith(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 10.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.primaryContainer,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text(
+                              v.condition,
+                              style: textTheme.labelSmall?.copyWith(
+                                color: scheme.onPrimaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        v.title,
+                        style: textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            v.price != null
+                                ? currencyFmt.format(v.price)
+                                : 'Call for Price',
+                            style: textTheme.titleSmall?.copyWith(
+                              color: scheme.primary,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.location_on_outlined,
+                                size: 15,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: 3),
+                              Text(
+                                v.location,
+                                style: textTheme.bodySmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                CopyableIdentifierBadge.vin(v.vin),
+                if (v.stockNumber.isNotEmpty)
+                  CopyableIdentifierBadge.stock(v.stockNumber),
+                if (v.drivetrain.isNotEmpty)
+                  _specTagChip(context, v.drivetrain),
+                if (v.engine.isNotEmpty) _specTagChip(context, v.engine),
+                if (v.exteriorColor.isNotEmpty)
+                  _specTagChip(context, v.exteriorColor),
+              ],
+            ),
+            if (v.geminiVerificationNote.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE6F4EA).withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.auto_awesome,
+                      size: 15,
+                      color: Color(0xFF146C2E),
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        v.geminiVerificationNote,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: const Color(0xFF0F5223),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  key: ValueKey('inspect_nautilus_vin_${v.vin}'),
+                  onPressed:
+                      _isChecking ? null : () => _runRecallCheck(v.vin),
+                  icon: const Icon(Icons.policy_outlined, size: 16),
+                  label: const Text('Inspect Full Recall Report'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => _openNhtsaWebsite(v.vin),
+                  icon: const Icon(Icons.open_in_new, size: 15),
+                  label: const Text('Verify on NHTSA.gov'),
+                ),
+                if (v.listingUrl.isNotEmpty)
+                  OutlinedButton.icon(
+                    onPressed: () => _openListingUrl(v.listingUrl),
+                    icon: const Icon(Icons.directions_car_outlined, size: 16),
+                    label: const Text('View on prestonmotor.com'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _specTagChip(BuildContext context, String text) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        text,
+        style: textTheme.labelSmall?.copyWith(
+          fontWeight: FontWeight.w600,
         ),
       ),
     );

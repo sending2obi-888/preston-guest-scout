@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/models.dart';
 import 'calendar_service.dart';
+import 'document_picker_service.dart';
 import 'local_engine.dart';
 import 'match_notification_service.dart';
 import 'widget_sync_service.dart';
@@ -897,5 +898,61 @@ class ApiService {
         .map((e) => RecentVinRecallEntry.fromJson(Map<String, dynamic>.from(e)))
         .toList();
     return (result: result, recent: recent);
+  }
+
+  static Future<NautilusHybridRecallScanResult>
+      fetchRecallFree2026NautilusHybrids({
+    bool forceRefresh = false,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.scan2026NautilusHybridsRecallFree(
+        forceRefresh: forceRefresh,
+      );
+    }
+    final uri = Uri.parse(
+      '$baseUrl/api/recalls/nautilus-hybrids${forceRefresh ? '?refresh=1' : ''}',
+    );
+    final res = await http.get(uri, headers: _headers());
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to scan 2026 Lincoln Nautilus Hybrid recall-free inventory (${res.statusCode})',
+      );
+    }
+    return NautilusHybridRecallScanResult.fromJson(data);
+  }
+
+  static Future<DocumentEquivalentSearchResult>
+      findEquivalentVehiclesFromDocument({
+    required PickedDocumentFile document,
+    String extraNotes = '',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.findEquivalentVehiclesFromDocument(
+        document: document,
+        extraNotes: extraNotes,
+      );
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/intake/document-equivalents'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{
+        'fileName': document.fileName,
+        'mimeType': document.mimeType,
+        'base64Data': document.base64Data,
+        'extraNotes': extraNotes,
+      }),
+    );
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to analyze document for closest prestonmotor.com vehicles (${res.statusCode})',
+      );
+    }
+    return DocumentEquivalentSearchResult.fromJson(
+      Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
+    );
   }
 }

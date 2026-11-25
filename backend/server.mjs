@@ -37,8 +37,10 @@ import {
 import {
   checkVinRecallsWithGemini,
   listRecentVinRecallChecks,
+  scan2026NautilusHybridsRecallFree,
   updateVinRecallCampaignStatus,
 } from './nhtsa_recall_agent.mjs';
+import { findClosestEquivalentsFromDocument } from './document_equivalents_agent.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_BUILD_DIR = path.resolve(__dirname, '../flutter_app/build/web');
@@ -72,12 +74,12 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let raw = '';
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 2 * 1024 * 1024) {
+      if (raw.length > maxBytes) {
         reject(new Error('Payload too large'));
       }
     });
@@ -1143,6 +1145,49 @@ const server = http.createServer(async (req, res) => {
         const code = Number(err.statusCode) || 500;
         return sendJson(res, code, {
           error: err.message || 'Unable to update recall completion status.',
+        });
+      }
+    }
+
+    if (
+      pathname === '/api/recalls/nautilus-hybrids' &&
+      (req.method === 'GET' || req.method === 'POST')
+    ) {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const forceRefresh =
+        body.forceRefresh === true ||
+        parsedUrl.searchParams.get('refresh') === '1' ||
+        parsedUrl.searchParams.get('forceRefresh') === 'true';
+      try {
+        const scan = await scan2026NautilusHybridsRecallFree({ forceRefresh });
+        return sendJson(res, 200, { ok: true, ...scan });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error:
+            err.message ||
+            'Unable to scan 2026 Lincoln Nautilus Hybrid recall-free inventory.',
+        });
+      }
+    }
+
+    // Upload a guest/vehicle document & find closest equivalent vehicles across entire prestonmotor.com inventory
+    if (pathname === '/api/intake/document-equivalents' && req.method === 'POST') {
+      const body = await readJsonBody(req, 28 * 1024 * 1024);
+      try {
+        const result = await findClosestEquivalentsFromDocument({
+          fileName: String(body.fileName || 'uploaded-document').trim(),
+          mimeType: String(body.mimeType || '').trim(),
+          base64Data: String(body.base64Data || ''),
+          extraNotes: String(body.extraNotes || '').trim(),
+        });
+        return sendJson(res, 200, { ok: true, result });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error:
+            err.message ||
+            'Unable to analyze uploaded document for closest prestonmotor.com vehicles.',
         });
       }
     }

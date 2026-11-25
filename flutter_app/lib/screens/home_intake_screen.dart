@@ -1,8 +1,12 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/document_picker_service.dart';
 import '../services/natural_language_parser.dart';
+import '../widgets/copyable_identifier_badge.dart';
 import '../widgets/exterior_color_selector.dart';
 
 class HomeIntakeScreen extends StatefulWidget {
@@ -48,6 +52,12 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
   final Set<String> _selectedFeatures = {};
   bool _isSubmitting = false;
   int _resetGeneration = 0;
+
+  // Document Upload & Gemini Closest-Equivalents state
+  bool _isAnalyzingDocument = false;
+  PickedDocumentFile? _uploadedDocument;
+  DocumentEquivalentSearchResult? _documentSearchResult;
+  String? _documentSearchError;
 
   // Collapsible dropdown states (collapsed by default to minimize clutter)
   bool _contactDropdownOpen = false;
@@ -181,8 +191,158 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
       _bedLength = '';
       _selectedColors = [];
       _selectedFeatures.clear();
+      _uploadedDocument = null;
+      _documentSearchResult = null;
+      _documentSearchError = null;
       _resetGeneration++;
     });
+  }
+
+  Future<void> _uploadAndMatchDocument() async {
+    if (_isAnalyzingDocument || _isSubmitting) return;
+    PickedDocumentFile? picked;
+    try {
+      picked = await DocumentPickerService.pickDocument();
+    } catch (err) {
+      if (!mounted) return;
+      final msg = err.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+      setState(() => _documentSearchError = msg);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg)),
+      );
+      return;
+    }
+
+    if (picked == null) return;
+
+    setState(() {
+      _isAnalyzingDocument = true;
+      _uploadedDocument = picked;
+      _documentSearchError = null;
+    });
+
+    try {
+      final result = await ApiService.findEquivalentVehiclesFromDocument(
+        document: picked,
+        extraNotes: _notesCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _documentSearchResult = result;
+        _isAnalyzingDocument = false;
+        if (_guestNameCtrl.text.trim().isEmpty &&
+            result.extractedGuestName.trim().isNotEmpty) {
+          _guestNameCtrl.text = result.extractedGuestName.trim();
+        }
+      });
+    } catch (err) {
+      if (!mounted) return;
+      final msg = err.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+      setState(() {
+        _documentSearchError = msg;
+        _isAnalyzingDocument = false;
+      });
+    }
+  }
+
+  void _applyExtractedSpecsToForm(DocumentExtractedVehicleProfile ref) {
+    setState(() {
+      if (const ['Any', 'New', 'Pre-Owned', 'CPO'].contains(ref.condition)) {
+        _condition = ref.condition;
+      }
+      if (ref.make.isNotEmpty) _makeCtrl.text = ref.make;
+      if (ref.model.isNotEmpty) _modelCtrl.text = ref.model;
+      if (ref.trim.isNotEmpty) _trimCtrl.text = ref.trim;
+      if (const ['2', '3', '4', '5'].contains(ref.doors)) {
+        _doors = ref.doors;
+      }
+      if (const ['5.5', '6.5', '6.75', '8'].contains(ref.bedLength)) {
+        _bedLength = ref.bedLength;
+      }
+      if (const ['Any', '4WD', 'AWD', 'FWD', 'RWD'].contains(ref.drivetrain)) {
+        _drivetrain = ref.drivetrain;
+      }
+      if (ref.minYear != null) {
+        _minYearCtrl.text = '${ref.minYear}';
+      } else if (ref.year != null) {
+        _minYearCtrl.text = '${ref.year}';
+      }
+      if (ref.maxYear != null) {
+        _maxYearCtrl.text = '${ref.maxYear}';
+      }
+      if (ref.targetPrice != null && ref.targetPrice! > 0) {
+        _maxPriceCtrl.text = (ref.targetPrice! * 1.05).round().toString();
+      }
+      if (ref.maxMileage != null && ref.maxMileage! > 0) {
+        _maxMileageCtrl.text = '${ref.maxMileage}';
+      }
+      if (ref.exteriorColor.isNotEmpty) {
+        _exteriorColorCtrl.text = ref.exteriorColor;
+      }
+      for (final f in ref.keyFeatures) {
+        if (f.trim().isNotEmpty) _selectedFeatures.add(f.trim());
+      }
+      _resetGeneration++;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        duration: Duration(seconds: 3),
+        content: Text(
+          'Applied extracted document specifications to the Guest & Vehicle search form.',
+        ),
+      ),
+    );
+  }
+
+  void _applyEquivalentVehicleToForm(EquivalentVehicleMatch eq) {
+    setState(() {
+      final condLower = eq.condition.toLowerCase();
+      if (condLower.contains('new')) {
+        _condition = 'New';
+      } else if (condLower.contains('certified')) {
+        _condition = 'CPO';
+      } else if (condLower.isNotEmpty) {
+        _condition = 'Pre-Owned';
+      }
+      if (eq.make.isNotEmpty) _makeCtrl.text = eq.make;
+      if (eq.model.isNotEmpty) _modelCtrl.text = eq.model;
+      if (eq.trim.isNotEmpty) _trimCtrl.text = eq.trim;
+      if (const ['4WD', 'AWD', 'FWD', 'RWD']
+          .contains(eq.drivetrain.toUpperCase())) {
+        _drivetrain = eq.drivetrain.toUpperCase();
+      }
+      if (eq.year != null) {
+        _minYearCtrl.text = '${eq.year}';
+      }
+      if (eq.price != null && eq.price! > 0) {
+        _maxPriceCtrl.text = (eq.price! * 1.03).round().toString();
+      }
+      if (eq.exteriorColor.isNotEmpty) {
+        _exteriorColorCtrl.text = eq.exteriorColor;
+      }
+      _resetGeneration++;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 3),
+        content: Text(
+          'Pre-filled search form from ${eq.title} (${eq.location}). Enter guest name to monitor twice daily.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openVehicleListingUrl(String urlStr) async {
+    final uri = Uri.tryParse(urlStr.trim());
+    if (uri == null) return;
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Vehicle Listing URL: $urlStr')),
+      );
+    }
   }
 
   String _effectiveExteriorColorString() {
@@ -695,10 +855,101 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                             const SizedBox(height: 12),
                             _buildParsedCriteriaBanner(scheme, textTheme),
                           ],
+                          const SizedBox(height: 14),
+                          Container(
+                            key: const ValueKey(
+                              'document_upload_intake_banner',
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.tertiaryContainer
+                                  .withValues(alpha: 0.35),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: scheme.primary.withValues(alpha: 0.22),
+                              ),
+                            ),
+                            child: Wrap(
+                              spacing: 12,
+                              runSpacing: 10,
+                              alignment: WrapAlignment.spaceBetween,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.description_outlined,
+                                      size: 20,
+                                      color: scheme.primary,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Flexible(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Have a Window Sticker, Competitor Quote, or Spec Sheet?',
+                                            style: textTheme.labelLarge
+                                                ?.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          Text(
+                                            'Upload any PDF, photo, or document — Gemini finds the closest equivalent vehicles across all prestonmotor.com inventory.',
+                                            style:
+                                                textTheme.bodySmall?.copyWith(
+                                              color: scheme.onSurfaceVariant,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                FilledButton.tonalIcon(
+                                  key: const ValueKey(
+                                    'upload_document_equivalents_button',
+                                  ),
+                                  onPressed:
+                                      (_isAnalyzingDocument || _isSubmitting)
+                                          ? null
+                                          : _uploadAndMatchDocument,
+                                  icon: _isAnalyzingDocument
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(
+                                          Icons.upload_file_rounded,
+                                          size: 18,
+                                        ),
+                                  label: Text(
+                                    _isAnalyzingDocument
+                                        ? 'Finding Closest Equivalents…'
+                                        : 'Upload Document & Find Closest Vehicles',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),
                   ),
+                  if (_isAnalyzingDocument ||
+                      _documentSearchError != null ||
+                      _documentSearchResult != null) ...[
+                    const SizedBox(height: 12),
+                    _buildDocumentEquivalentsPanel(scheme, textTheme),
+                  ],
                   const SizedBox(height: 12),
 
                   // Collapsible Dropdown 1: Guest Contact Info (Phone & Email)
@@ -1317,6 +1568,606 @@ class _HomeIntakeScreenState extends State<HomeIntakeScreen> {
                 .toList(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDocumentEquivalentsPanel(
+    ColorScheme scheme,
+    TextTheme textTheme,
+  ) {
+    final res = _documentSearchResult;
+    final currencyFmt = NumberFormat.currency(symbol: '\$', decimalDigits: 0);
+
+    return Card(
+      key: const ValueKey('document_equivalents_results_section'),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: scheme.primary.withValues(alpha: 0.35),
+          width: 1.4,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: scheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(
+                        Icons.auto_awesome,
+                        size: 19,
+                        color: scheme.onPrimaryContainer,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Closest Equivalent Vehicles Across prestonmotor.com',
+                            style: textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            _uploadedDocument != null
+                                ? 'Document: ${_uploadedDocument!.fileName} (${_uploadedDocument!.formattedSize})'
+                                : (res != null
+                                    ? 'Document: ${res.fileName}'
+                                    : 'Uploaded Document'),
+                            style: textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (!_isAnalyzingDocument)
+                      OutlinedButton.icon(
+                        onPressed: _uploadAndMatchDocument,
+                        icon: const Icon(Icons.upload_file_rounded, size: 16),
+                        label: const Text('Upload Another'),
+                      ),
+                    IconButton(
+                      tooltip: 'Dismiss Document Results',
+                      onPressed: _isAnalyzingDocument
+                          ? null
+                          : () {
+                              setState(() {
+                                _uploadedDocument = null;
+                                _documentSearchResult = null;
+                                _documentSearchError = null;
+                              });
+                            },
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+
+            if (_isAnalyzingDocument) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        'Gemini is reading ${_uploadedDocument?.fileName ?? 'your document'} and ranking the closest equivalent vehicles across the entire prestonmotor.com inventory…',
+                        style: textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (_documentSearchError != null) ...[
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline_rounded,
+                        color: scheme.error, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _documentSearchError!,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onErrorContainer,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ] else if (res != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(13),
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: scheme.primary.withValues(alpha: 0.2),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: scheme.primary,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                '${res.equivalents.length} Closest Equivalent${res.equivalents.length == 1 ? '' : 's'}',
+                                style: textTheme.labelSmall?.copyWith(
+                                  color: scheme.onPrimary,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: scheme.surface,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                '${NumberFormat.decimalPattern().format(res.totalInventoryScanned)} prestonmotor.com Vehicles Scanned',
+                                style: textTheme.labelSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              'via ${res.agentMode}',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                        FilledButton.tonalIcon(
+                          key: const ValueKey('apply_document_specs_button'),
+                          onPressed: () =>
+                              _applyExtractedSpecsToForm(res.referenceVehicle),
+                          icon: const Icon(Icons.playlist_add_check_rounded,
+                              size: 18),
+                          label: const Text('Apply Specs to Form'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      res.overallSummary.isNotEmpty
+                          ? res.overallSummary
+                          : res.documentSummary,
+                      style: textTheme.bodySmall?.copyWith(height: 1.4),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        if (res.referenceVehicle.year != null)
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Target Year: ${res.referenceVehicle.year}',
+                          ),
+                        if (res.referenceVehicle.make.isNotEmpty ||
+                            res.referenceVehicle.model.isNotEmpty)
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Reference: ${res.referenceVehicle.make} ${res.referenceVehicle.model} ${res.referenceVehicle.trim}'
+                                .trim(),
+                          ),
+                        if (res.referenceVehicle.bodyCategory.isNotEmpty)
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Class: ${res.referenceVehicle.bodyCategory}',
+                          ),
+                        if (res.referenceVehicle.powertrain.isNotEmpty &&
+                            res.referenceVehicle.powertrain != 'Any')
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Powertrain: ${res.referenceVehicle.powertrain}',
+                          ),
+                        if (res.referenceVehicle.drivetrain.isNotEmpty &&
+                            res.referenceVehicle.drivetrain != 'Any')
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Drivetrain: ${res.referenceVehicle.drivetrain}',
+                          ),
+                        if (res.referenceVehicle.targetPrice != null)
+                          _docSpecPill(
+                            scheme,
+                            textTheme,
+                            'Target Price: ${currencyFmt.format(res.referenceVehicle.targetPrice)}',
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (res.equivalents.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                    'No live inventory vehicles were returned from prestonmotor.com right now. Please try again in a moment.',
+                    style: textTheme.bodySmall,
+                  ),
+                )
+              else
+                Column(
+                  key: const ValueKey('document_equivalent_matches_list'),
+                  children: res.equivalents
+                      .map(
+                        (eq) => _buildEquivalentVehicleCard(
+                          eq,
+                          scheme,
+                          textTheme,
+                          currencyFmt,
+                        ),
+                      )
+                      .toList(),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _docSpecPill(
+    ColorScheme scheme,
+    TextTheme textTheme,
+    String text,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Text(
+        text,
+        style: textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  Widget _buildEquivalentVehicleCard(
+    EquivalentVehicleMatch eq,
+    ColorScheme scheme,
+    TextTheme textTheme,
+    NumberFormat currencyFmt,
+  ) {
+    final resolvedPhoto = ApiService.resolveVehiclePhotoUrl(eq.photoUrl);
+    final isExactOrSameModel = eq.matchTier.toLowerCase().contains('exact') ||
+        eq.matchTier.toLowerCase().contains('same model');
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        key: ValueKey('equivalent_vehicle_card_${eq.vin}'),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLowest,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isExactOrSameModel
+                ? const Color(0xFF146C2E).withValues(alpha: 0.45)
+                : scheme.outlineVariant,
+            width: isExactOrSameModel ? 1.3 : 1.0,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (resolvedPhoto.isNotEmpty) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.network(
+                      resolvedPhoto,
+                      width: 108,
+                      height: 80,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => Container(
+                        width: 108,
+                        height: 80,
+                        color: scheme.surfaceContainerHighest,
+                        child: Icon(
+                          Icons.directions_car_filled_rounded,
+                          color: scheme.primary,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 5,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isExactOrSameModel
+                                  ? const Color(0xFF146C2E)
+                                  : scheme.primary,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              '${eq.similarityScore}% Closest Match',
+                              style: textTheme.labelSmall?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: scheme.secondaryContainer,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text(
+                              eq.matchTier,
+                              style: textTheme.labelSmall?.copyWith(
+                                color: scheme.onSecondaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (eq.condition.isNotEmpty)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 3,
+                              ),
+                              decoration: BoxDecoration(
+                                color: scheme.surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Text(
+                                eq.condition,
+                                style: textTheme.labelSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        eq.title,
+                        style: textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            eq.price != null
+                                ? currencyFmt.format(eq.price)
+                                : 'Call for Price',
+                            style: textTheme.titleSmall?.copyWith(
+                              color: scheme.primary,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.location_on_outlined,
+                                size: 15,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: 3),
+                              Text(
+                                eq.location,
+                                style: textTheme.bodySmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (eq.mileage > 0)
+                            Text(
+                              '${NumberFormat.decimalPattern().format(eq.mileage)} mi',
+                              style: textTheme.bodySmall?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                CopyableIdentifierBadge.vin(eq.vin, compact: true),
+                if (eq.stockNumber.isNotEmpty)
+                  CopyableIdentifierBadge.stock(eq.stockNumber, compact: true),
+              ],
+            ),
+            if (eq.whyEquivalent.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                eq.whyEquivalent,
+                style: textTheme.bodySmall?.copyWith(height: 1.38),
+              ),
+            ],
+            if (eq.matchingHighlights.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                children: eq.matchingHighlights
+                    .map(
+                      (h) => Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE6F4EA),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '✓ $h',
+                          style: textTheme.labelSmall?.copyWith(
+                            color: const Color(0xFF0F5223),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+            if (eq.keyDifferences.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 5,
+                children: eq.keyDifferences
+                    .map(
+                      (diff) => Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerHighest
+                              .withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Note: $diff',
+                          style: textTheme.labelSmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  key: ValueKey('use_equivalent_vehicle_${eq.vin}'),
+                  onPressed: () => _applyEquivalentVehicleToForm(eq),
+                  icon: const Icon(Icons.edit_note_rounded, size: 17),
+                  label: const Text('Use This Vehicle in Search Form'),
+                ),
+                if (eq.listingUrl.isNotEmpty)
+                  OutlinedButton.icon(
+                    onPressed: () => _openVehicleListingUrl(eq.listingUrl),
+                    icon: const Icon(Icons.open_in_new, size: 15),
+                    label: const Text('View on prestonmotor.com'),
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
