@@ -142,6 +142,11 @@ db.exec(`
     deleted_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS delisted_website_vins (
+    vin TEXT PRIMARY KEY,
+    delisted_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS backups (
     id TEXT PRIMARY KEY,
     label TEXT NOT NULL,
@@ -193,6 +198,7 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN scheduled_call_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN doors TEXT DEFAULT ''`,
   `ALTER TABLE guests ADD COLUMN criteria_updated_at TEXT`,
+  `ALTER TABLE guests ADD COLUMN last_full_scan_at TEXT`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN is_selected_candidate INTEGER DEFAULT 0`,
@@ -345,6 +351,7 @@ export function mapGuestRow(row) {
         notes: String(norm.notes || ''),
         createdAt: String(t.createdAt || row.created_at),
         criteriaUpdatedAt: t.criteriaUpdatedAt ? String(t.criteriaUpdatedAt) : null,
+        lastSearchedAt: t.lastSearchedAt ? String(t.lastSearchedAt) : null,
       };
     });
 
@@ -384,6 +391,7 @@ export function mapGuestRow(row) {
       notes: normPrimary.notes || '',
       createdAt: row.created_at,
       criteriaUpdatedAt: row.criteria_updated_at ? String(row.criteria_updated_at) : null,
+      lastSearchedAt: row.last_full_scan_at ? String(row.last_full_scan_at) : null,
     });
   }
 
@@ -467,6 +475,7 @@ export function mapGuestRow(row) {
     scheduledCallVins: [...new Set(scheduledCallVins.map(String).filter(Boolean))],
     active: Boolean(row.active),
     lastSearchedAt: row.last_searched_at,
+    lastFullScanAt: row.last_full_scan_at || null,
     lastSearchSummary: row.last_search_summary || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at || row.last_searched_at || row.created_at,

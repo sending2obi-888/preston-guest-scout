@@ -4333,6 +4333,330 @@ void main() {
 
     LocalScoutEngine.resetForTest();
   });
+
+  test(
+      'Vehicles removed from prestonmotor.com are purged from Found Matches across all searches including when 0 vehicles remain',
+      () async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final soldExplorer = <String, dynamic>{
+      'vin': '1FMUK8GC0TGA88888',
+      'stockNumber': 'E8888',
+      'title': '2026 Ford Explorer ST',
+      'year': 2026,
+      'make': 'Ford',
+      'model': 'Explorer',
+      'trim': 'ST',
+      'condition': 'New',
+      'price': 57900.0,
+      'location': 'Preston Ford of Hurlock',
+      'drivetrain': '4WD',
+    };
+    final activeExplorer = <String, dynamic>{
+      'vin': '1FMUK8DH0TGA99999',
+      'stockNumber': 'E9999',
+      'title': '2026 Ford ExplorerActive',
+      'year': 2026,
+      'make': 'Ford',
+      'model': 'Explorer',
+      'trim': 'Active',
+      'condition': 'New',
+      'price': 43500.0,
+      'location': 'Boulevard Ford of Millsboro',
+      'drivetrain': '4WD',
+    };
+
+    // Two separate searches both find 1FMUK8GC0TGA88888 initially
+    final searchOne = await LocalScoutEngine.createGuest(
+      name: 'Hannah Cole',
+      make: 'Ford',
+      model: 'Explorer',
+      maxPrice: 60000,
+      mockCandidatesOverride: [soldExplorer, activeExplorer],
+    );
+    final searchTwo = await LocalScoutEngine.createGuest(
+      name: 'Liam Brooks',
+      make: 'Ford',
+      model: 'Explorer',
+      trim: 'ST',
+      maxPrice: 62000,
+      mockCandidatesOverride: [soldExplorer, activeExplorer],
+    );
+
+    expect(searchOne.matchesFound, 2);
+    expect(searchTwo.matchesFound, 1);
+
+    // 1. 1FMUK8GC0TGA88888 sells and leaves prestonmotor.com; re-scanning Search 1 purges it from BOTH Search 1 and Search 2!
+    final rescanOne = await LocalScoutEngine.runSearchForSingleGuest(
+      searchOne.guest.id,
+      mockCandidatesOverride: [activeExplorer],
+    );
+    expect(rescanOne.matches.map((m) => m.vin).toList(), ['1FMUK8DH0TGA99999']);
+
+    final searchTwoAfter =
+        await LocalScoutEngine.getGuestWithMatches(searchTwo.guest.id);
+    expect(searchTwoAfter.matches, isEmpty);
+    expect(searchTwoAfter.guest.matchCount, 0);
+
+    // 2. Remaining vehicle 1FMUK8DH0TGA99999 also sells (0 vehicles remain on website) -> Search 1 drops to 0!
+    final rescanZeroLeft = await LocalScoutEngine.runSearchForSingleGuest(
+      searchOne.guest.id,
+      mockCandidatesOverride: const <Map<String, dynamic>>[],
+    );
+    expect(rescanZeroLeft.matches, isEmpty);
+    expect(rescanZeroLeft.guest.matchCount, 0);
+
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  testWidgets(
+      'Opening GuestMatchesScreen automatically verifies live website inventory and removes vehicles no longer on prestonmotor.com',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final unitStillInStock = <String, dynamic>{
+      'vin': '5LM5J7XC0TGL10101',
+      'stockNumber': 'L1010',
+      'title': '2026 Lincoln Nautilus Premiere',
+      'year': 2026,
+      'make': 'Lincoln',
+      'model': 'Nautilus',
+      'trim': 'Premiere',
+      'condition': 'New',
+      'price': 53900.0,
+      'location': 'Boulevard Lincoln Lewes',
+      'drivetrain': 'AWD',
+    };
+    final unitSoldOffWebsite = <String, dynamic>{
+      'vin': '5LM5J7XC0TGL20202',
+      'stockNumber': 'L2020',
+      'title': '2026 Lincoln Nautilus Reserve',
+      'year': 2026,
+      'make': 'Lincoln',
+      'model': 'Nautilus',
+      'trim': 'Reserve',
+      'condition': 'New',
+      'price': 61200.0,
+      'location': 'Preston Lincoln of Hurlock',
+      'drivetrain': 'AWD',
+    };
+
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Evelyn Ward',
+      make: 'Lincoln',
+      model: 'Nautilus',
+      mockCandidatesOverride: [unitStillInStock, unitSoldOffWebsite],
+    );
+    expect(created.matchesFound, 2);
+
+    // Mark the soon-to-be-sold Reserve as a Selected Candidate
+    await LocalScoutEngine.setMatchSelectedCandidate(
+      guestId: created.guest.id,
+      vin: '5LM5J7XC0TGL20202',
+      selected: true,
+    );
+
+    // Simulate 5LM5J7XC0TGL20202 leaving prestonmotor.com while 5LM5J7XC0TGL10101 remains live
+    LocalScoutEngine.setMockWebsiteVinsVerifierForTest((vins) async {
+      return <String, Map<String, dynamic>>{
+        '5LM5J7XC0TGL10101': unitStillInStock,
+      };
+    });
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 2200);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: created.guest.id,
+          onDataChanged: () {},
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Delisted Reserve is automatically removed from Found Matches & Marked Vehicles on open!
+    expect(find.text('Found Matches (1)'), findsOneWidget);
+    expect(find.text('2026 Lincoln Nautilus Premiere'), findsOneWidget);
+    expect(find.text('2026 Lincoln Nautilus Reserve'), findsNothing);
+    expect(find.text('1 Marked'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 1));
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  test(
+      'Cloud sync prunes and never resurrects vehicles removed from prestonmotor.com across devices',
+      () {
+    final staleDeviceSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-sync-1',
+          'name': 'Noah Bennett',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'createdAt': '2026-11-27T08:00:00Z',
+          'updatedAt': '2026-11-27T08:00:00Z',
+          'lastFullScanAt': '2026-11-27T08:00:00Z',
+        },
+        {
+          'id': 'guest-sync-2',
+          'name': 'Maya Patel',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'createdAt': '2026-11-27T08:05:00Z',
+          'updatedAt': '2026-11-27T08:05:00Z',
+          'lastFullScanAt': '2026-11-27T08:05:00Z',
+        },
+      ],
+      'deletedGuestIds': <String, String>{},
+      'delistedWebsiteVins': <String, String>{},
+      'matches': [
+        {
+          'id': 'm-sold-1',
+          'guestId': 'guest-sync-1',
+          'vin': '1FMEE5DP0TLB77777',
+          'title': '2026 Ford Bronco Badlands',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'price': 56900.0,
+          'foundAt': '2026-11-27T08:00:00Z',
+          'lastSeenAt': '2026-11-27T08:00:00Z',
+        },
+        {
+          'id': 'm-sold-2',
+          'guestId': 'guest-sync-2',
+          'vin': '1FMEE5DP0TLB77777',
+          'title': '2026 Ford Bronco Badlands',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'price': 56900.0,
+          'foundAt': '2026-11-27T08:05:00Z',
+          'lastSeenAt': '2026-11-27T08:05:00Z',
+        },
+        {
+          'id': 'm-keep-1',
+          'guestId': 'guest-sync-1',
+          'vin': '1FMDE5BH0TLB88888',
+          'title': '2026 Ford Bronco Big Bend',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'price': 44900.0,
+          'foundAt': '2026-11-27T08:00:00Z',
+          'lastSeenAt': '2026-11-27T08:00:00Z',
+        },
+      ],
+    };
+
+    final freshDeviceSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-sync-1',
+          'name': 'Noah Bennett',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'createdAt': '2026-11-27T08:00:00Z',
+          'updatedAt': '2026-11-27T14:00:00Z',
+          'lastFullScanAt': '2026-11-27T14:00:00Z',
+        },
+      ],
+      'deletedGuestIds': <String, String>{},
+      'delistedWebsiteVins': <String, String>{
+        '1FMEE5DP0TLB77777': '2026-11-27T14:00:00Z',
+      },
+      'matches': [
+        {
+          'id': 'm-keep-1',
+          'guestId': 'guest-sync-1',
+          'vin': '1FMDE5BH0TLB88888',
+          'title': '2026 Ford Bronco Big Bend',
+          'make': 'Ford',
+          'model': 'Bronco',
+          'price': 44900.0,
+          'foundAt': '2026-11-27T08:00:00Z',
+          'lastSeenAt': '2026-11-27T14:00:00Z',
+        },
+      ],
+    };
+
+    // Merge in BOTH directions: sold VIN 1FMEE5DP0TLB77777 must be removed from BOTH guest-sync-1 and guest-sync-2!
+    final mergedStaleToFresh =
+        LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: staleDeviceSnapshot,
+      deviceBSnapshot: freshDeviceSnapshot,
+    );
+    final matchesA = mergedStaleToFresh['matches'] as List<dynamic>;
+    expect(matchesA.length, 1);
+    expect((matchesA.first as Map)['vin'], '1FMDE5BH0TLB88888');
+
+    final mergedFreshToStale =
+        LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: freshDeviceSnapshot,
+      deviceBSnapshot: staleDeviceSnapshot,
+    );
+    final matchesB = mergedFreshToStale['matches'] as List<dynamic>;
+    expect(matchesB.length, 1);
+    expect((matchesB.first as Map)['vin'], '1FMDE5BH0TLB88888');
+
+    LocalScoutEngine.resetForTest();
+  });
 }
 
 

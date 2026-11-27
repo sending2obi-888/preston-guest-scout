@@ -151,6 +151,7 @@ class _MainShellScreenState extends State<MainShellScreen>
     // Keep status and twice-daily match counts & notifications fresh automatically
     _pollTimer = Timer.periodic(const Duration(seconds: 25), (_) {
       _refreshAll(silent: true);
+      unawaited(_reconcileWebsiteInventorySilently());
     });
   }
 
@@ -238,6 +239,15 @@ class _MainShellScreenState extends State<MainShellScreen>
     );
   }
 
+  Future<void> _reconcileWebsiteInventorySilently({bool force = false}) async {
+    try {
+      final res = await ApiService.verifyWebsiteInventory(force: force);
+      if (res.verified && res.removedCount > 0 && mounted) {
+        await _refreshAll(silent: true);
+      }
+    } catch (_) {}
+  }
+
   /// Automatically queries Google Drive every time the app is opened or foregrounded
   /// on any device so search requirements and matches are always up to date.
   @override
@@ -248,6 +258,7 @@ class _MainShellScreenState extends State<MainShellScreen>
       }
       unawaited(MatchNotificationService.instance.refreshPermissionStatus());
       _queryDriveAndRefresh();
+      unawaited(_reconcileWebsiteInventorySilently(force: true));
     }
   }
 
@@ -271,6 +282,7 @@ class _MainShellScreenState extends State<MainShellScreen>
       );
     }
     await _queryDriveAndRefresh();
+    unawaited(_reconcileWebsiteInventorySilently());
   }
 
   Future<void> _queryDriveAndRefresh() async {

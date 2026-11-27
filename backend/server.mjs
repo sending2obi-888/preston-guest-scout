@@ -26,6 +26,7 @@ import {
   runSearchForAllActiveGuests,
   startTwiceDailyScheduler,
   pruneNonMatchingMatchesForGuest,
+  reconcileWebsiteMatches,
 } from './scheduler.mjs';
 import { getCalendarStatus } from './calendar_sync.mjs';
 import {
@@ -424,6 +425,7 @@ const server = http.createServer(async (req, res) => {
 
     // List ALL guests (Unlimited guest inputs)
     if (pathname === '/api/guests' && req.method === 'GET') {
+      reconcileWebsiteMatches().catch(() => {});
       const rows = db
         .prepare('SELECT * FROM guests ORDER BY created_at DESC')
         .all();
@@ -577,6 +579,22 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, ...result });
     }
 
+    // Verify all stored vehicle matches across all searches against live prestonmotor.com inventory
+    if (pathname === '/api/guests/verify-website' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const reconcileRes = await reconcileWebsiteMatches({
+        force: Boolean(body.force),
+      });
+      const rows = db
+        .prepare('SELECT * FROM guests ORDER BY created_at DESC')
+        .all();
+      return sendJson(res, 200, {
+        ok: true,
+        ...reconcileRes,
+        guests: rows.map(mapGuestRow),
+      });
+    }
+
     // Single guest routes: /api/guests/:id, /api/guests/:id/matches, /api/guests/:id/search, /api/guests/:id/vehicles(/:targetId)
     const guestRouteMatch = pathname.match(
       /^\/api\/guests\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?$/
@@ -710,6 +728,27 @@ const server = http.createServer(async (req, res) => {
           guest: mapGuestRow(updatedGuestRow),
           matches: matchRows.map(mapMatchRow),
           match: mapMatchRow(updatedMatchRow),
+        });
+      }
+
+      if (subResource === 'verify-website' && !subId && req.method === 'POST') {
+        const checkRow = db.prepare('SELECT id FROM guests WHERE id = ?').get(guestId);
+        if (!checkRow) return sendJson(res, 404, { error: 'Guest not found' });
+        const reconcileRes = await reconcileWebsiteMatches({
+          guestId,
+          force: true,
+        });
+        const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        const matchRows = db
+          .prepare(
+            'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
+          )
+          .all(guestId);
+        return sendJson(res, 200, {
+          ok: true,
+          ...reconcileRes,
+          guest: mapGuestRow(row),
+          matches: matchRows.map(mapMatchRow),
         });
       }
 

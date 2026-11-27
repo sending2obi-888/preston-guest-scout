@@ -9,7 +9,10 @@ import {
   formatMatchNotificationMessage,
   mapNotificationRow,
 } from './db.mjs';
-import { searchPrestonInventory } from './preston_scraper.mjs';
+import {
+  searchPrestonInventoryWithMeta,
+  verifyVinsOnPrestonWebsite,
+} from './preston_scraper.mjs';
 import {
   evaluateInventoryWithGeminiAgent,
   resolveMatchingTargetForStoredMatch,
@@ -166,9 +169,197 @@ export function pruneNonMatchingMatchesForGuest(guestId) {
   return removed;
 }
 
+const upsertDelistedVinStmt = db.prepare(`
+  INSERT INTO delisted_website_vins (vin, delisted_at)
+  VALUES (?, ?)
+  ON CONFLICT(vin) DO UPDATE SET
+    delisted_at = CASE
+      WHEN excluded.delisted_at >= delisted_website_vins.delisted_at THEN excluded.delisted_at
+      ELSE delisted_website_vins.delisted_at
+    END
+`);
+
+const deleteDelistedVinStmt = db.prepare(`
+  DELETE FROM delisted_website_vins WHERE vin = ?
+`);
+
+function capDelistedVinsTable() {
+  try {
+    db.exec(`
+      DELETE FROM delisted_website_vins
+       WHERE vin NOT IN (
+         SELECT vin FROM delisted_website_vins ORDER BY delisted_at DESC LIMIT 2000
+       )
+    `);
+  } catch {}
+}
+
+let lastGlobalWebsiteReconcileMs = 0;
+
+/**
+ * Verifies stored match VINs directly against live prestonmotor.com New & Pre-Owned inventory
+ * and removes any vehicle that is no longer listed on the website across ALL searches.
+ */
+export async function reconcileWebsiteMatches({ guestId = null, force = false } = {}) {
+  const nowMs = Date.now();
+  if (!guestId && !force && nowMs - lastGlobalWebsiteReconcileMs < 45_000) {
+    return { verified: true, throttled: true, removedCount: 0, removedVins: [] };
+  }
+
+  const rows = guestId
+    ? db.prepare('SELECT id, guest_id, vin FROM matches WHERE guest_id = ?').all(guestId)
+    : db.prepare('SELECT id, guest_id, vin FROM matches').all();
+
+  if (rows.length === 0) {
+    if (!guestId) lastGlobalWebsiteReconcileMs = nowMs;
+    return { verified: true, removedCount: 0, removedVins: [] };
+  }
+
+  const uniqueVins = [
+    ...new Set(
+      rows
+        .map((r) => String(r.vin || '').trim().toUpperCase())
+        .filter(Boolean)
+    ),
+  ];
+
+  const { verified, liveByVin } = await verifyVinsOnPrestonWebsite(uniqueVins);
+  if (!verified) {
+    return { verified: false, removedCount: 0, removedVins: [] };
+  }
+
+  if (!guestId) {
+    lastGlobalWebsiteReconcileMs = Date.now();
+  }
+
+  const nowIso = new Date().toISOString();
+  const delistedVins = uniqueVins.filter((vin) => !liveByVin.has(vin));
+  const affectedGuestIds = new Set(rows.map((r) => r.guest_id));
+  let removedCount = 0;
+
+  const delAcrossAllByVinStmt = db.prepare(
+    'DELETE FROM matches WHERE UPPER(TRIM(vin)) = ?'
+  );
+  const refreshLiveMatchStmt = db.prepare(`
+    UPDATE matches
+       SET price = ?,
+           msrp = ?,
+           dealer_fee = ?,
+           location = ?,
+           mileage = ?,
+           photo_url = CASE WHEN ? != '' THEN ? ELSE photo_url END,
+           listing_url = CASE WHEN ? != '' THEN ? ELSE listing_url END,
+           last_seen_at = ?
+     WHERE UPPER(TRIM(vin)) = ?
+  `);
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const goneVin of delistedVins) {
+      upsertDelistedVinStmt.run(goneVin, nowIso);
+      const affected = db
+        .prepare('SELECT DISTINCT guest_id FROM matches WHERE UPPER(TRIM(vin)) = ?')
+        .all(goneVin);
+      for (const a of affected) {
+        if (a.guest_id) affectedGuestIds.add(a.guest_id);
+      }
+      const info = delAcrossAllByVinStmt.run(goneVin);
+      removedCount += Number(info.changes || 0);
+    }
+
+    for (const [liveVin, v] of liveByVin.entries()) {
+      deleteDelistedVinStmt.run(liveVin);
+      refreshLiveMatchStmt.run(
+        v.price ?? null,
+        v.msrp ?? null,
+        v.dealerFee ?? null,
+        v.location || 'Preston Automotive Group',
+        v.mileage ?? 0,
+        v.photoUrl || '',
+        v.photoUrl || '',
+        v.listingUrl || '',
+        v.listingUrl || '',
+        nowIso,
+        liveVin
+      );
+    }
+
+    capDelistedVinsTable();
+    db.exec('COMMIT');
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {}
+    throw err;
+  }
+
+  for (const gid of affectedGuestIds) {
+    removedCount += pruneNonMatchingMatchesForGuest(gid);
+  }
+
+  if (removedCount > 0) {
+    const touchGuestStmt = db.prepare('UPDATE guests SET updated_at = ? WHERE id = ?');
+    for (const gid of affectedGuestIds) {
+      touchGuestStmt.run(nowIso, gid);
+    }
+    scheduleAutoSaveToGoogleDrive();
+  }
+
+  return {
+    verified: true,
+    removedCount,
+    removedVins: delistedVins,
+  };
+}
+
+async function purgeConfirmedDelistedVinsAcrossAllSearches(candidateGoneVins, nowIso) {
+  const unique = [
+    ...new Set(
+      Array.from(candidateGoneVins || [])
+        .map((v) => String(v || '').trim().toUpperCase())
+        .filter((v) => v.length >= 8)
+    ),
+  ];
+  if (unique.length === 0) return 0;
+
+  const { verified, liveByVin } = await verifyVinsOnPrestonWebsite(unique);
+  if (!verified) return 0;
+
+  const trulyGone = unique.filter((vin) => !liveByVin.has(vin));
+  if (trulyGone.length === 0) return 0;
+
+  const delAcrossAllStmt = db.prepare('DELETE FROM matches WHERE UPPER(TRIM(vin)) = ?');
+  const touchGuestStmt = db.prepare('UPDATE guests SET updated_at = ? WHERE id = ?');
+  let purgedOtherRows = 0;
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const goneVin of trulyGone) {
+      upsertDelistedVinStmt.run(goneVin, nowIso);
+      const otherGuests = db
+        .prepare('SELECT DISTINCT guest_id FROM matches WHERE UPPER(TRIM(vin)) = ?')
+        .all(goneVin);
+      const info = delAcrossAllStmt.run(goneVin);
+      purgedOtherRows += Number(info.changes || 0);
+      for (const og of otherGuests) {
+        if (og.guest_id) touchGuestStmt.run(nowIso, og.guest_id);
+      }
+    }
+    capDelistedVinsTable();
+    db.exec('COMMIT');
+  } catch {
+    try {
+      db.exec('ROLLBACK');
+    } catch {}
+  }
+  return purgedOtherRows;
+}
+
 async function evaluateTargetsForGuest(guest, targetsToRun) {
   let totalCandidatesScanned = 0;
   let anyFetchSucceeded = false;
+  const succeededTargetIds = new Set();
+  const scannedCandidateVins = new Set();
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
   const bestByVin = new Map();
   const targetSummaries = [];
@@ -196,8 +387,17 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
       notes: target.notes || '',
     };
 
-    const candidates = await searchPrestonInventory(virtualGuestSpec);
-    anyFetchSucceeded = true;
+    const { vehicles: candidates, fetchSucceeded } =
+      await searchPrestonInventoryWithMeta(virtualGuestSpec);
+    if (fetchSucceeded) {
+      anyFetchSucceeded = true;
+      if (target.id) succeededTargetIds.add(target.id);
+    }
+    for (const c of candidates) {
+      const cv = String(c?.vin || '').trim().toUpperCase();
+      if (cv) scannedCandidateVins.add(cv);
+    }
+
     const evaluation = await evaluateInventoryWithGeminiAgent(virtualGuestSpec, candidates);
     totalCandidatesScanned += candidates.length;
     modeUsed = evaluation.mode;
@@ -227,6 +427,8 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
   return {
     candidatesScanned: totalCandidatesScanned,
     anyFetchSucceeded,
+    succeededTargetIds,
+    scannedCandidateVins,
     matches: combinedMatches,
     mode: modeUsed,
     summary,
@@ -271,7 +473,20 @@ function persistEvaluatedMatchesAndNotifications({
 
   const createdNotifications = [];
   const vehiclesNeedingCallEvent = [];
+  const removedVins = new Set();
   const canPruneLive = Boolean(evalRes.anyFetchSucceeded || evalRes.candidatesScanned > 0);
+  const foundVinsUpper = new Set(
+    evalRes.matches.map((m) => String(m?.vehicle?.vin || '').trim().toUpperCase()).filter(Boolean)
+  );
+
+  if (preservedMatchesByVin instanceof Map && canPruneLive) {
+    for (const prevVin of preservedMatchesByVin.keys()) {
+      const upper = String(prevVin || '').trim().toUpperCase();
+      if (upper && !foundVinsUpper.has(upper)) {
+        removedVins.add(upper);
+      }
+    }
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -284,6 +499,7 @@ function persistEvaluatedMatchesAndNotifications({
           !foundVins.has(r.vin)
         ) {
           delStmt.run(r.id);
+          if (r.vin) removedVins.add(String(r.vin).trim().toUpperCase());
         }
       }
     } else if (onlyTargetId && canPruneLive) {
@@ -297,6 +513,7 @@ function persistEvaluatedMatchesAndNotifications({
           (r.target_id && !validTargetIds.has(r.target_id));
         if (belongsToEdited && !foundVins.has(r.vin)) {
           delStmt.run(r.id);
+          if (r.vin) removedVins.add(String(r.vin).trim().toUpperCase());
         }
       }
     }
@@ -305,6 +522,8 @@ function persistEvaluatedMatchesAndNotifications({
       const v = m.vehicle;
       const vin = String(v.vin || '').trim();
       if (!vin) continue;
+
+      deleteDelistedVinStmt.run(vin.toUpperCase());
 
       const isBrandNewMatch = !seenVins.has(vin);
       seenVins.add(vin);
@@ -385,22 +604,37 @@ function persistEvaluatedMatchesAndNotifications({
       }
     }
 
+    const updatedTargets = allTargets.map((t) =>
+      canPruneLive && evalRes.succeededTargetIds?.has(t.id)
+        ? { ...t, lastSearchedAt: nowIso }
+        : t
+    );
+    const isFullGuestScan =
+      canPruneLive &&
+      (!onlyTargetId || allTargets.length <= 1) &&
+      allTargets.every((t) => evalRes.succeededTargetIds?.has(t.id));
+
     // Cap seen_match_vins_json and scheduled_call_vins_json at 2,500 entries per guest
     const cappedSeen = [...seenVins].slice(-2500);
     const cappedSched = [...scheduledCallVins].slice(-2500);
     db.prepare(
       `UPDATE guests
        SET initial_search_completed = 1,
+           vehicle_targets_json = ?,
            seen_match_vins_json = ?,
            scheduled_call_vins_json = ?,
            last_searched_at = ?,
+           last_full_scan_at = CASE WHEN ? IS NOT NULL THEN ? ELSE last_full_scan_at END,
            last_search_summary = ?,
            updated_at = ?
        WHERE id = ?`
     ).run(
+      JSON.stringify(updatedTargets),
       JSON.stringify(cappedSeen),
       JSON.stringify(cappedSched),
       nowIso,
+      isFullGuestScan ? nowIso : null,
+      isFullGuestScan ? nowIso : null,
       evalRes.summary,
       nowIso,
       guest.id
@@ -415,7 +649,7 @@ function persistEvaluatedMatchesAndNotifications({
   }
 
   pruneNonMatchingMatchesForGuest(guest.id);
-  return { createdNotifications, vehiclesNeedingCallEvent };
+  return { createdNotifications, vehiclesNeedingCallEvent, removedVins };
 }
 
 export async function runSearchForGuest(
@@ -463,7 +697,7 @@ export async function runSearchForGuest(
     const evalRes = await evaluateTargetsForGuest(guest, targetsToRun);
     const nowIso = new Date().toISOString();
 
-    const { createdNotifications, vehiclesNeedingCallEvent } =
+    const { createdNotifications, vehiclesNeedingCallEvent, removedVins } =
       persistEvaluatedMatchesAndNotifications({
         rawGuest,
         guest,
@@ -475,6 +709,23 @@ export async function runSearchForGuest(
         isSeedSearch,
         preservedMatchesByVin,
       });
+
+    // Verify any VINs that disappeared (and weren't seen in live candidates) so if a vehicle
+    // left prestonmotor.com it is immediately removed from ALL other searches as well.
+    if (evalRes.anyFetchSucceeded && removedVins.size > 0) {
+      const unverifiedGone = [...removedVins].filter(
+        (vin) => !evalRes.scannedCandidateVins?.has(vin)
+      );
+      if (unverifiedGone.length > 0) {
+        await purgeConfirmedDelistedVinsAcrossAllSearches(unverifiedGone, nowIso);
+      }
+    }
+
+    // If only a single target on a multi-target guest was scanned, also verify remaining targets'
+    // stored matches against prestonmotor.com so delisted vehicles on sibling targets are removed too.
+    if (onlyTargetId && allTargets.length > 1) {
+      await reconcileWebsiteMatches({ guestId: guest.id, force: true });
+    }
 
     let calendarEvent = null;
     if (!isSeedSearch && vehiclesNeedingCallEvent.length > 0) {
@@ -556,6 +807,8 @@ export async function runSearchForAllActiveGuests(
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
   const allNewNotifications = [];
   const allNewCalendarEvents = [];
+  const batchCandidateGoneVins = new Set();
+  const batchSeenLiveVins = new Set();
 
   try {
     for (const row of activeRows) {
@@ -566,8 +819,11 @@ export async function runSearchForAllActiveGuests(
         modeUsed = evalRes.mode;
         totalCandidates += evalRes.candidatesScanned;
         totalMatches += evalRes.matches.length;
+        for (const cv of evalRes.scannedCandidateVins || []) {
+          batchSeenLiveVins.add(cv);
+        }
 
-        const { createdNotifications, vehiclesNeedingCallEvent } =
+        const { createdNotifications, vehiclesNeedingCallEvent, removedVins } =
           persistEvaluatedMatchesAndNotifications({
             rawGuest: row,
             guest,
@@ -579,6 +835,11 @@ export async function runSearchForAllActiveGuests(
             isSeedSearch,
           });
         allNewNotifications.push(...createdNotifications);
+        if (evalRes.anyFetchSucceeded) {
+          for (const rv of removedVins) {
+            batchCandidateGoneVins.add(rv);
+          }
+        }
 
         if (!isSeedSearch && vehiclesNeedingCallEvent.length > 0) {
           try {
@@ -604,6 +865,18 @@ export async function runSearchForAllActiveGuests(
         console.error(`[Scheduler] Error searching for ${guest.name}:`, guestErr.message);
       }
     }
+
+    // Also verify any paused/inactive guests' stored matches + disappeared VINs against prestonmotor.com
+    const unverifiedBatchGone = [...batchCandidateGoneVins].filter(
+      (vin) => !batchSeenLiveVins.has(vin)
+    );
+    if (unverifiedBatchGone.length > 0) {
+      await purgeConfirmedDelistedVinsAcrossAllSearches(
+        unverifiedBatchGone,
+        new Date().toISOString()
+      );
+    }
+    await reconcileWebsiteMatches({ force: true });
 
     db.prepare(
       `UPDATE search_runs

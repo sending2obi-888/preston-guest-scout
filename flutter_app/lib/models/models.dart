@@ -20,6 +20,7 @@ class VehicleSearchTarget {
   final String notes;
   final String createdAt;
   final String? criteriaUpdatedAt;
+  final String? lastSearchedAt;
 
   const VehicleSearchTarget({
     required this.id,
@@ -41,11 +42,13 @@ class VehicleSearchTarget {
     this.notes = '',
     this.createdAt = '',
     this.criteriaUpdatedAt,
+    this.lastSearchedAt,
   });
 
   factory VehicleSearchTarget.fromJson(Map<String, dynamic> json) {
     final norm = NaturalLanguageVehicleParser.parseCriteriaMap(json);
     final rawCriteriaUpd = json['criteriaUpdatedAt']?.toString().trim() ?? '';
+    final rawLastSearched = json['lastSearchedAt']?.toString().trim() ?? '';
     return VehicleSearchTarget(
       id: json['id']?.toString() ?? '',
       condition: norm['condition']?.toString() ?? 'Any',
@@ -69,6 +72,7 @@ class VehicleSearchTarget {
       notes: norm['notes']?.toString() ?? '',
       createdAt: json['createdAt']?.toString() ?? '',
       criteriaUpdatedAt: rawCriteriaUpd.isEmpty ? null : rawCriteriaUpd,
+      lastSearchedAt: rawLastSearched.isEmpty ? null : rawLastSearched,
     );
   }
 
@@ -92,6 +96,7 @@ class VehicleSearchTarget {
         'notes': notes,
         'createdAt': createdAt,
         if (criteriaUpdatedAt != null) 'criteriaUpdatedAt': criteriaUpdatedAt,
+        if (lastSearchedAt != null) 'lastSearchedAt': lastSearchedAt,
       };
 
   String get label {
@@ -189,6 +194,7 @@ class GuestProfile {
   final List<String> scheduledCallVins;
   final bool active;
   final String? lastSearchedAt;
+  final String? lastFullScanAt;
   final String lastSearchSummary;
   final String createdAt;
   final String? criteriaUpdatedAt;
@@ -224,6 +230,7 @@ class GuestProfile {
     this.scheduledCallVins = const [],
     this.active = true,
     this.lastSearchedAt,
+    this.lastFullScanAt,
     this.lastSearchSummary = '',
     required this.createdAt,
     this.criteriaUpdatedAt,
@@ -236,6 +243,7 @@ class GuestProfile {
     final guestId = json['id']?.toString() ?? '';
     final createdAtStr = json['createdAt']?.toString() ?? '';
     final rawCriteriaUpd = json['criteriaUpdatedAt']?.toString().trim() ?? '';
+    final rawLastFullScan = json['lastFullScanAt']?.toString().trim() ?? '';
     final primaryFeatures = (json['features'] as List<dynamic>?)
             ?.map((e) => e.toString())
             .toList() ??
@@ -281,6 +289,7 @@ class GuestProfile {
           'notes': json['notes']?.toString() ?? '',
           'createdAt': createdAtStr,
           if (rawCriteriaUpd.isNotEmpty) 'criteriaUpdatedAt': rawCriteriaUpd,
+          if (rawLastFullScan.isNotEmpty) 'lastSearchedAt': rawLastFullScan,
         }),
       );
     }
@@ -365,6 +374,7 @@ class GuestProfile {
       scheduledCallVins: scheduledVins,
       active: json['active'] != false,
       lastSearchedAt: lastSearchedStr,
+      lastFullScanAt: rawLastFullScan.isEmpty ? null : rawLastFullScan,
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
       createdAt: createdAtStr,
       criteriaUpdatedAt: rawCriteriaUpd.isEmpty ? null : rawCriteriaUpd,
@@ -401,6 +411,7 @@ class GuestProfile {
         'notes': notes,
         'createdAt': createdAt,
         if (criteriaUpdatedAt != null) 'criteriaUpdatedAt': criteriaUpdatedAt,
+        if (lastFullScanAt != null) 'lastSearchedAt': lastFullScanAt,
       }),
     ];
   }

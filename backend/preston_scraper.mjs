@@ -274,7 +274,10 @@ async function fetchSingleCosmosPage(
     queryObj.pt = String(pageNumber);
   }
   const qs = new URLSearchParams(queryObj);
-  const url = `${BASE_URL}/api/vhcliaa/vehicle-pages/cosmos/srp/vehicles/${dealerId}/${pageId}?${qs.toString()}`;
+  const qsStr = qs
+    .toString()
+    .replace(/Vin=([^&]*)/g, (_, val) => `Vin=${val.replace(/%2C/gi, ',')}`);
+  const url = `${BASE_URL}/api/vhcliaa/vehicle-pages/cosmos/srp/vehicles/${dealerId}/${pageId}?${qsStr}`;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -387,7 +390,7 @@ function cleanKeywordFromNotes(notes) {
     .slice(0, 50);
 }
 
-export async function searchPrestonInventory(rawGuest) {
+export async function searchPrestonInventoryWithMeta(rawGuest) {
   const guest = normalizeGuestSpecs(rawGuest);
   const cfg = await refreshDealerOnConfig();
   const cond = (guest.condition || 'Any').toLowerCase();
@@ -407,6 +410,7 @@ export async function searchPrestonInventory(rawGuest) {
   }
 
   const byVin = new Map();
+  let fetchSucceeded = false;
   const make = guest.make;
   const model = guest.model;
   const trim = guest.trim;
@@ -433,6 +437,7 @@ export async function searchPrestonInventory(rawGuest) {
               maxPrice,
               facetBedLength: bedLength,
             });
+            fetchSucceeded = true;
             mergedBatch.push(...facetRes);
           } catch {
             // Ignore individual facet query error
@@ -452,6 +457,7 @@ export async function searchPrestonInventory(rawGuest) {
             { Make: make, Model: mv },
             { maxPrice }
           );
+          fetchSucceeded = true;
           mergedBatch.push(...res);
         } catch {
           // Ignore individual variant error
@@ -465,6 +471,7 @@ export async function searchPrestonInventory(rawGuest) {
         const params = { Make: make };
         if (trim) params.q = `${make} ${trim}`;
         const makeBatch = await fetchAllCosmosPages(cfg.dealerId, pageId, params, { maxPrice });
+        fetchSucceeded = true;
         mergedBatch.push(...makeBatch);
       } catch {
         // Ignore
@@ -478,6 +485,7 @@ export async function searchPrestonInventory(rawGuest) {
             { Make: make },
             { maxPrice }
           );
+          fetchSucceeded = true;
           mergedBatch.push(...fallbackMakeBatch);
         } catch {
           // Ignore
@@ -502,6 +510,7 @@ export async function searchPrestonInventory(rawGuest) {
           const kwBatch = await fetchAllCosmosPages(cfg.dealerId, pageId, queryParams, {
             maxPrice,
           });
+          fetchSucceeded = true;
           mergedBatch.push(...kwBatch);
         } catch {
           // Ignore keyword error
@@ -516,6 +525,7 @@ export async function searchPrestonInventory(rawGuest) {
         const broadBatch = await fetchAllCosmosPages(cfg.dealerId, pageId, fallbackParams, {
           maxPrice,
         });
+        fetchSucceeded = true;
         mergedBatch.push(...broadBatch);
       } catch {
         // Ignore
@@ -536,7 +546,58 @@ export async function searchPrestonInventory(rawGuest) {
     }
   }
 
-  return Array.from(byVin.values());
+  return {
+    vehicles: Array.from(byVin.values()),
+    fetchSucceeded,
+  };
+}
+
+export async function searchPrestonInventory(rawGuest) {
+  const res = await searchPrestonInventoryWithMeta(rawGuest);
+  return res.vehicles;
+}
+
+/**
+ * Verifies a list of VINs directly against live prestonmotor.com New + Pre-Owned/CPO Cosmos SRP
+ * endpoints (?Vin=V1,V2,...) in fast batches of 50. Returns { verified: true, liveByVin } ONLY
+ * when every batch succeeds on both New and Pre-Owned endpoints so transient network errors never
+ * falsely mark a vehicle as removed from the website.
+ */
+export async function verifyVinsOnPrestonWebsite(rawVins) {
+  const uniqueVins = [
+    ...new Set(
+      Array.from(rawVins || [])
+        .map((v) => String(v || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, ''))
+        .filter((v) => v.length >= 8)
+    ),
+  ];
+  if (uniqueVins.length === 0) {
+    return { verified: true, liveByVin: new Map() };
+  }
+
+  const cfg = await refreshDealerOnConfig();
+  const liveByVin = new Map();
+  const chunkSize = 50;
+
+  try {
+    for (let i = 0; i < uniqueVins.length; i += chunkSize) {
+      const chunk = uniqueVins.slice(i, i + chunkSize);
+      const vinParam = chunk.join(',');
+      const [newRes, usedRes] = await Promise.all([
+        fetchSingleCosmosPage(cfg.dealerId, cfg.newPageId, { Vin: vinParam }, 1, 1),
+        fetchSingleCosmosPage(cfg.dealerId, cfg.usedPageId, { Vin: vinParam }, 1, 1),
+      ]);
+      for (const v of [...newRes.vehicles, ...usedRes.vehicles]) {
+        const cleanVin = String(v?.vin || '').trim().toUpperCase();
+        if (cleanVin) {
+          liveByVin.set(cleanVin, v);
+        }
+      }
+    }
+    return { verified: true, liveByVin };
+  } catch {
+    return { verified: false, liveByVin: new Map() };
+  }
 }
 
 let cachedFullCatalog = {

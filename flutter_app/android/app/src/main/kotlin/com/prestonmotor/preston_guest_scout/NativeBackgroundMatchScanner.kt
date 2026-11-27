@@ -65,6 +65,11 @@ object NativeBackgroundMatchScanner {
             var storeMutated = false
             var notificationsPosted = 0
             val newNotifsToPrepend = mutableListOf<JSONObject>()
+            val delistedObj = root.optJSONObject("delistedWebsiteVins") ?: JSONObject()
+            var currentMatchesList = mutableListOf<JSONObject>()
+            for (i in 0 until matchesArr.length()) {
+                matchesArr.optJSONObject(i)?.let { currentMatchesList.add(it) }
+            }
 
             for (gi in 0 until guestsArr.length()) {
                 val guest = guestsArr.optJSONObject(gi) ?: continue
@@ -100,9 +105,15 @@ object NativeBackgroundMatchScanner {
                 }
 
                 val matchedByVin = LinkedHashMap<String, Pair<JSONObject, JSONObject>>()
+                var allTargetsSucceeded = targets.isNotEmpty()
                 for (target in targets) {
-                    val candidates = fetchCandidatesForTarget(target)
-                    for (cand in candidates) {
+                    val fetchRes = fetchCandidatesForTarget(target)
+                    if (!fetchRes.second) {
+                        allTargetsSucceeded = false
+                    } else {
+                        target.put("lastSearchedAt", nowIso)
+                    }
+                    for (cand in fetchRes.first) {
                         if (matchesTargetCriteria(target, cand)) {
                             val vin = cand.optString("vin", "").trim()
                             if (vin.isNotEmpty() && !matchedByVin.containsKey(vin)) {
@@ -113,11 +124,53 @@ object NativeBackgroundMatchScanner {
                 }
 
                 var guestChanged = false
+                if (allTargetsSucceeded) {
+                    val matchedUpper = matchedByVin.keys.map { it.uppercase(Locale.US) }.toHashSet()
+                    val nextList = mutableListOf<JSONObject>()
+                    for (existingMatch in currentMatchesList) {
+                        if (existingMatch.optString("guestId", "") != guestId) {
+                            nextList.add(existingMatch)
+                            continue
+                        }
+                        val eVin = existingMatch.optString("vin", "").trim()
+                        val pair = matchedByVin[eVin] ?: matchedByVin.entries.firstOrNull {
+                            it.key.equals(eVin, ignoreCase = true)
+                        }?.value
+                        if (pair == null || !matchedUpper.contains(eVin.uppercase(Locale.US))) {
+                            guestChanged = true
+                            storeMutated = true
+                        } else {
+                            val liveV = pair.first
+                            if (liveV.has("price")) existingMatch.put("price", liveV.optDouble("price"))
+                            if (liveV.has("msrp")) existingMatch.put("msrp", liveV.optDouble("msrp"))
+                            existingMatch.put(
+                                "location",
+                                liveV.optString("location", existingMatch.optString("location", "Preston Automotive Group"))
+                            )
+                            existingMatch.put("mileage", liveV.optInt("mileage", existingMatch.optInt("mileage", 0)))
+                            val livePhoto = liveV.optString("photoUrl", "")
+                            if (livePhoto.isNotEmpty()) existingMatch.put("photoUrl", livePhoto)
+                            val liveUrl = liveV.optString("listingUrl", "")
+                            if (liveUrl.isNotEmpty()) existingMatch.put("listingUrl", liveUrl)
+                            existingMatch.put("lastSeenAt", nowIso)
+                            delistedObj.remove(eVin.uppercase(Locale.US))
+                            nextList.add(existingMatch)
+                        }
+                    }
+                    currentMatchesList = nextList
+                    guest.put("lastFullScanAt", nowIso)
+                }
+
                 for ((vin, pair) in matchedByVin) {
                     val v = pair.first
                     val target = pair.second
+                    delistedObj.remove(vin.uppercase(Locale.US))
+                    val alreadyStoredForGuest = currentMatchesList.any {
+                        it.optString("guestId", "") == guestId &&
+                            it.optString("vin", "").equals(vin, ignoreCase = true)
+                    }
                     val isBrandNewVin = seenSet.add(vin)
-                    if (!isBrandNewVin) continue
+                    if (alreadyStoredForGuest) continue
 
                     guestChanged = true
                     storeMutated = true
@@ -159,10 +212,10 @@ object NativeBackgroundMatchScanner {
                         put("targetId", target.optString("id", ""))
                         put("targetLabel", buildTargetLabel(target))
                     }
-                    matchesArr.put(matchObj)
+                    currentMatchesList.add(matchObj)
 
                     val notifKey = "$guestId::$vin"
-                    if (existingNotifKeys.add(notifKey)) {
+                    if (isBrandNewVin && existingNotifKeys.add(notifKey)) {
                         val makeStr = v.optString("make", "")
                         val modelStr = v.optString("model", "")
                         val titleStr = v.optString("title", "")
@@ -206,25 +259,66 @@ object NativeBackgroundMatchScanner {
                     }
                 }
 
-                if (guestChanged) {
+                if (guestChanged || allTargetsSucceeded) {
                     val updatedSeenJson = JSONArray()
                     seenSet.forEach { updatedSeenJson.put(it) }
                     guest.put("seenMatchVins", updatedSeenJson)
                     guest.put("lastSearchedAt", nowIso)
-                    guest.put("updatedAt", nowIso)
+                    if (guestChanged) {
+                        guest.put("updatedAt", nowIso)
+                    }
+                }
+            }
+
+            // Direct ?Vin= batch verification across ALL remaining stored matches (including paused guests)
+            // so any vehicle no longer on prestonmotor.com is immediately purged from every search.
+            val allRemainingVins = currentMatchesList
+                .map { it.optString("vin", "").trim().uppercase(Locale.US) }
+                .filter { it.length >= 8 }
+                .distinct()
+            if (allRemainingVins.isNotEmpty()) {
+                val verifyRes = verifyVinsOnWebsite(allRemainingVins)
+                if (verifyRes.first) {
+                    val liveSet = verifyRes.second.keys
+                    val delistedSet = allRemainingVins.filter { !liveSet.contains(it) }.toHashSet()
+                    if (delistedSet.isNotEmpty()) {
+                        val affectedGuestIds = HashSet<String>()
+                        val filteredMatches = mutableListOf<JSONObject>()
+                        for (m in currentMatchesList) {
+                            val mv = m.optString("vin", "").trim().uppercase(Locale.US)
+                            if (delistedSet.contains(mv)) {
+                                delistedObj.put(mv, nowIso)
+                                val gid = m.optString("guestId", "").trim()
+                                if (gid.isNotEmpty()) affectedGuestIds.add(gid)
+                                storeMutated = true
+                            } else {
+                                filteredMatches.add(m)
+                            }
+                        }
+                        currentMatchesList = filteredMatches
+                        for (gi in 0 until guestsArr.length()) {
+                            val gObj = guestsArr.optJSONObject(gi) ?: continue
+                            if (affectedGuestIds.contains(gObj.optString("id", ""))) {
+                                gObj.put("updatedAt", nowIso)
+                            }
+                        }
+                    }
                 }
             }
 
             if (storeMutated) {
+                val finalMatchesArr = JSONArray()
+                for (m in currentMatchesList) finalMatchesArr.put(m)
                 val mergedNotifs = JSONArray()
                 for (n in newNotifsToPrepend) mergedNotifs.put(n)
                 for (i in 0 until notifsArr.length()) {
                     notifsArr.optJSONObject(i)?.let { mergedNotifs.put(it) }
                 }
-                root.put("matches", matchesArr)
+                root.put("matches", finalMatchesArr)
+                root.put("delistedWebsiteVins", delistedObj)
                 root.put("notifications", mergedNotifs)
                 storeFile.writeText(root.toString())
-                refreshWidgetCounts(context, guestsArr, matchesArr)
+                refreshWidgetCounts(context, guestsArr, finalMatchesArr)
             }
 
             return notificationsPosted
@@ -407,7 +501,33 @@ object NativeBackgroundMatchScanner {
         return ""
     }
 
-    private fun fetchCandidatesForTarget(target: JSONObject): List<JSONObject> {
+    private fun verifyVinsOnWebsite(vins: List<String>): Pair<Boolean, Map<String, JSONObject>> {
+        val unique = vins
+            .map { it.trim().uppercase(Locale.US).replace(Regex("[^A-Z0-9]"), "") }
+            .filter { it.length >= 8 }
+            .distinct()
+        if (unique.isEmpty()) return Pair(true, emptyMap())
+        val liveByVin = LinkedHashMap<String, JSONObject>()
+        val chunkSize = 50
+        var idx = 0
+        while (idx < unique.size) {
+            val end = (idx + chunkSize).coerceAtMost(unique.size)
+            val vinParam = unique.subList(idx, end).joinToString(",")
+            val newRes = querySinglePage(1446609, mapOf("Vin" to vinParam), 1)
+            val usedRes = querySinglePage(1446611, mapOf("Vin" to vinParam), 1)
+            if (!newRes.third || !usedRes.third) {
+                return Pair(false, emptyMap())
+            }
+            for (v in newRes.first + usedRes.first) {
+                val cv = v.optString("vin", "").trim().uppercase(Locale.US)
+                if (cv.isNotEmpty()) liveByVin[cv] = v
+            }
+            idx += chunkSize
+        }
+        return Pair(true, liveByVin)
+    }
+
+    private fun fetchCandidatesForTarget(target: JSONObject): Pair<List<JSONObject>, Boolean> {
         val cond = target.optString("condition", "Any").lowercase(Locale.US)
         val pageIds = when {
             cond == "new" -> listOf(1446609)
@@ -421,6 +541,7 @@ object NativeBackgroundMatchScanner {
         val variants = expandModelVariants(make, model)
         val bedFacets = bedLengthToFacetValues(bedLength)
         val byVin = LinkedHashMap<String, JSONObject>()
+        var fetchSucceeded = false
 
         for (pid in pageIds) {
             if (bedFacets.isNotEmpty()) {
@@ -435,6 +556,7 @@ object NativeBackgroundMatchScanner {
                         var page = 1
                         while (page <= totalPages && page <= 12) {
                             val res = querySinglePage(pid, fp, page, facetBedLength = bedLength)
+                            if (res.third) fetchSucceeded = true
                             totalPages = res.second
                             for (v in res.first) {
                                 val vin = v.optString("vin", "")
@@ -456,6 +578,7 @@ object NativeBackgroundMatchScanner {
                 var page = 1
                 while (page <= totalPages && page <= 12) {
                     val res = querySinglePage(pid, params, page)
+                    if (res.third) fetchSucceeded = true
                     totalPages = res.second
                     for (v in res.first) {
                         val vin = v.optString("vin", "")
@@ -467,7 +590,7 @@ object NativeBackgroundMatchScanner {
                 }
             }
         }
-        return byVin.values.toList()
+        return Pair(byVin.values.toList(), fetchSucceeded)
     }
 
     private fun querySinglePage(
@@ -475,14 +598,16 @@ object NativeBackgroundMatchScanner {
         params: Map<String, String>,
         pageNumber: Int,
         facetBedLength: String = ""
-    ): Pair<List<JSONObject>, Int> {
+    ): Triple<List<JSONObject>, Int, Boolean> {
         val qp = LinkedHashMap<String, String>(params)
         qp["pn"] = "96"
         qp["host"] = "www.prestonmotor.com"
         if (pageNumber > 1) qp["pt"] = pageNumber.toString()
 
         val queryString = qp.entries.joinToString("&") { (k, v) ->
-            "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
+            val encodedVal = URLEncoder.encode(v, "UTF-8")
+            val finalVal = if (k == "Vin") encodedVal.replace("%2C", ",", ignoreCase = true) else encodedVal
+            "${URLEncoder.encode(k, "UTF-8")}=$finalVal"
         }
         val urlStr =
             "$PRESTON_BASE/api/vhcliaa/vehicle-pages/cosmos/srp/vehicles/19398/$pageId?$queryString"
@@ -500,7 +625,7 @@ object NativeBackgroundMatchScanner {
                 setRequestProperty("Accept", "application/json")
             }
             if (conn.responseCode != 200) {
-                return Pair(emptyList(), 1)
+                return Triple(emptyList(), 1, false)
             }
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             val data = JSONObject(body)
@@ -517,9 +642,9 @@ object NativeBackgroundMatchScanner {
             val pageSize = (paging?.optInt("PageSize", 96) ?: 96).coerceAtLeast(1)
             val calcPages = (totalCount + pageSize - 1) / pageSize
             val totalPages = (paging?.optInt("TotalPages", calcPages) ?: calcPages).coerceIn(1, 15)
-            Pair(out, totalPages)
+            Triple(out, totalPages, true)
         } catch (_: Exception) {
-            Pair(emptyList(), 1)
+            Triple(emptyList(), 1, false)
         } finally {
             conn?.disconnect()
         }

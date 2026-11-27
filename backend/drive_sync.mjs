@@ -87,12 +87,23 @@ export function exportLocalSnapshot(deviceLabel = 'Preston Guest Scout Server') 
     deletedGuestIds[r.id] = r.deleted_at;
   }
 
+  const delistedRows = db
+    .prepare('SELECT vin, delisted_at FROM delisted_website_vins ORDER BY delisted_at DESC LIMIT 2000')
+    .all();
+  const delistedWebsiteVins = {};
+  for (const r of delistedRows) {
+    if (r.vin && r.delisted_at) {
+      delistedWebsiteVins[String(r.vin).trim().toUpperCase()] = String(r.delisted_at);
+    }
+  }
+
   return {
     schemaVersion: 2,
     updatedAt: new Date().toISOString(),
     updatedByDevice: deviceLabel,
     guests,
     deletedGuestIds,
+    delistedWebsiteVins,
     matches,
     backups: exportServerBackupsForDrive(),
     settings: {
@@ -117,10 +128,14 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     remote.deletedGuestIds && typeof remote.deletedGuestIds === 'object'
       ? remote.deletedGuestIds
       : {};
+  const remoteDelistedVins =
+    remote.delistedWebsiteVins && typeof remote.delistedWebsiteVins === 'object'
+      ? remote.delistedWebsiteVins
+      : {};
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    // 1. Apply remote tombstones
+    // 1. Apply remote guest delete tombstones + delisted website VIN tombstones
     const upsertDeletedStmt = db.prepare(
       `INSERT INTO deleted_guests (id, deleted_at) VALUES (?, ?)
        ON CONFLICT(id) DO UPDATE SET deleted_at = CASE
@@ -143,8 +158,29 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       }
     }
 
+    const upsertDelistedVinStmt = db.prepare(
+      `INSERT INTO delisted_website_vins (vin, delisted_at) VALUES (?, ?)
+       ON CONFLICT(vin) DO UPDATE SET delisted_at = CASE
+         WHEN excluded.delisted_at > delisted_website_vins.delisted_at THEN excluded.delisted_at
+         ELSE delisted_website_vins.delisted_at
+       END`
+    );
+    const deleteDelistedVinStmt = db.prepare('DELETE FROM delisted_website_vins WHERE vin = ?');
+
+    for (const [rawVin, rawIso] of Object.entries(remoteDelistedVins)) {
+      const cleanVin = String(rawVin || '').trim().toUpperCase();
+      const cleanIso = String(rawIso || '').trim();
+      if (!cleanVin || !cleanIso) continue;
+      upsertDelistedVinStmt.run(cleanVin, cleanIso);
+    }
+
     const allDeletedRows = db.prepare('SELECT id, deleted_at FROM deleted_guests').all();
     const localDeletedMap = new Map(allDeletedRows.map((r) => [r.id, r.deleted_at]));
+
+    const allDelistedRows = db.prepare('SELECT vin, delisted_at FROM delisted_website_vins').all();
+    const delistedVinMap = new Map(
+      allDelistedRows.map((r) => [String(r.vin || '').trim().toUpperCase(), String(r.delisted_at || '')])
+    );
 
     // 2. Merge remote guests (including conflict-free union merge of dated clientNotes, seenMatchVins, & scheduledCallVins)
     const upsertGuestStmt = db.prepare(`
@@ -153,13 +189,13 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
         vehicle_targets_json, client_notes_json, deleted_note_ids_json,
         initial_search_completed, seen_match_vins_json, scheduled_call_vins_json,
-        active, last_searched_at, last_search_summary, created_at, updated_at, criteria_updated_at
+        active, last_searched_at, last_full_scan_at, last_search_summary, created_at, updated_at, criteria_updated_at
       ) VALUES (
         @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
         @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
         @vehicle_targets_json, @client_notes_json, @deleted_note_ids_json,
         @initial_search_completed, @seen_match_vins_json, @scheduled_call_vins_json,
-        @active, @last_searched_at, @last_search_summary, @created_at, @updated_at, @criteria_updated_at
+        @active, @last_searched_at, @last_full_scan_at, @last_search_summary, @created_at, @updated_at, @criteria_updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -188,6 +224,11 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         scheduled_call_vins_json = excluded.scheduled_call_vins_json,
         active = excluded.active,
         last_searched_at = COALESCE(excluded.last_searched_at, guests.last_searched_at),
+        last_full_scan_at = CASE
+          WHEN excluded.last_full_scan_at IS NOT NULL AND (guests.last_full_scan_at IS NULL OR excluded.last_full_scan_at > guests.last_full_scan_at)
+            THEN excluded.last_full_scan_at
+          ELSE guests.last_full_scan_at
+        END,
         last_search_summary = CASE
           WHEN excluded.last_search_summary != '' THEN excluded.last_search_summary
           ELSE guests.last_search_summary
@@ -201,7 +242,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
     `);
 
     const updateOnlyNotesStmt = db.prepare(
-      'UPDATE guests SET client_notes_json = ?, deleted_note_ids_json = ?, initial_search_completed = MAX(initial_search_completed, ?), seen_match_vins_json = ?, scheduled_call_vins_json = ?, updated_at = ? WHERE id = ?'
+      'UPDATE guests SET vehicle_targets_json = ?, client_notes_json = ?, deleted_note_ids_json = ?, initial_search_completed = MAX(initial_search_completed, ?), seen_match_vins_json = ?, scheduled_call_vins_json = ?, last_full_scan_at = ?, updated_at = ? WHERE id = ?'
     );
 
     const mergeClientNotes = (localNotesArr, remoteNotesArr, localDelArr, remoteDelArr) => {
@@ -227,6 +268,25 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       return { notes, deletedNoteIds: [...delSet] };
     };
 
+    const mergeTargetSearchStamps = (baseTargets, otherTargets) => {
+      if (!Array.isArray(baseTargets) || baseTargets.length === 0) return [];
+      const otherById = new Map();
+      if (Array.isArray(otherTargets)) {
+        for (const ot of otherTargets) {
+          if (ot && ot.id) otherById.set(String(ot.id), ot);
+        }
+      }
+      return baseTargets.map((bt) => {
+        if (!bt || typeof bt !== 'object') return bt;
+        const ot = bt.id ? otherById.get(String(bt.id)) : null;
+        if (!ot) return bt;
+        const bSearch = String(bt.lastSearchedAt || '');
+        const oSearch = String(ot.lastSearchedAt || '');
+        const mergedSearch = oSearch > bSearch ? oSearch : bSearch;
+        return mergedSearch ? { ...bt, lastSearchedAt: mergedSearch } : bt;
+      });
+    };
+
     const remoteGuests = Array.isArray(remote.guests) ? remote.guests : [];
     for (const rg of remoteGuests) {
       if (!rg || !rg.id || !rg.name) continue;
@@ -236,18 +296,22 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
 
       const existing = db
         .prepare(
-          'SELECT updated_at, last_searched_at, created_at, criteria_updated_at, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json, scheduled_call_vins_json FROM guests WHERE id = ?'
+          'SELECT updated_at, last_searched_at, last_full_scan_at, created_at, criteria_updated_at, vehicle_targets_json, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json, scheduled_call_vins_json FROM guests WHERE id = ?'
         )
         .get(rg.id);
       const localStamp = existing
         ? existing.updated_at || existing.last_searched_at || existing.created_at || ''
         : '';
 
+      let localTargets = [];
       let localNotes = [];
       let localDelNotes = [];
       let localSeenVins = [];
       let localSchedVins = [];
       if (existing) {
+        try {
+          localTargets = JSON.parse(existing.vehicle_targets_json || '[]');
+        } catch {}
         try {
           localNotes = JSON.parse(existing.client_notes_json || '[]');
         } catch {}
@@ -282,6 +346,11 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           ? 1
           : 0;
 
+      const localFullScan = String(existing?.last_full_scan_at || '');
+      const remoteFullScan = String(rg.lastFullScanAt || '');
+      const mergedFullScan =
+        remoteFullScan > localFullScan ? remoteFullScan : localFullScan;
+
       const mergedNotes = mergeClientNotes(
         localNotes,
         rg.clientNotes,
@@ -290,7 +359,10 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       );
 
       if (!existing || rgStamp > localStamp) {
-        const rgTargets = Array.isArray(rg.vehicleTargets) ? rg.vehicleTargets : [];
+        const rgTargets = mergeTargetSearchStamps(
+          Array.isArray(rg.vehicleTargets) ? rg.vehicleTargets : [],
+          localTargets
+        );
         upsertGuestStmt.run({
           id: String(rg.id),
           name: String(rg.name),
@@ -316,43 +388,79 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           scheduled_call_vins_json: JSON.stringify(mergedSchedVins),
           active: rg.active === false ? 0 : 1,
           last_searched_at: rg.lastSearchedAt || null,
+          last_full_scan_at: mergedFullScan || null,
           last_search_summary: String(rg.lastSearchSummary || ''),
           created_at: String(rg.createdAt || rgStamp),
           updated_at: String(rgStamp),
           criteria_updated_at: rg.criteriaUpdatedAt ? String(rg.criteriaUpdatedAt) : null,
         });
         localChanged = true;
-      } else if (
-        mergedNotes.notes.length !== (Array.isArray(localNotes) ? localNotes.length : 0) ||
-        mergedNotes.deletedNoteIds.length !==
-          (Array.isArray(localDelNotes) ? localDelNotes.length : 0) ||
-        mergedSeenVins.length !== (Array.isArray(localSeenVins) ? localSeenVins.length : 0) ||
-        mergedSchedVins.length !== (Array.isArray(localSchedVins) ? localSchedVins.length : 0)
-      ) {
-        updateOnlyNotesStmt.run(
-          JSON.stringify(mergedNotes.notes),
-          JSON.stringify(mergedNotes.deletedNoteIds),
-          mergedInitialDone,
-          JSON.stringify(mergedSeenVins),
-          JSON.stringify(mergedSchedVins),
-          localStamp > rgStamp ? localStamp : rgStamp,
-          String(rg.id)
+      } else {
+        const updatedLocalTargets = mergeTargetSearchStamps(
+          localTargets,
+          rg.vehicleTargets
         );
-        localChanged = true;
+        const targetsChanged =
+          JSON.stringify(updatedLocalTargets) !== JSON.stringify(localTargets);
+        if (
+          targetsChanged ||
+          mergedFullScan !== localFullScan ||
+          mergedNotes.notes.length !== (Array.isArray(localNotes) ? localNotes.length : 0) ||
+          mergedNotes.deletedNoteIds.length !==
+            (Array.isArray(localDelNotes) ? localDelNotes.length : 0) ||
+          mergedSeenVins.length !== (Array.isArray(localSeenVins) ? localSeenVins.length : 0) ||
+          mergedSchedVins.length !== (Array.isArray(localSchedVins) ? localSchedVins.length : 0)
+        ) {
+          updateOnlyNotesStmt.run(
+            JSON.stringify(updatedLocalTargets),
+            JSON.stringify(mergedNotes.notes),
+            JSON.stringify(mergedNotes.deletedNoteIds),
+            mergedInitialDone,
+            JSON.stringify(mergedSeenVins),
+            JSON.stringify(mergedSchedVins),
+            mergedFullScan || null,
+            localStamp > rgStamp ? localStamp : rgStamp,
+            String(rg.id)
+          );
+          localChanged = true;
+        }
       }
     }
 
-    // 3. Merge remote matches for active guests (rejecting pre-edit or non-matching vehicles)
+    // 3. Merge remote matches for active guests (rejecting pre-edit, non-matching, or website-delisted vehicles)
     const activeGuestRows = db.prepare('SELECT * FROM guests').all();
     const activeGuestsById = new Map(
       activeGuestRows.map((row) => [row.id, mapGuestRow(row)])
     );
 
+    const isMatchDelistedOrStale = (vinRaw, seenIso, mergedGuest, matchedTarget) => {
+      const upperVin = String(vinRaw || '').trim().toUpperCase();
+      const seen = String(seenIso || '').trim();
+      if (upperVin) {
+        const delistedIso = delistedVinMap.get(upperVin) || '';
+        if (delistedIso) {
+          if (!seen || seen <= delistedIso) {
+            return true;
+          }
+          // Vehicle was seen on prestonmotor.com AFTER the delisted timestamp (relisted)
+          delistedVinMap.delete(upperVin);
+          deleteDelistedVinStmt.run(upperVin);
+        }
+      }
+      const guestScan = String(mergedGuest?.lastFullScanAt || '');
+      const targetScan = String(matchedTarget?.lastSearchedAt || '');
+      const scanCutoff = targetScan > guestScan ? targetScan : guestScan;
+      if (scanCutoff && seen && seen < scanCutoff) {
+        return true;
+      }
+      return false;
+    };
+
     const existingMatches = db.prepare('SELECT * FROM matches').all();
     const delMatchByIdStmt = db.prepare('DELETE FROM matches WHERE id = ?');
     const localMatchMap = new Map();
 
-    // Prune any existing local matches that no longer satisfy the merged guest's current criteria
+    // Prune any existing local matches that no longer satisfy criteria OR were removed from prestonmotor.com
     for (const mRow of existingMatches) {
       const mergedGuest = activeGuestsById.get(mRow.guest_id);
       if (!mergedGuest) {
@@ -363,6 +471,12 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       const mappedLocal = mapMatchRow(mRow);
       const matchedTarget = resolveMatchingTargetForStoredMatch(mappedLocal, mergedGuest);
       if (!matchedTarget) {
+        delMatchByIdStmt.run(mRow.id);
+        localChanged = true;
+        continue;
+      }
+      const localSeen = mRow.last_seen_at || mRow.found_at || '';
+      if (isMatchDelistedOrStale(mRow.vin, localSeen, mergedGuest, matchedTarget)) {
         delMatchByIdStmt.run(mRow.id);
         localChanged = true;
         continue;
@@ -441,6 +555,12 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       // Reject remote matches that do not satisfy the guest's current search criteria
       const matchedTarget = resolveMatchingTargetForStoredMatch(rm, mergedGuest);
       if (!matchedTarget) {
+        localChanged = true;
+        continue;
+      }
+
+      // Reject remote matches for vehicles no longer on prestonmotor.com
+      if (isMatchDelistedOrStale(rm.vin, rmSeen, mergedGuest, matchedTarget)) {
         localChanged = true;
         continue;
       }

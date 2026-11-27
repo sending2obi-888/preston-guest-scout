@@ -110,6 +110,32 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     } catch (_) {}
   }
 
+  Future<void> _verifyLiveWebsiteMatchesOnOpen() async {
+    if (!mounted) return;
+    try {
+      final res = await ApiService.verifyGuestWebsiteInventory(widget.guestId);
+      if (!mounted || !res.verified) return;
+      final qualified =
+          LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
+      setState(() {
+        _guest = res.guest;
+        _matches = qualified;
+        _reconcileActiveFilters(res.guest, qualified);
+      });
+      if (res.removedCount > 0) {
+        widget.onDataChanged();
+        if (!mounted) return;
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text(
+              'Removed ${res.removedCount} vehicle${res.removedCount == 1 ? '' : 's'} no longer listed on prestonmotor.com.',
+            ),
+          ),
+        );
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadData() async {
     setState(() {
       _loading = true;
@@ -126,6 +152,9 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
         _reconcileActiveFilters(res.guest, qualified);
         _loading = false;
       });
+      if (qualified.isNotEmpty) {
+        unawaited(_verifyLiveWebsiteMatchesOnOpen());
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -136,6 +165,10 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   }
 
   Future<void> _runLiveGeminiSearch() async {
+    final previousVins = _matches
+        .map((m) => m.vin.trim())
+        .where((v) => v.isNotEmpty)
+        .toSet();
     setState(() => _searchingNow = true);
     try {
       final res = await ApiService.triggerGuestSearch(widget.guestId);
@@ -143,13 +176,24 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
       if (!mounted) return;
       final qualified =
           LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
+      final nextVins = qualified
+          .map((m) => m.vin.trim())
+          .where((v) => v.isNotEmpty)
+          .toSet();
+      final removedCount = previousVins.difference(nextVins).length;
       setState(() {
         _guest = res.guest;
         _matches = qualified;
         _reconcileActiveFilters(res.guest, qualified);
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res.summary)),
+        SnackBar(
+          content: Text(
+            removedCount > 0
+                ? '${res.summary} • Removed $removedCount vehicle${removedCount == 1 ? '' : 's'} no longer on prestonmotor.com.'
+                : res.summary,
+          ),
+        ),
       );
     } catch (e) {
       if (!mounted) return;

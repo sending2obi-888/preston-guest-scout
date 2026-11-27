@@ -302,6 +302,79 @@ class ApiService {
     await fetchCalendarStatus();
   }
 
+  static Future<
+      ({
+        bool verified,
+        int removedCount,
+        List<String> removedVins,
+      })> verifyWebsiteInventory({bool force = false}) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.verifyStoredMatchesOnWebsite(force: force);
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/guests/verify-website'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({'force': force}),
+    );
+    if (res.statusCode != 200) {
+      return (verified: false, removedCount: 0, removedVins: const <String>[]);
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (
+      verified: data['verified'] == true,
+      removedCount: (data['removedCount'] as num?)?.toInt() ?? 0,
+      removedVins: (data['removedVins'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .toList(),
+    );
+  }
+
+  static Future<
+      ({
+        bool verified,
+        int removedCount,
+        List<String> removedVins,
+        GuestProfile guest,
+        List<VehicleMatch> matches,
+      })> verifyGuestWebsiteInventory(String guestId) async {
+    if (_useLocalOnDeviceEngine) {
+      final verifyRes = await LocalScoutEngine.verifyStoredMatchesOnWebsite(
+        guestId: guestId,
+        force: true,
+      );
+      final latest = await LocalScoutEngine.getGuestWithMatches(guestId);
+      return (
+        verified: verifyRes.verified,
+        removedCount: verifyRes.removedCount,
+        removedVins: verifyRes.removedVins,
+        guest: latest.guest,
+        matches: latest.matches,
+      );
+    }
+    final res = await http.post(
+      Uri.parse(
+        '$baseUrl/api/guests/${Uri.encodeComponent(guestId)}/verify-website',
+      ),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(const <String, dynamic>{}),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Failed to verify website inventory (${res.statusCode})');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    return (
+      verified: data['verified'] == true,
+      removedCount: (data['removedCount'] as num?)?.toInt() ?? 0,
+      removedVins: (data['removedVins'] as List<dynamic>? ?? const [])
+          .map((e) => e.toString())
+          .toList(),
+      guest: GuestProfile.fromJson(data['guest'] as Map<String, dynamic>),
+      matches: (data['matches'] as List<dynamic>? ?? [])
+          .map((e) => VehicleMatch.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
   static Future<({GuestProfile guest, List<VehicleMatch> matches, String summary})>
       addVehicleToGuest({
     required String guestId,
