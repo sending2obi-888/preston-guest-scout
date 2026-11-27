@@ -1066,4 +1066,113 @@ class ApiService {
       Map<String, dynamic>.from(data['result'] as Map? ?? const {}),
     );
   }
+
+  static Future<
+      ({
+        String portalUrl,
+        String accountEmail,
+        List<RecentWindowStickerEntry> recent,
+      })> fetchRecentWindowStickers() async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.getRecentWindowStickers();
+    }
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/window-sticker/recent'),
+      headers: _headers(),
+    );
+    if (res.statusCode != 200) {
+      return (
+        portalUrl: 'https://dpapp.autoipacket.com/stickerpull',
+        accountEmail: 'oonyeador@prestonmotor.com',
+        recent: const <RecentWindowStickerEntry>[],
+      );
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final recent = (data['recent'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map(
+          (e) => RecentWindowStickerEntry.fromJson(
+            Map<String, dynamic>.from(e),
+          ),
+        )
+        .toList();
+    return (
+      portalUrl: data['portalUrl']?.toString() ??
+          'https://dpapp.autoipacket.com/stickerpull',
+      accountEmail:
+          data['accountEmail']?.toString() ?? 'oonyeador@prestonmotor.com',
+      recent: recent,
+    );
+  }
+
+  static Future<
+      ({
+        WindowStickerResult result,
+        List<RecentWindowStickerEntry> recent,
+      })> pullWindowSticker(String vin) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.pullWindowSticker(vin);
+    }
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/window-sticker/pull'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{'vin': vin}),
+    );
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to pull window sticker from Auto iPacket (${res.statusCode})',
+      );
+    }
+    final rawResult =
+        Map<String, dynamic>.from(data['result'] as Map? ?? const {});
+    final inlineRel = rawResult['inlineServerPdfUrl']?.toString() ?? '';
+    if (inlineRel.startsWith('/') && baseUrl.isNotEmpty) {
+      rawResult['inlineServerPdfUrl'] = '$baseUrl$inlineRel';
+    }
+    final result = WindowStickerResult.fromJson(rawResult);
+    final recent = (data['recent'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map(
+          (e) => RecentWindowStickerEntry.fromJson(
+            Map<String, dynamic>.from(e),
+          ),
+        )
+        .toList();
+    return (result: result, recent: recent);
+  }
+
+  static Future<({String portalUrl, String username})>
+      saveStickerPullCredentials({
+    required String username,
+    required String password,
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.saveStickerPullCredentials(
+        username: username,
+        password: password,
+      );
+    }
+    final res = await http.put(
+      Uri.parse('$baseUrl/api/window-sticker/credentials'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode(<String, dynamic>{
+        'username': username,
+        'password': password,
+      }),
+    );
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) {
+      throw Exception(
+        data['error']?.toString() ??
+            'Unable to save Auto iPacket credentials (${res.statusCode})',
+      );
+    }
+    return (
+      portalUrl: data['portalUrl']?.toString() ??
+          'https://dpapp.autoipacket.com/stickerpull',
+      username: data['username']?.toString() ?? username,
+    );
+  }
 }

@@ -2247,3 +2247,284 @@ class DocumentEquivalentSearchResult {
       };
 }
 
+class WindowStickerOptionItem {
+  final String code;
+  final String description;
+  final double? price;
+
+  const WindowStickerOptionItem({
+    this.code = '',
+    required this.description,
+    this.price,
+  });
+
+  factory WindowStickerOptionItem.fromJson(Map<String, dynamic> json) {
+    return WindowStickerOptionItem(
+      code: json['code']?.toString() ?? '',
+      description: json['description']?.toString() ?? '',
+      price: (json['price'] as num?)?.toDouble(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'code': code,
+        'description': description,
+        'price': price,
+      };
+}
+
+class RecentWindowStickerEntry {
+  final String vin;
+  final int? year;
+  final String make;
+  final String model;
+  final String trim;
+  final String vehicleTitle;
+  final String pulledAt;
+  final String pdfUrl;
+  final String ipacketViewerUrl;
+  final double? totalMsrp;
+
+  const RecentWindowStickerEntry({
+    required this.vin,
+    this.year,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.vehicleTitle = '',
+    this.pulledAt = '',
+    this.pdfUrl = '',
+    this.ipacketViewerUrl = '',
+    this.totalMsrp,
+  });
+
+  String get displayTitle {
+    if (vehicleTitle.trim().isNotEmpty) return vehicleTitle.trim();
+    final parts = [
+      if (year != null) '$year',
+      if (make.trim().isNotEmpty) make.trim(),
+      if (model.trim().isNotEmpty) model.trim(),
+      if (trim.trim().isNotEmpty) trim.trim(),
+    ];
+    return parts.isEmpty ? vin : parts.join(' ');
+  }
+
+  factory RecentWindowStickerEntry.fromJson(Map<String, dynamic> json) {
+    return RecentWindowStickerEntry(
+      vin: (json['vin']?.toString() ?? '').toUpperCase().trim(),
+      year: (json['year'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      vehicleTitle: json['vehicleTitle']?.toString() ?? '',
+      pulledAt: json['pulledAt']?.toString() ?? '',
+      pdfUrl: json['pdfUrl']?.toString() ?? '',
+      ipacketViewerUrl: json['ipacketViewerUrl']?.toString() ?? '',
+      totalMsrp: (json['totalMsrp'] as num?)?.toDouble(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'vehicleTitle': vehicleTitle,
+        'pulledAt': pulledAt,
+        'pdfUrl': pdfUrl,
+        'ipacketViewerUrl': ipacketViewerUrl,
+        'totalMsrp': totalMsrp,
+      };
+}
+
+class WindowStickerResult {
+  final String vin;
+  final String portalUrl;
+  final String accountEmail;
+  final String pulledAt;
+  final int? year;
+  final String make;
+  final String model;
+  final String trim;
+  final String vehicleTitle;
+  final String bodyStyle;
+  final String exteriorColor;
+  final String interiorColor;
+  final String engine;
+  final String transmission;
+  final String drivetrain;
+  final int? cityMpg;
+  final int? highwayMpg;
+  final int? combinedMpg;
+  final double? baseMsrp;
+  final double? optionsTotal;
+  final double? destinationCharge;
+  final double? totalMsrp;
+  final List<WindowStickerOptionItem> packagesAndOptions;
+  final List<String> standardHighlights;
+  final String warrantySummary;
+  final String salesSummary;
+  final String pdfUrl;
+  final String ipacketViewerUrl;
+  final String buildDataUrl;
+  final String inlineServerPdfUrl;
+  final String fileName;
+  final int pdfSizeBytes;
+  final String pdfBase64;
+  final bool geminiAnalyzed;
+  final bool geminiToolInvoked;
+
+  const WindowStickerResult({
+    required this.vin,
+    this.portalUrl = 'https://dpapp.autoipacket.com/stickerpull',
+    this.accountEmail = 'oonyeador@prestonmotor.com',
+    this.pulledAt = '',
+    this.year,
+    this.make = '',
+    this.model = '',
+    this.trim = '',
+    this.vehicleTitle = '',
+    this.bodyStyle = '',
+    this.exteriorColor = '',
+    this.interiorColor = '',
+    this.engine = '',
+    this.transmission = '',
+    this.drivetrain = '',
+    this.cityMpg,
+    highwayMpg,
+    this.combinedMpg,
+    this.baseMsrp,
+    this.optionsTotal,
+    this.destinationCharge,
+    this.totalMsrp,
+    this.packagesAndOptions = const [],
+    this.standardHighlights = const [],
+    this.warrantySummary = '',
+    this.salesSummary = '',
+    this.pdfUrl = '',
+    this.ipacketViewerUrl = '',
+    this.buildDataUrl = '',
+    this.inlineServerPdfUrl = '',
+    this.fileName = '',
+    this.pdfSizeBytes = 0,
+    this.pdfBase64 = '',
+    this.geminiAnalyzed = false,
+    this.geminiToolInvoked = false,
+  }) : highwayMpg = highwayMpg as int?;
+
+  String get displayTitle {
+    if (vehicleTitle.trim().isNotEmpty) return vehicleTitle.trim();
+    final parts = [
+      if (year != null) '$year',
+      if (make.trim().isNotEmpty) make.trim(),
+      if (model.trim().isNotEmpty) model.trim(),
+      if (trim.trim().isNotEmpty) trim.trim(),
+    ];
+    return parts.isEmpty ? 'VIN $vin' : parts.join(' ');
+  }
+
+  bool get hasFuelEconomy =>
+      cityMpg != null || highwayMpg != null || combinedMpg != null;
+
+  bool get hasPricingBreakdown =>
+      baseMsrp != null ||
+      optionsTotal != null ||
+      destinationCharge != null ||
+      totalMsrp != null;
+
+  factory WindowStickerResult.fromJson(Map<String, dynamic> json) {
+    return WindowStickerResult(
+      vin: (json['vin']?.toString() ?? '').toUpperCase().trim(),
+      portalUrl: json['portalUrl']?.toString() ??
+          'https://dpapp.autoipacket.com/stickerpull',
+      accountEmail:
+          json['accountEmail']?.toString() ?? 'oonyeador@prestonmotor.com',
+      pulledAt: json['pulledAt']?.toString() ?? '',
+      year: (json['year'] as num?)?.toInt(),
+      make: json['make']?.toString() ?? '',
+      model: json['model']?.toString() ?? '',
+      trim: json['trim']?.toString() ?? '',
+      vehicleTitle: json['vehicleTitle']?.toString() ?? '',
+      bodyStyle: json['bodyStyle']?.toString() ?? '',
+      exteriorColor: json['exteriorColor']?.toString() ?? '',
+      interiorColor: json['interiorColor']?.toString() ?? '',
+      engine: json['engine']?.toString() ?? '',
+      transmission: json['transmission']?.toString() ?? '',
+      drivetrain: json['drivetrain']?.toString() ?? '',
+      cityMpg: (json['cityMpg'] as num?)?.toInt(),
+      highwayMpg: (json['highwayMpg'] as num?)?.toInt(),
+      combinedMpg: (json['combinedMpg'] as num?)?.toInt(),
+      baseMsrp: (json['baseMsrp'] as num?)?.toDouble(),
+      optionsTotal: (json['optionsTotal'] as num?)?.toDouble(),
+      destinationCharge: (json['destinationCharge'] as num?)?.toDouble(),
+      totalMsrp: (json['totalMsrp'] as num?)?.toDouble(),
+      packagesAndOptions:
+          (json['packagesAndOptions'] as List<dynamic>? ?? const [])
+              .whereType<Map>()
+              .map(
+                (e) => WindowStickerOptionItem.fromJson(
+                  Map<String, dynamic>.from(e),
+                ),
+              )
+              .toList(),
+      standardHighlights:
+          (json['standardHighlights'] as List<dynamic>? ?? const [])
+              .map((e) => e.toString().trim())
+              .where((s) => s.isNotEmpty)
+              .toList(),
+      warrantySummary: json['warrantySummary']?.toString() ?? '',
+      salesSummary: json['salesSummary']?.toString() ?? '',
+      pdfUrl: json['pdfUrl']?.toString() ?? '',
+      ipacketViewerUrl: json['ipacketViewerUrl']?.toString() ?? '',
+      buildDataUrl: json['buildDataUrl']?.toString() ?? '',
+      inlineServerPdfUrl: json['inlineServerPdfUrl']?.toString() ?? '',
+      fileName: json['fileName']?.toString() ?? '',
+      pdfSizeBytes: (json['pdfSizeBytes'] as num?)?.toInt() ?? 0,
+      pdfBase64: json['pdfBase64']?.toString() ?? '',
+      geminiAnalyzed: json['geminiAnalyzed'] == true,
+      geminiToolInvoked: json['geminiToolInvoked'] == true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'vin': vin,
+        'portalUrl': portalUrl,
+        'accountEmail': accountEmail,
+        'pulledAt': pulledAt,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'vehicleTitle': vehicleTitle,
+        'bodyStyle': bodyStyle,
+        'exteriorColor': exteriorColor,
+        'interiorColor': interiorColor,
+        'engine': engine,
+        'transmission': transmission,
+        'drivetrain': drivetrain,
+        'cityMpg': cityMpg,
+        'highwayMpg': highwayMpg,
+        'combinedMpg': combinedMpg,
+        'baseMsrp': baseMsrp,
+        'optionsTotal': optionsTotal,
+        'destinationCharge': destinationCharge,
+        'totalMsrp': totalMsrp,
+        'packagesAndOptions':
+            packagesAndOptions.map((e) => e.toJson()).toList(),
+        'standardHighlights': standardHighlights,
+        'warrantySummary': warrantySummary,
+        'salesSummary': salesSummary,
+        'pdfUrl': pdfUrl,
+        'ipacketViewerUrl': ipacketViewerUrl,
+        'buildDataUrl': buildDataUrl,
+        'inlineServerPdfUrl': inlineServerPdfUrl,
+        'fileName': fileName,
+        'pdfSizeBytes': pdfSizeBytes,
+        'pdfBase64': pdfBase64,
+        'geminiAnalyzed': geminiAnalyzed,
+        'geminiToolInvoked': geminiToolInvoked,
+      };
+}
+
+

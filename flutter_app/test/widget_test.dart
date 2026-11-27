@@ -9,6 +9,7 @@ import 'package:preston_guest_scout/screens/guest_matches_screen.dart';
 import 'package:preston_guest_scout/screens/home_intake_screen.dart';
 import 'package:preston_guest_scout/screens/match_detail_screen.dart';
 import 'package:preston_guest_scout/screens/vin_recall_screen.dart';
+import 'package:preston_guest_scout/screens/window_sticker_screen.dart';
 import 'package:preston_guest_scout/services/calendar_service.dart';
 import 'package:preston_guest_scout/services/document_equivalent_service.dart';
 import 'package:preston_guest_scout/services/document_picker_service.dart';
@@ -17,6 +18,7 @@ import 'package:preston_guest_scout/services/local_engine.dart';
 import 'package:preston_guest_scout/services/match_notification_service.dart';
 import 'package:preston_guest_scout/services/natural_language_parser.dart';
 import 'package:preston_guest_scout/services/nhtsa_recall_service.dart';
+import 'package:preston_guest_scout/services/window_sticker_service.dart';
 import 'package:preston_guest_scout/widgets/calendar_events_dialog.dart';
 import 'package:preston_guest_scout/widgets/match_notifications_dialog.dart';
 import 'package:preston_guest_scout/widgets/settings_and_chromebook_dialog.dart';
@@ -5008,6 +5010,224 @@ void main() {
     expect(mergedMatches.length, 1);
     expect((mergedMatches.first as Map)['isSelectedCandidate'], isTrue);
 
+    LocalScoutEngine.resetForTest();
+  });
+
+  test(
+      'WindowStickerService validates 17-character VINs, extracts embedded VINs, and defaults to Auto iPacket StickerPull credentials',
+      () {
+    expect(
+      WindowStickerService.stickerPullPortalUrl,
+      'https://dpapp.autoipacket.com/stickerpull',
+    );
+    expect(
+      WindowStickerService.defaultUsername,
+      'oonyeador@prestonmotor.com',
+    );
+    expect(WindowStickerService.defaultPassword, 'Destiny703!1*');
+
+    final valid = WindowStickerService.validateAndExtractVin(
+      '1ftfw3l87rkf38272',
+    );
+    expect(valid.valid, isTrue);
+    expect(valid.vin, '1FTFW3L87RKF38272');
+
+    final embedded = WindowStickerService.validateAndExtractVin(
+      'https://dpapp.autoipacket.com/stickerpull/3TMCZ5AN9NM453399?source=dealer',
+    );
+    expect(embedded.valid, isTrue);
+    expect(embedded.vin, '3TMCZ5AN9NM453399');
+
+    final invalidIoq = WindowStickerService.validateAndExtractVin(
+      '1FTFW3L87RKF3827I',
+    );
+    expect(invalidIoq.valid, isFalse);
+    expect(invalidIoq.error, contains('I, O, or Q'));
+
+    final shortVin = WindowStickerService.validateAndExtractVin('1FTFW3L87');
+    expect(shortVin.valid, isFalse);
+    expect(shortVin.error, contains('17 characters'));
+  });
+
+  testWidgets(
+      'MainShellScreen exposes Page 4 (Window Sticker) and WindowStickerScreen pulls OEM window sticker via Auto iPacket StickerPull and Gemini',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    const calChannel = MethodChannel('com.prestonmotor.scout/calendar');
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') {
+          return jsonEncode({
+            'schemaVersion': 2,
+            'guests': [],
+            'matches': [],
+            'settings': {'calendarPromptDismissed': true},
+          });
+        }
+        return true;
+      },
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      calChannel,
+      (call) async {
+        if (call.method == 'hasCalendarPermission') return true;
+        return null;
+      },
+    );
+
+    WindowStickerService.mockRecentHandler = () async => const [
+          RecentWindowStickerEntry(
+            vin: '3TMCZ5AN9NM453399',
+            year: 2022,
+            make: 'TOYOTA',
+            model: 'Tacoma',
+            vehicleTitle: '2022 TOYOTA Tacoma',
+            pulledAt: '2026-11-27T18:00:00Z',
+          ),
+        ];
+
+    String? pulledVin;
+    WindowStickerService.mockPullHandler = (String vin) async {
+      pulledVin = vin;
+      return WindowStickerResult(
+        vin: vin,
+        portalUrl: 'https://dpapp.autoipacket.com/stickerpull',
+        accountEmail: 'oonyeador@prestonmotor.com',
+        pulledAt: '2026-11-27T21:00:00Z',
+        year: 2024,
+        make: 'FORD',
+        model: 'F-150',
+        trim: 'XLT',
+        vehicleTitle: '2024 FORD F-150 XLT',
+        bodyStyle: 'Pickup',
+        exteriorColor: 'Oxford White',
+        interiorColor: 'Medium Dark Slate',
+        engine: '3.5L V6 EcoBoost',
+        transmission: '10-Speed Automatic',
+        drivetrain: '4WD',
+        cityMpg: 18,
+        highwayMpg: 23,
+        combinedMpg: 20,
+        baseMsrp: 52410,
+        optionsTotal: 6250,
+        destinationCharge: 1995,
+        totalMsrp: 60655,
+        packagesAndOptions: const [
+          WindowStickerOptionItem(
+            code: '302A',
+            description: 'Equipment Group 302A High',
+            price: 5955,
+          ),
+          WindowStickerOptionItem(
+            code: 'FX4',
+            description: 'FX4 Off-Road Package',
+            price: 295,
+          ),
+        ],
+        standardHighlights: const [
+          'SYNC 4 with 12-inch Touchscreen',
+          'Ford Co-Pilot360 2.0',
+          'Class IV Trailer Hitch',
+        ],
+        warrantySummary: '3yr/36,000 mi Bumper-to-Bumper • 5yr/60,000 mi Powertrain',
+        salesSummary:
+            'Well-equipped 2024 Ford F-150 XLT 4WD with Equipment Group 302A High and FX4 Off-Road Package.',
+        pdfUrl:
+            'https://djapi.autoipacket.com/v2/sticker-puller/download/1FTFW3L87RKF38272?token=mock',
+        fileName: 'WindowSticker-1FTFW3L87RKF38272.pdf',
+        pdfSizeBytes: 2130722,
+        geminiAnalyzed: true,
+        geminiToolInvoked: true,
+      );
+    };
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MainShellScreen(
+          themeMode: ThemeMode.light,
+          onToggleTheme: () {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Verify Page 4 ("Window Sticker") is present in navigation and switches cleanly
+    expect(find.text('Window Sticker'), findsOneWidget);
+    await tester.tap(find.text('Window Sticker'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(WindowStickerScreen), findsOneWidget);
+    expect(
+      find.text('Vehicle OEM Window Sticker Lookup'),
+      findsOneWidget,
+    );
+    expect(
+      find.text('oonyeador@prestonmotor.com'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('recent_sticker_chip_3TMCZ5AN9NM453399')),
+      findsOneWidget,
+    );
+
+    // Invalid short VIN shows validation message
+    await tester.enterText(
+      find.byKey(const ValueKey('window_sticker_vin_input')),
+      '1FTFW3L',
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('pull_window_sticker_button')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('window_sticker_error_banner')),
+      findsOneWidget,
+    );
+
+    // Valid 17-character VIN pulls the OEM Window Sticker & displays full Gemini breakdown
+    await tester.enterText(
+      find.byKey(const ValueKey('window_sticker_vin_input')),
+      '1FTFW3L87RKF38272',
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('pull_window_sticker_button')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(pulledVin, '1FTFW3L87RKF38272');
+    expect(
+      find.byKey(const ValueKey('window_sticker_result_card')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('window_sticker_inline_preview_card')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('window_sticker_specs_card')),
+      findsOneWidget,
+    );
+    expect(find.text('2024 FORD F-150 XLT'), findsOneWidget);
+    expect(find.text('Total MSRP: \$60,655'), findsOneWidget);
+    expect(find.text('Equipment Group 302A High'), findsOneWidget);
+    expect(find.text('FX4 Off-Road Package'), findsOneWidget);
+    expect(find.text('Oxford White'), findsOneWidget);
+    expect(find.text('18 City / 23 Hwy / 20 Comb'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('download_window_sticker_pdf_button')),
+      findsOneWidget,
+    );
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(calChannel, null);
     LocalScoutEngine.resetForTest();
   });
 }

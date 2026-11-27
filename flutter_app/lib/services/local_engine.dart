@@ -11,6 +11,7 @@ import 'match_notification_service.dart';
 import 'natural_language_parser.dart';
 import 'nhtsa_recall_service.dart';
 import 'widget_sync_service.dart';
+import 'window_sticker_service.dart';
 
 /// Self-contained on-device engine for the Android / Googlebook APK.
 /// Persists unlimited guests & matches locally, queries ALL pages of live prestonmotor.com
@@ -37,6 +38,7 @@ class LocalScoutEngine {
   static List<Map<String, dynamic>> _calendarEvents = [];
   static List<Map<String, dynamic>> _backups = [];
   static List<Map<String, dynamic>> _recallChecks = [];
+  static List<Map<String, dynamic>> _recentWindowStickers = [];
   static Map<String, String> _recallStatusOverrides = {};
   static Map<String, Map<String, dynamic>> _recallResultsByVin = {};
   static Map<String, String> _deletedGuestIds = {};
@@ -122,6 +124,12 @@ class LocalScoutEngine {
             .map((e) => Map<String, dynamic>.from(e))
             .take(15)
             .toList();
+        _recentWindowStickers =
+            (decoded['recentWindowStickers'] as List<dynamic>? ?? [])
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .take(15)
+                .toList();
         if (decoded['recallStatusOverrides'] is Map) {
           _recallStatusOverrides =
               (decoded['recallStatusOverrides'] as Map).map(
@@ -477,6 +485,7 @@ class LocalScoutEngine {
         'calendarEvents': _calendarEvents,
         'backups': _backups,
         'recallChecks': _recallChecks,
+        'recentWindowStickers': _recentWindowStickers,
         'recallStatusOverrides': _recallStatusOverrides,
         'recallResultsByVin': _recallResultsByVin,
         'deletedGuestIds': _deletedGuestIds,
@@ -5231,6 +5240,115 @@ class LocalScoutEngine {
     );
   }
 
+  static ({String username, String password}) _resolveStickerPullCreds() {
+    final savedUser = (_settings['stickerPullUsername']?.toString() ?? '').trim();
+    final savedPass = _settings['stickerPullPassword']?.toString() ?? '';
+    return (
+      username:
+          savedUser.isNotEmpty ? savedUser : WindowStickerService.defaultUsername,
+      password:
+          savedPass.isNotEmpty ? savedPass : WindowStickerService.defaultPassword,
+    );
+  }
+
+  static Future<
+      ({
+        String portalUrl,
+        String accountEmail,
+        List<RecentWindowStickerEntry> recent,
+      })> getRecentWindowStickers() async {
+    await ensureInitialized();
+    final creds = _resolveStickerPullCreds();
+    final combined = <RecentWindowStickerEntry>[
+      for (final raw in _recentWindowStickers)
+        RecentWindowStickerEntry.fromJson(raw),
+    ];
+    final seen = combined.map((e) => e.vin).toSet();
+
+    final remote = await WindowStickerService.fetchRemoteStickerHistory(
+      username: creds.username,
+      password: creds.password,
+    );
+    for (final item in remote) {
+      if (item.vin.length == 17 && !seen.contains(item.vin)) {
+        seen.add(item.vin);
+        combined.add(item);
+      }
+    }
+
+    return (
+      portalUrl: WindowStickerService.stickerPullPortalUrl,
+      accountEmail: creds.username,
+      recent: combined.take(15).toList(),
+    );
+  }
+
+  static Future<
+      ({
+        WindowStickerResult result,
+        List<RecentWindowStickerEntry> recent,
+      })> pullWindowSticker(String vin) async {
+    await ensureInitialized();
+    final creds = _resolveStickerPullCreds();
+    final apiKey = (_settings['geminiApiKey']?.toString() ?? '').trim();
+    final model =
+        (_settings['geminiModel']?.toString() ?? 'gemini-2.5-flash').trim();
+
+    final result = await WindowStickerService.pullWindowSticker(
+      rawVin: vin,
+      username: creds.username,
+      password: creds.password,
+      geminiApiKey: apiKey,
+      geminiModel: model.isNotEmpty ? model : 'gemini-2.5-flash',
+    );
+
+    final newEntry = RecentWindowStickerEntry(
+      vin: result.vin,
+      year: result.year,
+      make: result.make,
+      model: result.model,
+      trim: result.trim,
+      vehicleTitle: result.displayTitle,
+      pulledAt: result.pulledAt,
+      pdfUrl: result.pdfUrl,
+      ipacketViewerUrl: result.ipacketViewerUrl,
+      totalMsrp: result.totalMsrp,
+    );
+
+    _recentWindowStickers.removeWhere(
+      (e) => (e['vin']?.toString() ?? '').toUpperCase() == result.vin,
+    );
+    _recentWindowStickers.insert(0, newEntry.toJson());
+    if (_recentWindowStickers.length > 15) {
+      _recentWindowStickers = _recentWindowStickers.take(15).toList();
+    }
+    await _persist();
+
+    final recentList = _recentWindowStickers
+        .map(RecentWindowStickerEntry.fromJson)
+        .toList();
+    return (result: result, recent: recentList);
+  }
+
+  static Future<({String portalUrl, String username})>
+      saveStickerPullCredentials({
+    required String username,
+    required String password,
+  }) async {
+    await ensureInitialized();
+    final cleanUser = username.trim();
+    if (cleanUser.isEmpty || password.isEmpty) {
+      throw Exception('Both username and password are required.');
+    }
+    _settings['stickerPullUsername'] = cleanUser;
+    _settings['stickerPullPassword'] = password;
+    await _persist();
+    return (
+      portalUrl: WindowStickerService.stickerPullPortalUrl,
+      username: cleanUser,
+    );
+  }
+
   @visibleForTesting
   static void cancelSchedulerForTest() {
     _scheduleTimer?.cancel();
@@ -5256,12 +5374,16 @@ class LocalScoutEngine {
     _calendarEvents = [];
     _backups = [];
     _recallChecks = [];
+    _recentWindowStickers = [];
     _recallStatusOverrides = {};
     _recallResultsByVin = {};
     _deletedGuestIds = {};
     _delistedWebsiteVins = {};
+    _settings.remove('stickerPullUsername');
+    _settings.remove('stickerPullPassword');
     _settings['calendarPermissionGranted'] = false;
     _settings['calendarPromptDismissed'] = false;
+    WindowStickerService.resetMocksAndCacheForTest();
     MatchNotificationService.instance.resetForTest();
     CalendarService.instance.resetForTest();
   }

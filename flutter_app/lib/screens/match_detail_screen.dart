@@ -6,6 +6,7 @@ import '../services/api_service.dart';
 import '../widgets/copyable_identifier_badge.dart';
 import '../widgets/edit_client_contact_dialog.dart';
 import 'vin_recall_screen.dart';
+import 'window_sticker_screen.dart';
 
 class MatchDetailScreen extends StatefulWidget {
   final VehicleMatch match;
@@ -117,6 +118,22 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
           body: VinRecallScreen(
             initialVin: _match.vin,
             autoCheckOnInit: true,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openWindowSticker(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(
+            title: Text('Window Sticker • ${_match.vin}'),
+          ),
+          body: WindowStickerScreen(
+            initialVin: _match.vin,
+            autoPullOnInit: true,
           ),
         ),
       ),
@@ -383,35 +400,54 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
                               ],
                             ),
                             const SizedBox(height: 16),
-                            _match.isSelectedCandidate
-                                ? FilledButton.tonalIcon(
+                            Wrap(
+                              spacing: 10,
+                              runSpacing: 10,
+                              children: [
+                                _match.isSelectedCandidate
+                                    ? FilledButton.tonalIcon(
+                                        key: const ValueKey(
+                                          'detail_toggle_selected_candidate',
+                                        ),
+                                        onPressed: _togglingCandidate
+                                            ? null
+                                            : _toggleSelectedCandidate,
+                                        icon: const Icon(
+                                          Icons.star_rounded,
+                                          size: 19,
+                                        ),
+                                        label: const Text('Selected Candidate'),
+                                      )
+                                    : OutlinedButton.icon(
+                                        key: const ValueKey(
+                                          'detail_toggle_selected_candidate',
+                                        ),
+                                        onPressed: _togglingCandidate
+                                            ? null
+                                            : _toggleSelectedCandidate,
+                                        icon: const Icon(
+                                          Icons.star_border_rounded,
+                                          size: 19,
+                                        ),
+                                        label: const Text(
+                                          'Mark as Selected Candidate',
+                                        ),
+                                      ),
+                                if (_match.vin.trim().length == 17)
+                                  FilledButton.tonalIcon(
                                     key: const ValueKey(
-                                      'detail_toggle_selected_candidate',
+                                      'detail_pull_window_sticker_button',
                                     ),
-                                    onPressed: _togglingCandidate
-                                        ? null
-                                        : _toggleSelectedCandidate,
+                                    onPressed: () =>
+                                        _openWindowSticker(context),
                                     icon: const Icon(
-                                      Icons.star_rounded,
-                                      size: 19,
+                                      Icons.receipt_long_outlined,
+                                      size: 18,
                                     ),
-                                    label: const Text('Selected Candidate'),
-                                  )
-                                : OutlinedButton.icon(
-                                    key: const ValueKey(
-                                      'detail_toggle_selected_candidate',
-                                    ),
-                                    onPressed: _togglingCandidate
-                                        ? null
-                                        : _toggleSelectedCandidate,
-                                    icon: const Icon(
-                                      Icons.star_border_rounded,
-                                      size: 19,
-                                    ),
-                                    label: const Text(
-                                      'Mark as Selected Candidate',
-                                    ),
+                                    label: const Text('Pull Window Sticker'),
                                   ),
+                              ],
+                            ),
                           ],
                         ),
                       );

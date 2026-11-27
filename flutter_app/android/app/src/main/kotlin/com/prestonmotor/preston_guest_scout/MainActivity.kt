@@ -46,6 +46,7 @@ class MainActivity : FlutterActivity() {
         const val AUTH_CHANNEL = "com.prestonmotor.scout/google_auth"
         const val NOTIF_CHANNEL = "com.prestonmotor.scout/notifications"
         const val CALENDAR_CHANNEL = "com.prestonmotor.scout/calendar"
+        const val WINDOW_STICKER_CHANNEL = "com.prestonmotor.scout/window_sticker"
         const val MATCH_ALERT_CHANNEL_ID = MatchNotificationHelper.MATCH_ALERT_CHANNEL_ID
         const val PREFS_NAME = "preston_scout_widget_prefs"
         const val KEY_RECENT_TEN_JSON = "recent_ten_guests_json"
@@ -1025,6 +1026,77 @@ class MainActivity : FlutterActivity() {
                         timeZoneId = timeZoneId
                     )
                     result.success(resMap)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // 5. Window Sticker Native PDF Page Renderer (android.graphics.pdf.PdfRenderer)
+        val wsChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WINDOW_STICKER_CHANNEL)
+        wsChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "renderPdfPages" -> {
+                    val pdfBytes = call.argument<ByteArray>("pdfBytes")
+                    val maxPages = (call.argument<Number>("maxPages")?.toInt() ?: 4).coerceIn(1, 8)
+                    val targetWidth = (call.argument<Number>("targetWidth")?.toInt() ?: 1600).coerceIn(720, 2400)
+                    if (pdfBytes == null || pdfBytes.isEmpty()) {
+                        result.success(emptyList<ByteArray>())
+                        return@setMethodCallHandler
+                    }
+                    Thread {
+                        var tempFile: File? = null
+                        var pfd: android.os.ParcelFileDescriptor? = null
+                        var renderer: android.graphics.pdf.PdfRenderer? = null
+                        try {
+                            tempFile = File.createTempFile("window_sticker_", ".pdf", cacheDir)
+                            tempFile.writeBytes(pdfBytes)
+                            pfd = android.os.ParcelFileDescriptor.open(
+                                tempFile,
+                                android.os.ParcelFileDescriptor.MODE_READ_ONLY
+                            )
+                            renderer = android.graphics.pdf.PdfRenderer(pfd)
+                            val count = renderer.pageCount.coerceAtMost(maxPages)
+                            val renderedPages = ArrayList<ByteArray>(count)
+                            for (i in 0 until count) {
+                                val page = renderer.openPage(i)
+                                try {
+                                    val w = targetWidth
+                                    val aspect = if (page.width > 0) page.height.toDouble() / page.width.toDouble() else 1.3
+                                    val h = (w * aspect).toInt().coerceIn(400, 3600)
+                                    val bitmap = android.graphics.Bitmap.createBitmap(
+                                        w,
+                                        h,
+                                        android.graphics.Bitmap.Config.ARGB_8888
+                                    )
+                                    val canvas = android.graphics.Canvas(bitmap)
+                                    canvas.drawColor(android.graphics.Color.WHITE)
+                                    page.render(
+                                        bitmap,
+                                        null,
+                                        null,
+                                        android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY
+                                    )
+                                    val out = ByteArrayOutputStream()
+                                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 92, out)
+                                    bitmap.recycle()
+                                    renderedPages.add(out.toByteArray())
+                                } finally {
+                                    page.close()
+                                }
+                            }
+                            runOnUiThread {
+                                result.success(renderedPages)
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.success(emptyList<ByteArray>())
+                            }
+                        } finally {
+                            try { renderer?.close() } catch (_: Exception) {}
+                            try { pfd?.close() } catch (_: Exception) {}
+                            try { tempFile?.delete() } catch (_: Exception) {}
+                        }
+                    }.start()
                 }
                 else -> result.notImplemented()
             }

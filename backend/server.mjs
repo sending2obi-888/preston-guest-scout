@@ -43,6 +43,13 @@ import {
   updateVinRecallCampaignStatus,
 } from './nhtsa_recall_agent.mjs';
 import { findClosestEquivalentsFromDocument } from './document_equivalents_agent.mjs';
+import {
+  pullWindowStickerByVin,
+  listRecentWindowStickers,
+  getWindowStickerPdfForVin,
+  getStickerPullCredentials,
+  updateStickerPullCredentials,
+} from './window_sticker_service.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_BUILD_DIR = path.resolve(__dirname, '../flutter_app/build/web');
@@ -1353,6 +1360,95 @@ const server = http.createServer(async (req, res) => {
           error:
             err.message ||
             'Unable to analyze uploaded document for closest prestonmotor.com vehicles.',
+        });
+      }
+    }
+
+    // Auto iPacket StickerPull (dpapp.autoipacket.com/stickerpull) + Gemini Window Sticker endpoints
+    if (pathname === '/api/window-sticker/recent' && req.method === 'GET') {
+      const creds = getStickerPullCredentials();
+      const recent = await listRecentWindowStickers();
+      return sendJson(res, 200, {
+        ok: true,
+        portalUrl: creds.portalUrl,
+        accountEmail: creds.username,
+        recent,
+      });
+    }
+
+    if (
+      pathname === '/api/window-sticker/credentials' &&
+      (req.method === 'GET' || req.method === 'PUT' || req.method === 'POST')
+    ) {
+      if (req.method === 'GET') {
+        const creds = getStickerPullCredentials();
+        return sendJson(res, 200, {
+          ok: true,
+          portalUrl: creds.portalUrl,
+          username: creds.username,
+          hasCustomCredentials: creds.hasCustomCredentials,
+        });
+      }
+      const body = await readJsonBody(req);
+      try {
+        const updated = updateStickerPullCredentials({
+          username: body.username,
+          password: body.password,
+        });
+        return sendJson(res, 200, { ok: true, ...updated });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error: err.message || 'Unable to update Auto iPacket StickerPull credentials.',
+        });
+      }
+    }
+
+    if (
+      pathname === '/api/window-sticker/pull' &&
+      (req.method === 'POST' || req.method === 'GET')
+    ) {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const vin = String(body.vin || parsedUrl.searchParams.get('vin') || '').trim();
+      try {
+        const result = await pullWindowStickerByVin(vin, {
+          includeBase64Pdf: body.includeBase64Pdf !== false,
+        });
+        const recent = await listRecentWindowStickers();
+        return sendJson(res, 200, {
+          ok: true,
+          result,
+          recent,
+        });
+      } catch (err) {
+        const code = Number(err.statusCode) || 500;
+        return sendJson(res, code, {
+          error: err.message || 'Unable to pull window sticker from Auto iPacket.',
+        });
+      }
+    }
+
+    const stickerPdfRoute = pathname.match(/^\/api\/window-sticker\/pdf\/([^/]+)$/);
+    if (stickerPdfRoute && (req.method === 'GET' || req.method === 'HEAD')) {
+      const vin = decodeURIComponent(stickerPdfRoute[1]);
+      try {
+        const pdfEntry = await getWindowStickerPdfForVin(vin);
+        if (!pdfEntry || !pdfEntry.buffer) {
+          return sendJson(res, 404, { error: 'Window Sticker PDF not found for VIN.' });
+        }
+        const forceDownload = parsedUrl.searchParams.get('download') === '1';
+        res.writeHead(200, {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `${forceDownload ? 'attachment' : 'inline'}; filename="${pdfEntry.fileName}"`,
+          'Content-Length': pdfEntry.buffer.length,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'private, max-age=1800',
+        });
+        if (req.method === 'HEAD') return res.end();
+        return res.end(pdfEntry.buffer);
+      } catch (err) {
+        return sendJson(res, Number(err.statusCode) || 502, {
+          error: err.message || 'Unable to stream Window Sticker PDF.',
         });
       }
     }

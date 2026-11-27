@@ -7,6 +7,7 @@ import 'screens/guest_matches_screen.dart';
 import 'screens/home_intake_screen.dart';
 import 'screens/match_detail_screen.dart';
 import 'screens/vin_recall_screen.dart';
+import 'screens/window_sticker_screen.dart';
 import 'services/api_service.dart';
 import 'services/calendar_service.dart';
 import 'services/google_drive_sync_service.dart';
@@ -407,6 +408,10 @@ class _MainShellScreenState extends State<MainShellScreen>
         status: _status,
         onOpenSettings: _openSettingsDialog,
       ),
+      WindowStickerScreen(
+        status: _status,
+        onOpenSettings: _openSettingsDialog,
+      ),
     ];
 
     return Scaffold(
@@ -606,6 +611,11 @@ class _MainShellScreenState extends State<MainShellScreen>
                       selectedIcon: Icon(Icons.verified_user_rounded),
                       label: Text('VIN Recall Check'),
                     ),
+                    const NavigationRailDestination(
+                      icon: Icon(Icons.receipt_long_outlined),
+                      selectedIcon: Icon(Icons.receipt_long_rounded),
+                      label: Text('Window Sticker'),
+                    ),
                   ],
                 ),
                 VerticalDivider(
@@ -645,6 +655,11 @@ class _MainShellScreenState extends State<MainShellScreen>
                   icon: Icon(Icons.verified_user_outlined),
                   selectedIcon: Icon(Icons.verified_user_rounded),
                   label: 'VIN Recalls',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.receipt_long_outlined),
+                  selectedIcon: Icon(Icons.receipt_long_rounded),
+                  label: 'Window Sticker',
                 ),
               ],
             ),
