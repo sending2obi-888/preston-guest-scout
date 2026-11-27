@@ -3,6 +3,8 @@ import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../services/google_drive_sync_service.dart';
+import '../services/local_engine.dart';
 import '../services/natural_language_parser.dart';
 import '../widgets/add_vehicle_criteria_dialog.dart';
 import '../widgets/copyable_identifier_badge.dart';
@@ -50,14 +52,62 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
   @override
   void initState() {
     super.initState();
+    GoogleDriveSyncService.instance.addCloudMergeListener(_reloadSilently);
     _loadData();
   }
 
   @override
   void dispose() {
+    GoogleDriveSyncService.instance.removeCloudMergeListener(_reloadSilently);
     _searchCtrl.dispose();
     _newNoteCtrl.dispose();
     super.dispose();
+  }
+
+  void _reconcileActiveFilters(
+    GuestProfile updatedGuest,
+    List<VehicleMatch> updatedMatches,
+  ) {
+    final validTargetIds =
+        updatedGuest.effectiveTargets.map((t) => t.id).toSet();
+    if (_selectedTargetId != _allVehiclesFilter &&
+        !validTargetIds.contains(_selectedTargetId)) {
+      _selectedTargetId = _allVehiclesFilter;
+    }
+    if (_onlySelectedCandidates &&
+        !updatedMatches.any((m) => m.isSelectedCandidate)) {
+      _onlySelectedCandidates = false;
+    }
+    if (_selectedLocation == _allMillsboroFilter) {
+      final hasMillsboro = updatedMatches.any((m) {
+        final lower = m.location.toLowerCase();
+        return lower.contains('millsboro') || lower.contains('boulevard');
+      });
+      if (!hasMillsboro) {
+        _selectedLocation = _allLocationsFilter;
+      }
+    } else if (_selectedLocation != _allLocationsFilter) {
+      final hasSelectedLoc = updatedMatches
+          .any((m) => m.location.trim() == _selectedLocation);
+      if (!hasSelectedLoc) {
+        _selectedLocation = _allLocationsFilter;
+      }
+    }
+  }
+
+  Future<void> _reloadSilently() async {
+    if (!mounted) return;
+    try {
+      final res = await ApiService.fetchGuestWithMatches(widget.guestId);
+      if (!mounted) return;
+      final qualified =
+          LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
+      setState(() {
+        _guest = res.guest;
+        _matches = qualified;
+        _reconcileActiveFilters(res.guest, qualified);
+      });
+    } catch (_) {}
   }
 
   Future<void> _loadData() async {
@@ -68,9 +118,12 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     try {
       final res = await ApiService.fetchGuestWithMatches(widget.guestId);
       if (!mounted) return;
+      final qualified =
+          LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
       setState(() {
         _guest = res.guest;
-        _matches = res.matches;
+        _matches = qualified;
+        _reconcileActiveFilters(res.guest, qualified);
         _loading = false;
       });
     } catch (e) {
@@ -88,9 +141,12 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
       final res = await ApiService.triggerGuestSearch(widget.guestId);
       widget.onDataChanged();
       if (!mounted) return;
+      final qualified =
+          LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
       setState(() {
         _guest = res.guest;
-        _matches = res.matches;
+        _matches = qualified;
+        _reconcileActiveFilters(res.guest, qualified);
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(res.summary)),
@@ -117,9 +173,12 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
     if (res == null || !mounted) return;
     widget.onDataChanged();
+    final qualified =
+        LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
     setState(() {
       _guest = res.guest;
-      _matches = res.matches;
+      _matches = qualified;
+      _reconcileActiveFilters(res.guest, qualified);
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(res.summary)),
@@ -144,6 +203,11 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
       }
     }
 
+    final previousVins = _matches
+        .map((m) => m.vin.trim())
+        .where((v) => v.isNotEmpty)
+        .toSet();
+
     final res = await showDialog<
         ({GuestProfile guest, List<VehicleMatch> matches, String summary})>(
       context: context,
@@ -155,14 +219,25 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
 
     if (res == null || !mounted) return;
     widget.onDataChanged();
+    final qualified =
+        LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
+    final nextVins = qualified
+        .map((m) => m.vin.trim())
+        .where((v) => v.isNotEmpty)
+        .toSet();
+    final removedCount = previousVins.difference(nextVins).length;
+
     setState(() {
       _guest = res.guest;
-      _matches = res.matches;
+      _matches = qualified;
+      _reconcileActiveFilters(res.guest, qualified);
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Updated search for ${res.guest.name} • ${res.summary}',
+          removedCount > 0
+              ? 'Updated search for ${res.guest.name} (removed $removedCount non-matching vehicle${removedCount == 1 ? '' : 's'}) • ${res.summary}'
+              : 'Updated search for ${res.guest.name} • ${res.summary}',
         ),
       ),
     );
@@ -197,12 +272,15 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
       final res = await ApiService.removeVehicleFromGuest(g.id, target.id);
       widget.onDataChanged();
       if (!mounted) return;
+      final qualified =
+          LocalScoutEngine.filterMatchesForGuest(res.guest, res.matches);
       setState(() {
         _guest = res.guest;
-        _matches = res.matches;
+        _matches = qualified;
         if (_selectedTargetId == target.id) {
           _selectedTargetId = _allVehiclesFilter;
         }
+        _reconcileActiveFilters(res.guest, qualified);
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Removed "${target.label}" from ${g.name}.')),

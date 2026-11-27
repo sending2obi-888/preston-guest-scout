@@ -46,6 +46,11 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
   String _lastNoteSyncedTrim = '';
   String _lastNoteSyncedDoors = '';
   String _lastNoteSyncedBed = '';
+  String _lastNoteSyncedMaxPrice = '';
+  String _lastNoteSyncedMinYear = '';
+  String _lastNoteSyncedMaxYear = '';
+  String _lastNoteSyncedCondition = 'Any';
+  String _lastNoteSyncedDrivetrain = 'Any';
 
   bool get _isEditing => widget.existingTarget != null;
 
@@ -129,6 +134,16 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
         _lastNoteSyncedTrim = noteParsed['trim']?.toString() ?? '';
         _lastNoteSyncedDoors = noteParsed['doors']?.toString() ?? '';
         _lastNoteSyncedBed = noteParsed['bedLength']?.toString() ?? '';
+        final pMax = (noteParsed['maxPrice'] as num?)?.toDouble();
+        _lastNoteSyncedMaxPrice = pMax != null ? pMax.toStringAsFixed(0) : '';
+        final pMinYr = (noteParsed['minYear'] as num?)?.toInt();
+        _lastNoteSyncedMinYear = pMinYr != null ? '$pMinYr' : '';
+        final pMaxYr = (noteParsed['maxYear'] as num?)?.toInt();
+        _lastNoteSyncedMaxYear = pMaxYr != null ? '$pMaxYr' : '';
+        _lastNoteSyncedCondition =
+            noteParsed['condition']?.toString() ?? 'Any';
+        _lastNoteSyncedDrivetrain =
+            noteParsed['drivetrain']?.toString() ?? 'Any';
       }
     }
   }
@@ -158,6 +173,14 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       final newTrim = noteParsed['trim']?.toString() ?? '';
       final newDoors = noteParsed['doors']?.toString() ?? '';
       final newBed = noteParsed['bedLength']?.toString() ?? '';
+      final pMax = (noteParsed['maxPrice'] as num?)?.toDouble();
+      final newMaxPrice = pMax != null ? pMax.toStringAsFixed(0) : '';
+      final pMinYr = (noteParsed['minYear'] as num?)?.toInt();
+      final newMinYr = pMinYr != null ? '$pMinYr' : '';
+      final pMaxYr = (noteParsed['maxYear'] as num?)?.toInt();
+      final newMaxYr = pMaxYr != null ? '$pMaxYr' : '';
+      final newCond = noteParsed['condition']?.toString() ?? 'Any';
+      final newDt = noteParsed['drivetrain']?.toString() ?? 'Any';
 
       if (_makeCtrl.text.trim() == _lastNoteSyncedMake && newMake.isNotEmpty) {
         _makeCtrl.text = newMake;
@@ -180,6 +203,31 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       if (_bedLength == _lastNoteSyncedBed && newBed != _lastNoteSyncedBed) {
         _bedLength = newBed;
         _lastNoteSyncedBed = newBed;
+      }
+      if (_maxPriceCtrl.text.trim() == _lastNoteSyncedMaxPrice &&
+          newMaxPrice != _lastNoteSyncedMaxPrice) {
+        _maxPriceCtrl.text = newMaxPrice;
+        _lastNoteSyncedMaxPrice = newMaxPrice;
+      }
+      if (_minYearCtrl.text.trim() == _lastNoteSyncedMinYear &&
+          newMinYr != _lastNoteSyncedMinYear) {
+        _minYearCtrl.text = newMinYr;
+        _lastNoteSyncedMinYear = newMinYr;
+      }
+      if (_maxYearCtrl.text.trim() == _lastNoteSyncedMaxYear &&
+          newMaxYr != _lastNoteSyncedMaxYear) {
+        _maxYearCtrl.text = newMaxYr;
+        _lastNoteSyncedMaxYear = newMaxYr;
+      }
+      if (_condition == _lastNoteSyncedCondition &&
+          newCond != _lastNoteSyncedCondition) {
+        _condition = newCond;
+        _lastNoteSyncedCondition = newCond;
+      }
+      if (_drivetrain == _lastNoteSyncedDrivetrain &&
+          newDt != _lastNoteSyncedDrivetrain) {
+        _drivetrain = newDt;
+        _lastNoteSyncedDrivetrain = newDt;
       }
     }
     setState(() {});
@@ -223,11 +271,22 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
       _exteriorColorCtrl.text,
     );
 
-    // When editing an existing target, if the user explicitly cleared Trim, Doors, or Bed Length,
+    // When editing an existing target, if the user explicitly cleared any structured field,
     // strip the old token from raw notes so natural-language parsing doesn't re-apply it.
-    if (_isEditing) {
+    if (_isEditing && notes.isNotEmpty) {
       final prev = widget.existingTarget!;
-      if (trim.isEmpty && prev.trim.isNotEmpty && notes.isNotEmpty) {
+      if (model.isEmpty && prev.model.isNotEmpty) {
+        final escapedModel = RegExp.escape(prev.model)
+            .replaceAll(RegExp(r'[\s\\-]+'), r'[\s+-]*');
+        notes = notes
+            .replaceAll(
+              RegExp('\\b$escapedModel\\b[.,;]*', caseSensitive: false),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (trim.isEmpty && prev.trim.isNotEmpty) {
         notes = notes
             .replaceAll(
               RegExp('\\b${RegExp.escape(prev.trim)}\\b[.,;]*',
@@ -237,7 +296,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
             .replaceAll(RegExp(r'\s+'), ' ')
             .trim();
       }
-      if (_doors.isEmpty && prev.doors.isNotEmpty && notes.isNotEmpty) {
+      if (_doors.isEmpty && prev.doors.isNotEmpty) {
         notes = notes
             .replaceAll(
               RegExp(
@@ -249,7 +308,7 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
             .replaceAll(RegExp(r'\s+'), ' ')
             .trim();
       }
-      if (_bedLength.isEmpty && prev.bedLength.isNotEmpty && notes.isNotEmpty) {
+      if (_bedLength.isEmpty && prev.bedLength.isNotEmpty) {
         notes = notes
             .replaceAll(
               RegExp(
@@ -260,6 +319,82 @@ class _AddVehicleCriteriaDialogState extends State<AddVehicleCriteriaDialog> {
             )
             .replaceAll(RegExp(r'\s+'), ' ')
             .trim();
+      }
+      if (maxPrice == null && prev.maxPrice != null) {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'(?:under|below|max|up\s+to|less\s+than|around|budget(?:\s+of)?|<=?)\s*\$?\s*\d+(?:,\d{3})*(?:\.\d+)?\s*(?:k|thousand)?\b[.,;]*|\$\s*\d+(?:,\d{3})*(?:\.\d+)?\s*(?:k|thousand)?\b[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (minYear == null &&
+          maxYear == null &&
+          (prev.minYear != null || prev.maxYear != null)) {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'\b20[12]\d(?:\s*(?:-|–|—|to|through|thru)\s*20[12]\d|\s*(?:\+|or\s+newer|and\s+newer|and\s+up|up))?\b[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (maxMileage == null && prev.maxMileage != null) {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'(?:under|below|less\s+than|max|up\s+to|<=?)?\s*\d{1,3}(?:,\d{3})*\s*k?\s*(?:miles?|mi\.?)\b[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (_condition == 'Any' && prev.condition != 'Any') {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'\b(?:certified\s+pre-?owned|pre-?owned|cpo|used|new)\b[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (_drivetrain == 'Any' && prev.drivetrain != 'Any') {
+        notes = notes
+            .replaceAll(
+              RegExp(
+                r'\b(?:4wd|4x4|four[\s-]wheel[\s-]drive|4[\s-]wheel[\s-]drive|awd|all[\s-]wheel[\s-]drive|rwd|2wd|4x2|rear[\s-]wheel[\s-]drive|fwd|front[\s-]wheel[\s-]drive)\b[.,;]*',
+                caseSensitive: false,
+              ),
+              ' ',
+            )
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
+      }
+      if (combinedColors.isEmpty && prev.exteriorColor.isNotEmpty) {
+        final prevColors =
+            NaturalLanguageVehicleParser.parseExteriorColors(prev.exteriorColor);
+        for (final c in prevColors) {
+          notes = notes.replaceAll(
+            RegExp(
+              '\\b(?:[a-z]+\\s+)?${RegExp.escape(c)}(?:\\s+exterior|\\s+ext\\.?|\\s+metallic|\\s+pearl)?\\b[.,;]*',
+              caseSensitive: false,
+            ),
+            ' ',
+          );
+        }
+        notes = notes.replaceAll(RegExp(r'\s+'), ' ').trim();
       }
     }
 

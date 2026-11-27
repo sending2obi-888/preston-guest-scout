@@ -25,6 +25,7 @@ import {
   runSearchForGuest,
   runSearchForAllActiveGuests,
   startTwiceDailyScheduler,
+  pruneNonMatchingMatchesForGuest,
 } from './scheduler.mjs';
 import { getCalendarStatus } from './calendar_sync.mjs';
 import {
@@ -137,6 +138,7 @@ function buildNormalizedVehicleTarget(rawSpec, fallbackId, createdAtIso) {
     features,
     notes: (rawSpec.notes || '').trim(),
     createdAt: String(rawSpec.createdAt || createdAtIso),
+    criteriaUpdatedAt: rawSpec.criteriaUpdatedAt ? String(rawSpec.criteriaUpdatedAt) : null,
   };
 }
 
@@ -585,8 +587,10 @@ const server = http.createServer(async (req, res) => {
       const subId = guestRouteMatch[3] ? decodeURIComponent(guestRouteMatch[3]) : null;
 
       if (!subResource && req.method === 'GET') {
+        const checkRow = db.prepare('SELECT id FROM guests WHERE id = ?').get(guestId);
+        if (!checkRow) return sendJson(res, 404, { error: 'Guest not found' });
+        pruneNonMatchingMatchesForGuest(guestId);
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
-        if (!row) return sendJson(res, 404, { error: 'Guest not found' });
         const matchRows = db
           .prepare(
             'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
@@ -630,8 +634,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (subResource === 'matches' && !subId && req.method === 'GET') {
+        const checkRow = db.prepare('SELECT id FROM guests WHERE id = ?').get(guestId);
+        if (!checkRow) return sendJson(res, 404, { error: 'Guest not found' });
+        pruneNonMatchingMatchesForGuest(guestId);
         const row = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
-        if (!row) return sendJson(res, 404, { error: 'Guest not found' });
         const matchRows = db
           .prepare(
             'SELECT * FROM matches WHERE guest_id = ? ORDER BY match_score DESC, found_at DESC'
@@ -844,6 +850,7 @@ const server = http.createServer(async (req, res) => {
             ...body,
             id: existingTarget.id,
             createdAt: existingTarget.createdAt || currentGuest.createdAt,
+            criteriaUpdatedAt: nowIso,
           },
           existingTarget.id,
           existingTarget.createdAt || nowIso
@@ -872,25 +879,21 @@ const server = http.createServer(async (req, res) => {
 
         currentTargets[targetIdx] = updatedTarget;
         const primary = currentTargets[0];
+        const validIds = new Set(currentTargets.map((t) => t.id));
 
-        // Clear stale matches belonging to this edited target (including legacy blank target_id when editing primary target)
-        if (targetIdx === 0) {
-          db.prepare(
-            `DELETE FROM matches
-             WHERE guest_id = ? AND (target_id = ? OR target_id IS NULL OR target_id = '')`
-          ).run(guestId, existingTarget.id);
-        } else {
-          db.prepare('DELETE FROM matches WHERE guest_id = ? AND target_id = ?').run(
-            guestId,
-            existingTarget.id
-          );
-        }
+        // Snapshot prior matches by VIN so surviving vehicles retain original found_at & Selected Candidate status
+        const prevRows = db
+          .prepare('SELECT * FROM matches WHERE guest_id = ?')
+          .all(guestId);
+        const preservedMatchesByVin = new Map(
+          prevRows.map((r) => [String(r.vin || ''), r]).filter(([k]) => Boolean(k))
+        );
 
         db.prepare(
           `UPDATE guests SET
              condition = ?, min_year = ?, max_year = ?, make = ?, model = ?, trim = ?,
-             max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
-             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?
+             doors = ?, max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
+             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?, criteria_updated_at = ?
            WHERE id = ?`
         ).run(
           primary.condition || 'Any',
@@ -899,6 +902,7 @@ const server = http.createServer(async (req, res) => {
           primary.make || '',
           primary.model || '',
           primary.trim || '',
+          primary.doors || '',
           primary.maxPrice,
           primary.maxMileage,
           primary.drivetrain || 'Any',
@@ -907,22 +911,51 @@ const server = http.createServer(async (req, res) => {
           primary.notes || '',
           JSON.stringify(currentTargets),
           nowIso,
+          nowIso,
           guestId
         );
 
+        if (body.runImmediateSearch !== false) {
+          // Clear all matches belonging to the edited target (or all matches when single-target, plus any orphaned target_id)
+          if (currentTargets.length <= 1) {
+            db.prepare('DELETE FROM matches WHERE guest_id = ?').run(guestId);
+          } else {
+            const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+            for (const r of prevRows) {
+              const rTid = String(r.target_id || '').trim();
+              if (
+                rTid === existingTarget.id ||
+                rTid === subId ||
+                (targetIdx === 0 && !rTid) ||
+                (rTid && !validIds.has(rTid))
+              ) {
+                delStmt.run(r.id);
+              }
+            }
+          }
+        }
+
         let result = null;
         if (body.runImmediateSearch !== false) {
-          result = await runSearchForGuest(
-            guestId,
-            `Edited Search (${formatVehicleTargetLabel(updatedTarget)})`,
-            {
-              onlyTargetId: existingTarget.id,
-              isInitialSearch: true,
-              isSeedSearch: false,
-              calendarAccessToken: bearerToken,
-            }
-          );
+          try {
+            result = await runSearchForGuest(
+              guestId,
+              `Edited Search (${formatVehicleTargetLabel(updatedTarget)})`,
+              {
+                onlyTargetId: existingTarget.id,
+                isInitialSearch: true,
+                isSeedSearch: false,
+                calendarAccessToken: bearerToken,
+                preservedMatchesByVin,
+              }
+            );
+          } catch (searchErr) {
+            result = { error: searchErr.message };
+          }
         }
+
+        // Always prune any remaining stored matches that no longer satisfy the guest's updated criteria
+        pruneNonMatchingMatchesForGuest(guestId);
 
         recordServerBackup({
           label: `Auto-Backup • Edited Search (${currentGuest.name})`,
@@ -974,8 +1007,8 @@ const server = http.createServer(async (req, res) => {
         db.prepare(
           `UPDATE guests SET
              condition = ?, min_year = ?, max_year = ?, make = ?, model = ?, trim = ?,
-             max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
-             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?
+             doors = ?, max_price = ?, max_mileage = ?, drivetrain = ?, exterior_color = ?,
+             features_json = ?, notes = ?, vehicle_targets_json = ?, updated_at = ?, criteria_updated_at = ?
            WHERE id = ?`
         ).run(
           primary.condition || 'Any',
@@ -984,6 +1017,7 @@ const server = http.createServer(async (req, res) => {
           primary.make || '',
           primary.model || '',
           primary.trim || '',
+          primary.doors || '',
           primary.maxPrice,
           primary.maxMileage,
           primary.drivetrain || 'Any',
@@ -992,8 +1026,11 @@ const server = http.createServer(async (req, res) => {
           primary.notes || '',
           JSON.stringify(remaining),
           nowIso,
+          nowIso,
           guestId
         );
+
+        pruneNonMatchingMatchesForGuest(guestId);
 
         recordServerBackup({
           label: `Auto-Backup • Removed Vehicle (${currentGuest.name})`,

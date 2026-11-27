@@ -164,6 +164,216 @@ export function preFilterCandidates(rawGuest, candidates) {
   });
 }
 
+function storedMatchToCandidate(m = {}) {
+  const matchedFeatures = Array.isArray(m.matchedFeatures) ? m.matchedFeatures : [];
+  const allHighlights = Array.isArray(m.allHighlights)
+    ? m.allHighlights
+    : Array.isArray(m.highlights)
+      ? m.highlights
+      : [];
+  const combinedHighlights = [...new Set([...allHighlights, ...matchedFeatures].map(String))];
+  const featText = matchedFeatures.join(' ');
+  const combinedComments = [
+    m.commentsSummary || '',
+    m.agentSummary || '',
+    featText,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  let inferredYear = m.year != null ? Number(m.year) : null;
+  if (!inferredYear && m.title) {
+    const ym = String(m.title).match(/\b(20\d{2}|19\d{2})\b/);
+    if (ym) inferredYear = Number(ym[1]);
+  }
+
+  let inferredDoors = String(m.doors || '').trim();
+  if (!inferredDoors && featText) {
+    const dm = featText.match(/\b([2345])\s*Doors?\b/i);
+    if (dm) inferredDoors = dm[1];
+  }
+
+  let inferredBed = String(m.bedLength || '').trim();
+  if (!inferredBed) {
+    inferredBed = extractBedLengthFromVehicle(
+      { title: m.title || '', bodyStyle: m.bodyStyle || '' },
+      combinedComments
+    );
+  }
+
+  return {
+    vin: m.vin || '',
+    stockNumber: m.stockNumber || '',
+    title: m.title || '',
+    year: inferredYear,
+    make: m.make || '',
+    model: m.model || '',
+    trim: m.trim || '',
+    condition: m.condition || '',
+    price: typeof m.price === 'number' ? m.price : m.price != null ? Number(m.price) : null,
+    msrp: typeof m.msrp === 'number' ? m.msrp : m.msrp != null ? Number(m.msrp) : null,
+    location: m.location || '',
+    mileage: typeof m.mileage === 'number' ? m.mileage : m.mileage != null ? Number(m.mileage) : null,
+    drivetrain: m.drivetrain || '',
+    engine: m.engine || '',
+    doors: inferredDoors,
+    bedLength: inferredBed,
+    bodyStyle: m.bodyStyle || '',
+    exteriorColor: m.exteriorColor || '',
+    interiorColor: m.interiorColor || '',
+    highlights: combinedHighlights,
+    commentsSummary: combinedComments,
+    fullCommentsSearchText: combinedComments,
+  };
+}
+
+export function doesStoredMatchSatisfyTarget(matchObj, rawTarget) {
+  if (!matchObj || !rawTarget) return false;
+  const spec = normalizeGuestSpecs(rawTarget);
+  const v = storedMatchToCandidate(matchObj);
+
+  if (spec.make) {
+    const targetMake = spec.make.trim().toLowerCase();
+    const makeHay = `${v.make} ${v.title}`.trim().toLowerCase();
+    if (makeHay && !makeHay.includes(targetMake)) return false;
+  }
+
+  if (spec.model && !doesVehicleMatchModel(spec.model, v)) {
+    return false;
+  }
+
+  if (spec.trim && (v.trim || v.title) && !doesVehicleMatchTrim(spec.trim, v)) {
+    return false;
+  }
+
+  if (spec.bedLength) {
+    const targetBed = String(spec.bedLength).replace(/'$/, '');
+    const vBed = String(v.bedLength || '').replace(/'$/, '');
+    if (vBed) {
+      if (vBed !== targetBed) return false;
+    } else if (
+      Object.prototype.hasOwnProperty.call(matchObj, 'bedLength') &&
+      matchObj.bedLength !== undefined
+    ) {
+      return false;
+    }
+  }
+
+  if (spec.cabStyle) {
+    const hasCabSignal =
+      Boolean(v.bodyStyle) ||
+      /\b(?:regular\s+cab|reg\s+cab|single\s+cab|super\s*cab|extended\s+cab|super\s*crew|crew\s+cab|quad\s+cab|mega\s+cab|double\s+cab)\b/i.test(
+        `${v.title} ${v.commentsSummary}`
+      );
+    if (hasCabSignal && !doesVehicleMatchCabStyle(spec.cabStyle, v)) {
+      return false;
+    }
+  }
+
+  if (spec.doors) {
+    const hasDoorSignal =
+      Boolean(v.doors) ||
+      Boolean(v.bodyStyle) ||
+      /\b(?:[2345][-\s]*door|regular\s+cab|super\s*cab|super\s*crew|crew\s+cab|bronco|wrangler|mustang)\b/i.test(
+        `${v.title} ${v.commentsSummary}`
+      );
+    if (hasDoorSignal && !doesVehicleMatchDoors(spec.doors, v)) {
+      return false;
+    }
+  }
+
+  if (spec.engineSpec && v.engine && !doesVehicleMatchEngine(spec.engineSpec, v)) {
+    return false;
+  }
+
+  if (spec.drivetrain && spec.drivetrain !== 'Any') {
+    const hasDtSignal =
+      Boolean(v.drivetrain) ||
+      /\b(?:4wd|4x4|awd|fwd|rwd|2wd)\b/i.test(`${v.title} ${v.highlights.join(' ')}`);
+    if (hasDtSignal && !doesVehicleMatchDrivetrain(spec.drivetrain, v)) {
+      return false;
+    }
+  }
+
+  if (spec.exteriorColor && v.exteriorColor && !doesVehicleMatchColor(spec.exteriorColor, v)) {
+    return false;
+  }
+
+  if (
+    Array.isArray(spec.strictPackages) &&
+    spec.strictPackages.length > 0 &&
+    Boolean(matchObj.commentsSummary) &&
+    !doesVehicleMatchStrictPackages(spec.strictPackages, v)
+  ) {
+    return false;
+  }
+
+  if (spec.minYear && v.year && v.year < Number(spec.minYear)) {
+    return false;
+  }
+  if (spec.maxYear && v.year && v.year > Number(spec.maxYear)) {
+    return false;
+  }
+
+  if (spec.maxPrice != null && Number(spec.maxPrice) > 0) {
+    const cap = Number(spec.maxPrice);
+    const effectivePrice =
+      typeof v.price === 'number' && v.price > 0
+        ? v.price
+        : typeof v.msrp === 'number' && v.msrp > 0
+          ? v.msrp
+          : null;
+    if (effectivePrice != null && effectivePrice > cap) {
+      return false;
+    }
+  }
+
+  if (spec.maxMileage && typeof v.mileage === 'number' && v.mileage > Number(spec.maxMileage)) {
+    return false;
+  }
+
+  if (spec.condition && spec.condition !== 'Any' && v.condition) {
+    const c = spec.condition.toLowerCase();
+    const vc = v.condition.toLowerCase();
+    if (c === 'new' && !vc.includes('new')) return false;
+    if (c === 'cpo' && !vc.includes('certified')) return false;
+    if (c === 'pre-owned' && vc.includes('new') && !vc.includes('pre')) return false;
+  }
+
+  if (Array.isArray(spec.locationHints) && spec.locationHints.length > 0 && v.location) {
+    const locHay = v.location.toLowerCase();
+    if (!spec.locationHints.some((hint) => locHay.includes(hint))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function resolveMatchingTargetForStoredMatch(matchObj, guest) {
+  if (!matchObj || !guest) return null;
+  const targets =
+    Array.isArray(guest.vehicleTargets) && guest.vehicleTargets.length > 0
+      ? guest.vehicleTargets
+      : [guest];
+  if (targets.length === 1) {
+    return doesStoredMatchSatisfyTarget(matchObj, targets[0]) ? targets[0] : null;
+  }
+  const mTid = String(matchObj.targetId || '').trim();
+  if (mTid) {
+    const assigned = targets.find((t) => String(t.id || '') === mTid);
+    if (assigned && doesStoredMatchSatisfyTarget(matchObj, assigned)) {
+      return assigned;
+    }
+  }
+  for (const t of targets) {
+    if (doesStoredMatchSatisfyTarget(matchObj, t)) {
+      return t;
+    }
+  }
+  return null;
+}
+
 export function deterministicEvaluate(rawGuest, candidates) {
   const guest = normalizeGuestSpecs(rawGuest);
   const strictFiltered = preFilterCandidates(guest, candidates);

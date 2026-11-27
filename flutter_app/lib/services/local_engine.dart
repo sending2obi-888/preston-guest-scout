@@ -284,6 +284,7 @@ class LocalScoutEngine {
     final parsed = NaturalLanguageVehicleParser.parseCriteriaMap(raw);
     final rawId = (raw['id']?.toString() ?? '').trim();
     final rawCreated = (raw['createdAt']?.toString() ?? '').trim();
+    final rawCriteriaUpd = (raw['criteriaUpdatedAt']?.toString() ?? '').trim();
 
     return <String, dynamic>{
       'id': rawId.isNotEmpty ? rawId : fallbackId,
@@ -304,6 +305,7 @@ class LocalScoutEngine {
       'features': parsed['features'],
       'notes': parsed['notes'],
       'createdAt': rawCreated.isNotEmpty ? rawCreated : fallbackCreatedAt,
+      if (rawCriteriaUpd.isNotEmpty) 'criteriaUpdatedAt': rawCriteriaUpd,
     };
   }
 
@@ -312,6 +314,8 @@ class LocalScoutEngine {
     final createdAt = (raw['createdAt']?.toString() ??
             DateTime.now().toUtc().toIso8601String())
         .trim();
+    final criteriaUpdatedAt =
+        (raw['criteriaUpdatedAt']?.toString() ?? '').trim();
 
     final normalizedTargets = <Map<String, dynamic>>[];
     final rawTargets = raw['vehicleTargets'];
@@ -418,6 +422,7 @@ class LocalScoutEngine {
       'initialSearchCompleted': initialDone,
       'seenMatchVins': seenVinSet.toList(),
       'scheduledCallVins': scheduledCallSet.toList(),
+      if (criteriaUpdatedAt.isNotEmpty) 'criteriaUpdatedAt': criteriaUpdatedAt,
     };
   }
 
@@ -593,14 +598,353 @@ class LocalScoutEngine {
     });
   }
 
+  static Map<String, dynamic> _storedMatchToCandidateMap(
+    Map<String, dynamic> m,
+  ) {
+    final matchedFeatures =
+        (m['matchedFeatures'] as List<dynamic>? ?? const [])
+            .map((e) => e.toString())
+            .toList();
+    final allHighlights = (m['allHighlights'] as List<dynamic>? ??
+            m['highlights'] as List<dynamic>? ??
+            const [])
+        .map((e) => e.toString())
+        .toList();
+    final combinedHighlights = <String>{
+      ...allHighlights,
+      ...matchedFeatures,
+    }.toList();
+    final featText = matchedFeatures.join(' ');
+    final combinedComments = [
+      (m['commentsSummary']?.toString() ?? '').trim(),
+      (m['agentSummary']?.toString() ?? '').trim(),
+      featText,
+    ].where((s) => s.isNotEmpty).join(' ');
+
+    int? inferredYear = _asInt(m['year']);
+    final titleStr = (m['title']?.toString() ?? '').trim();
+    if (inferredYear == null && titleStr.isNotEmpty) {
+      final ym = RegExp(r'\b(20\d{2}|19\d{2})\b').firstMatch(titleStr);
+      if (ym != null) inferredYear = int.tryParse(ym.group(1)!);
+    }
+
+    var inferredDoors = (m['doors']?.toString() ?? '').trim();
+    if (inferredDoors.isEmpty && featText.isNotEmpty) {
+      final dm = RegExp(r'\b([2345])\s*Doors?\b', caseSensitive: false)
+          .firstMatch(featText);
+      if (dm != null) inferredDoors = dm.group(1)!;
+    }
+
+    var inferredBed = (m['bedLength']?.toString() ?? '').trim();
+    if (inferredBed.isEmpty) {
+      inferredBed = NaturalLanguageVehicleParser.extractBedLengthFromVehicle(
+        <String, dynamic>{
+          'title': titleStr,
+          'bodyStyle': m['bodyStyle']?.toString() ?? '',
+        },
+        fullCommentsClean: combinedComments,
+      );
+    }
+
+    return <String, dynamic>{
+      'vin': m['vin']?.toString() ?? '',
+      'stockNumber': m['stockNumber']?.toString() ?? '',
+      'title': titleStr,
+      'year': inferredYear,
+      'make': m['make']?.toString() ?? '',
+      'model': m['model']?.toString() ?? '',
+      'trim': m['trim']?.toString() ?? '',
+      'condition': m['condition']?.toString() ?? '',
+      'price': _asDouble(m['price']),
+      'msrp': _asDouble(m['msrp']),
+      'location': m['location']?.toString() ?? '',
+      'mileage': m.containsKey('mileage') ? _asInt(m['mileage']) : null,
+      'drivetrain': m['drivetrain']?.toString() ?? '',
+      'engine': m['engine']?.toString() ?? '',
+      'doors': inferredDoors,
+      'bedLength': inferredBed,
+      'bodyStyle': m['bodyStyle']?.toString() ?? '',
+      'exteriorColor': m['exteriorColor']?.toString() ?? '',
+      'interiorColor': m['interiorColor']?.toString() ?? '',
+      'highlights': combinedHighlights,
+      'commentsSummary': combinedComments,
+      'fullCommentsSearchText': combinedComments,
+    };
+  }
+
+  /// Verifies whether a stored/cached vehicle match satisfies a given [VehicleSearchTarget].
+  /// Used whenever a search is edited, loaded, or synced across devices so stale vehicles
+  /// that no longer match the edited criteria are immediately removed.
+  static bool doesStoredMatchSatisfyTarget(
+    Map<String, dynamic> matchMap,
+    VehicleSearchTarget target, {
+    bool strictMissingSpecs = false,
+  }) {
+    final spec = NaturalLanguageVehicleParser.parseCriteriaMap(target.toJson());
+    final v = _storedMatchToCandidateMap(matchMap);
+
+    final targetMake = (spec['make']?.toString() ?? '').trim();
+    final targetModel = (spec['model']?.toString() ?? '').trim();
+    final targetTrim = (spec['trim']?.toString() ?? '').trim();
+    final targetDoors = (spec['doors']?.toString() ?? '').trim();
+    final targetBed = (spec['bedLength']?.toString() ?? '').trim();
+    final targetCab = (spec['cabStyle']?.toString() ?? '').trim();
+    final targetEngine = (spec['engineSpec']?.toString() ?? '').trim();
+    final targetDt = (spec['drivetrain']?.toString() ?? 'Any').trim();
+    final targetColor = (spec['exteriorColor']?.toString() ?? '').trim();
+    final targetCondition = (spec['condition']?.toString() ?? 'Any').trim();
+    final minYear = _asInt(spec['minYear']);
+    final maxYear = _asInt(spec['maxYear']);
+    final maxPrice = _asDouble(spec['maxPrice']);
+    final maxMileage = _asInt(spec['maxMileage']);
+    final locationHints = (spec['locationHints'] as List<dynamic>? ?? const [])
+        .map((e) => e.toString())
+        .toList();
+    final strictPackages =
+        (spec['strictPackages'] as List<dynamic>? ?? const [])
+            .map((e) => e.toString())
+            .toList();
+
+    if (targetMake.isNotEmpty) {
+      final hay = '${v['make'] ?? ''} ${v['title'] ?? ''}'.trim().toLowerCase();
+      if (hay.isNotEmpty && !hay.contains(targetMake.toLowerCase())) {
+        return false;
+      }
+    }
+
+    if (targetModel.isNotEmpty &&
+        !NaturalLanguageVehicleParser.doesVehicleMatchModel(targetModel, v)) {
+      return false;
+    }
+
+    if (targetTrim.isNotEmpty &&
+        ('${v['trim'] ?? ''}${v['title'] ?? ''}').trim().isNotEmpty &&
+        !NaturalLanguageVehicleParser.doesVehicleMatchTrim(targetTrim, v)) {
+      return false;
+    }
+
+    if (targetBed.isNotEmpty) {
+      final normTargetBed = targetBed.replaceAll("'", '');
+      final normVBed =
+          (v['bedLength']?.toString() ?? '').replaceAll("'", '').trim();
+      if (normVBed.isNotEmpty) {
+        if (normVBed != normTargetBed) return false;
+      } else if (strictMissingSpecs || matchMap.containsKey('bedLength')) {
+        return false;
+      }
+    }
+
+    if (targetCab.isNotEmpty) {
+      final hasCabSignal = (v['bodyStyle']?.toString() ?? '').isNotEmpty ||
+          RegExp(
+            r'\b(?:regular\s+cab|reg\s+cab|single\s+cab|super\s*cab|extended\s+cab|super\s*crew|crew\s+cab|quad\s+cab|mega\s+cab|double\s+cab)\b',
+            caseSensitive: false,
+          ).hasMatch('${v['title'] ?? ''} ${v['commentsSummary'] ?? ''}');
+      if ((hasCabSignal || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchCabStyle(
+            targetCab,
+            v,
+          )) {
+        return false;
+      }
+    }
+
+    if (targetDoors.isNotEmpty) {
+      final hasDoorSignal = (v['doors']?.toString() ?? '').isNotEmpty ||
+          (v['bodyStyle']?.toString() ?? '').isNotEmpty ||
+          RegExp(
+            r'\b(?:[2345][-\s]*door|regular\s+cab|super\s*cab|super\s*crew|crew\s+cab|bronco|wrangler|mustang)\b',
+            caseSensitive: false,
+          ).hasMatch('${v['title'] ?? ''} ${v['commentsSummary'] ?? ''}');
+      if ((hasDoorSignal || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchDoors(targetDoors, v)) {
+        return false;
+      }
+    }
+
+    if (targetEngine.isNotEmpty) {
+      final hasEngineSignal = (v['engine']?.toString() ?? '').isNotEmpty;
+      if ((hasEngineSignal || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchEngine(
+            targetEngine,
+            v,
+          )) {
+        return false;
+      }
+    }
+
+    if (targetDt.isNotEmpty && targetDt != 'Any') {
+      final hasDtSignal = (v['drivetrain']?.toString() ?? '').isNotEmpty ||
+          RegExp(r'\b(?:4wd|4x4|awd|fwd|rwd|2wd)\b', caseSensitive: false)
+              .hasMatch(
+                  '${v['title'] ?? ''} ${(v['highlights'] as List).join(' ')}');
+      if ((hasDtSignal || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchDrivetrain(
+            targetDt,
+            v,
+          )) {
+        return false;
+      }
+    }
+
+    if (targetColor.isNotEmpty) {
+      final hasColorSignal =
+          (v['exteriorColor']?.toString() ?? '').trim().isNotEmpty;
+      if ((hasColorSignal || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchColor(targetColor, v)) {
+        return false;
+      }
+    }
+
+    if (strictPackages.isNotEmpty) {
+      final hasComments =
+          (matchMap['commentsSummary']?.toString() ?? '').trim().isNotEmpty;
+      if ((hasComments || strictMissingSpecs) &&
+          !NaturalLanguageVehicleParser.doesVehicleMatchStrictPackages(
+            strictPackages,
+            v,
+          )) {
+        return false;
+      }
+    }
+
+    final yr = _asInt(v['year']);
+    if (minYear != null && yr != null && yr < minYear) return false;
+    if (maxYear != null && yr != null && yr > maxYear) return false;
+
+    if (maxPrice != null && maxPrice > 0) {
+      final pr = _asDouble(v['price']);
+      final msrp = _asDouble(v['msrp']);
+      final effectivePrice = (pr != null && pr > 0)
+          ? pr
+          : ((msrp != null && msrp > 0) ? msrp : null);
+      if (effectivePrice != null && effectivePrice > maxPrice) {
+        return false;
+      }
+    }
+
+    final mi = _asInt(v['mileage']);
+    if (maxMileage != null && mi != null && mi > maxMileage) {
+      return false;
+    }
+
+    if (targetCondition.isNotEmpty && targetCondition != 'Any') {
+      final vc = (v['condition']?.toString() ?? '').trim().toLowerCase();
+      if (vc.isNotEmpty) {
+        final c = targetCondition.toLowerCase();
+        if (c == 'new' && !vc.contains('new')) return false;
+        if (c == 'cpo' && !vc.contains('certified')) return false;
+        if (c == 'pre-owned' && vc.contains('new') && !vc.contains('pre')) {
+          return false;
+        }
+      }
+    }
+
+    if (locationHints.isNotEmpty) {
+      final locHay = (v['location']?.toString() ?? '').trim().toLowerCase();
+      if (locHay.isNotEmpty &&
+          !locationHints.any((hint) => locHay.contains(hint))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  static VehicleSearchTarget? resolveMatchingTargetForStoredMatch(
+    Map<String, dynamic> matchMap,
+    GuestProfile guest,
+  ) {
+    final allTargets = guest.effectiveTargets;
+    if (allTargets.isEmpty) return null;
+    if (allTargets.length == 1) {
+      return doesStoredMatchSatisfyTarget(matchMap, allTargets.first)
+          ? allTargets.first
+          : null;
+    }
+    final mTid = (matchMap['targetId']?.toString() ?? '').trim();
+    if (mTid.isNotEmpty) {
+      for (final t in allTargets) {
+        if (t.id == mTid && doesStoredMatchSatisfyTarget(matchMap, t)) {
+          return t;
+        }
+      }
+    }
+    for (final t in allTargets) {
+      if (doesStoredMatchSatisfyTarget(matchMap, t)) {
+        return t;
+      }
+    }
+    return null;
+  }
+
+  /// Filters a list of [VehicleMatch] instances so ONLY vehicles satisfying [guest]'s
+  /// current search target(s) remain.
+  static List<VehicleMatch> filterMatchesForGuest(
+    GuestProfile guest,
+    List<VehicleMatch> matches,
+  ) {
+    final out = <VehicleMatch>[];
+    for (final m in matches) {
+      final matchedTarget = resolveMatchingTargetForStoredMatch(
+        m.toJson(),
+        guest,
+      );
+      if (matchedTarget != null) {
+        out.add(m);
+      }
+    }
+    return out;
+  }
+
+  static int _pruneNonMatchingMatchesForGuestSync(String guestId) {
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) return 0;
+    final normGuest = GuestProfile.fromJson(_normalizeGuestMap(_guests[idx]));
+    int removed = 0;
+
+    final kept = <Map<String, dynamic>>[];
+    for (final m in _matches) {
+      if (m['guestId']?.toString() != guestId) {
+        kept.add(m);
+        continue;
+      }
+      final matchedTarget = resolveMatchingTargetForStoredMatch(m, normGuest);
+      if (matchedTarget == null) {
+        removed++;
+        continue;
+      }
+      final curTid = (m['targetId']?.toString() ?? '').trim();
+      if (curTid.isNotEmpty && curTid != matchedTarget.id) {
+        kept.add(<String, dynamic>{
+          ...m,
+          'targetId': matchedTarget.id,
+          'targetLabel': matchedTarget.label,
+        });
+      } else {
+        kept.add(m);
+      }
+    }
+    if (removed > 0 || kept.length != _matches.length) {
+      _matches = kept;
+    } else {
+      _matches = kept;
+    }
+    return removed;
+  }
+
   static GuestProfile _hydrateGuest(Map<String, dynamic> rawG) {
     final g = _normalizeGuestMap(rawG);
     final gid = g['id']?.toString() ?? '';
+    final tempProfile = GuestProfile.fromJson(g);
     int count = 0;
     int selectedCount = 0;
     double? lowest;
     for (final m in _matches) {
       if (m['guestId']?.toString() != gid) continue;
+      if (resolveMatchingTargetForStoredMatch(m, tempProfile) == null) {
+        continue;
+      }
       count++;
       if (m['isSelectedCandidate'] == true || m['isSelectedCandidate'] == 1) {
         selectedCount++;
@@ -715,7 +1059,6 @@ class LocalScoutEngine {
     _deletedGuestIds.remove(id);
     _guests.insert(0, map);
     await _persist();
-    onDataMutatedForCloudSave?.call();
 
     final searchRes = await runSearchForSingleGuest(
       id,
@@ -735,6 +1078,10 @@ class LocalScoutEngine {
   static Future<({GuestProfile guest, List<VehicleMatch> matches})>
       getGuestWithMatches(String guestId) async {
     await ensureInitialized();
+    final pruned = _pruneNonMatchingMatchesForGuestSync(guestId);
+    if (pruned > 0) {
+      await _persist();
+    }
     final raw = _guests.firstWhere(
       (g) => g['id']?.toString() == guestId,
       orElse: () => throw Exception('Guest not found'),
@@ -1081,7 +1428,6 @@ class LocalScoutEngine {
       'updatedAt': nowIso,
     });
     await _persist();
-    onDataMutatedForCloudSave?.call();
 
     final res = await runSearchForSingleGuest(
       guestId,
@@ -1143,6 +1489,7 @@ class LocalScoutEngine {
     }
 
     final oldTarget = existingTargets[targetIdx];
+    final oldTargetModel = VehicleSearchTarget.fromJson(oldTarget);
     final resolvedId = (oldTarget['id']?.toString() ?? '').isNotEmpty
         ? oldTarget['id'].toString()
         : targetId;
@@ -1170,6 +1517,7 @@ class LocalScoutEngine {
         'features': features,
         'notes': notes,
         'createdAt': preservedCreatedAt,
+        'criteriaUpdatedAt': nowIso,
       },
       fallbackId: resolvedId,
       fallbackCreatedAt: preservedCreatedAt,
@@ -1196,13 +1544,39 @@ class LocalScoutEngine {
     }
 
     existingTargets[targetIdx] = updatedTargetMap;
+    final validTargetIds = existingTargets
+        .map((t) => (t['id']?.toString() ?? '').trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
 
-    // Remove stale matches belonging to the edited target (and legacy blank targetId if editing primary target)
+    // Snapshot previous matches by VIN so surviving vehicles preserve original foundAt & Selected Candidate state
+    final preservedMatchesByVin = <String, Map<String, dynamic>>{};
+    final removedTargetMatches = <Map<String, dynamic>>[];
+    for (final m in _matches) {
+      if (m['guestId']?.toString() != guestId) continue;
+      final v = (m['vin']?.toString() ?? '').trim();
+      if (v.isNotEmpty) {
+        preservedMatchesByVin[v] = Map<String, dynamic>.from(m);
+      }
+      final mTid = (m['targetId']?.toString() ?? '').trim();
+      final belongsToEdited = existingTargets.length <= 1 ||
+          mTid == resolvedId ||
+          mTid == targetId ||
+          (targetIdx == 0 && mTid.isEmpty) ||
+          (mTid.isNotEmpty && !validTargetIds.contains(mTid));
+      if (belongsToEdited) {
+        removedTargetMatches.add(Map<String, dynamic>.from(m));
+      }
+    }
+
+    // Remove all previous matches belonging to the edited target (or all guest matches when single-target)
     _matches.removeWhere((m) {
       if (m['guestId']?.toString() != guestId) return false;
+      if (existingTargets.length <= 1) return true;
       final mTid = (m['targetId']?.toString() ?? '').trim();
       if (mTid == resolvedId || mTid == targetId) return true;
       if (targetIdx == 0 && mTid.isEmpty) return true;
+      if (mTid.isNotEmpty && !validTargetIds.contains(mTid)) return true;
       return false;
     });
 
@@ -1210,15 +1584,26 @@ class LocalScoutEngine {
       ..._guests[idx],
       'vehicleTargets': existingTargets,
       'updatedAt': nowIso,
+      'criteriaUpdatedAt': nowIso,
     });
-    await _persist();
-    onDataMutatedForCloudSave?.call();
+
+    final strictAddedSpec = (updatedTargetModel.doors.isNotEmpty &&
+            updatedTargetModel.doors != oldTargetModel.doors) ||
+        (updatedTargetModel.bedLength.isNotEmpty &&
+            updatedTargetModel.bedLength != oldTargetModel.bedLength) ||
+        (updatedTargetModel.cabStyle.isNotEmpty &&
+            updatedTargetModel.cabStyle != oldTargetModel.cabStyle) ||
+        (updatedTargetModel.engineSpec.isNotEmpty &&
+            updatedTargetModel.engineSpec != oldTargetModel.engineSpec);
 
     final res = await runSearchForSingleGuest(
       guestId,
       slotLabel: 'Edited Search (${updatedTargetModel.label})',
       onlyTargetId: resolvedId,
       isInitialSearch: true,
+      preservedMatchesByVin: preservedMatchesByVin,
+      offlineFallbackTargetMatches: removedTargetMatches,
+      offlineStrictMissingSpecs: strictAddedSpec,
       mockCandidatesOverride: mockCandidatesOverride,
     );
     _recordBackupSnapshotSync(
@@ -1261,7 +1646,9 @@ class LocalScoutEngine {
       ..._guests[idx],
       'vehicleTargets': remaining,
       'updatedAt': nowIso,
+      'criteriaUpdatedAt': nowIso,
     });
+    _pruneNonMatchingMatchesForGuestSync(guestId);
     _recordBackupSnapshotSync(
       label:
           'Auto-Backup • Removed Vehicle (${_guests[idx]['name'] ?? 'Guest'})',
@@ -1359,6 +1746,9 @@ class LocalScoutEngine {
     String? onlyTargetId,
     bool isInitialSearch = false,
     bool isSeedSearch = false,
+    Map<String, Map<String, dynamic>>? preservedMatchesByVin,
+    List<Map<String, dynamic>>? offlineFallbackTargetMatches,
+    bool offlineStrictMissingSpecs = false,
     @visibleForTesting List<Map<String, dynamic>>? mockCandidatesOverride,
   }) async {
     await ensureInitialized();
@@ -1421,8 +1811,10 @@ class LocalScoutEngine {
 
     final nowIso = DateTime.now().toUtc().toIso8601String();
 
-    // Index existing matches for O(1) VIN lookup when saving 1,000+ matches
-    final existingByVin = <String, Map<String, dynamic>>{};
+    // Index existing + preserved matches for O(1) VIN lookup when saving 1,000+ matches
+    final existingByVin = <String, Map<String, dynamic>>{
+      ...?preservedMatchesByVin,
+    };
     for (final m in _matches) {
       if (m['guestId']?.toString() == guestId) {
         final v = m['vin']?.toString() ?? '';
@@ -1453,12 +1845,19 @@ class LocalScoutEngine {
 
     if (totalCandidatesScanned > 0 || mockCandidatesOverride != null) {
       if (onlyTargetId != null) {
+        final validTargetIds = allTargets.map((t) => t.id).toSet();
+        final isPrimaryTarget =
+            allTargets.isNotEmpty && allTargets.first.id == onlyTargetId;
         // Keep matches belonging to the guest's other vehicle targets; replace onlyTargetId's matches & duplicate VINs
         _matches.removeWhere((m) {
           if (m['guestId']?.toString() != guestId) return false;
-          final mTarget = m['targetId']?.toString() ?? '';
+          if (allTargets.length <= 1) return true;
+          final mTarget = (m['targetId']?.toString() ?? '').trim();
           final mVin = m['vin']?.toString() ?? '';
-          return mTarget == onlyTargetId || bestByVin.containsKey(mVin);
+          return mTarget == onlyTargetId ||
+              (isPrimaryTarget && mTarget.isEmpty) ||
+              (mTarget.isNotEmpty && !validTargetIds.contains(mTarget)) ||
+              bestByVin.containsKey(mVin);
         });
       } else {
         // Full scan across all vehicleTargets: rebuild cleanly while preserving original foundAt timestamps
@@ -1501,6 +1900,10 @@ class LocalScoutEngine {
           'mileage': v['mileage'] ?? 0,
           'drivetrain': v['drivetrain'] ?? '',
           'engine': v['engine'] ?? '',
+          'doors': v['doors'] ?? '',
+          'bedLength': v['bedLength'] ?? '',
+          'bodyStyle': v['bodyStyle'] ?? '',
+          'commentsSummary': v['commentsSummary'] ?? '',
           'exteriorColor': v['exteriorColor'] ?? '',
           'interiorColor': v['interiorColor'] ?? '',
           'photoUrl': v['photoUrl'] ?? '',
@@ -1558,15 +1961,47 @@ class LocalScoutEngine {
           createdAlerts.add(alert);
         }
       }
+    } else if (offlineFallbackTargetMatches != null &&
+        targetsToRun.length == 1) {
+      // Device is offline during Edit Search: keep ONLY cached vehicles that still satisfy the edited criteria
+      final editedTarget = targetsToRun.first;
+      for (final cached in offlineFallbackTargetMatches) {
+        if (doesStoredMatchSatisfyTarget(
+          cached,
+          editedTarget,
+          strictMissingSpecs: offlineStrictMissingSpecs,
+        )) {
+          _matches.add(<String, dynamic>{
+            ...cached,
+            'targetId': editedTarget.id,
+            'targetLabel': editedTarget.label,
+            'lastSeenAt': nowIso,
+          });
+        }
+      }
     }
 
-    final locCount = bestByVin.values
-        .map((m) => (m['vehicle'] as Map)['location']?.toString() ?? '')
-        .toSet()
-        .length;
-    final summaryText = targetsToRun.length > 1
-        ? 'Scanned ${targetsToRun.length} vehicle criteria (${targetSummaries.join(' • ')}) — ${bestByVin.length} match(es) across $locCount Preston location(s).'
-        : 'Scanned $totalCandidatesScanned live prestonmotor.com vehicles for ${targetsToRun.first.label}; verified ${bestByVin.length} match(es) across $locCount Preston location(s).';
+    // Always prune any remaining stored matches that no longer satisfy the guest's current targets
+    _pruneNonMatchingMatchesForGuestSync(guestId);
+
+    final activeGuestMatches =
+        _matches.where((m) => m['guestId']?.toString() == guestId).toList();
+    final locCount = (totalCandidatesScanned > 0 || mockCandidatesOverride != null)
+        ? bestByVin.values
+            .map((m) => (m['vehicle'] as Map)['location']?.toString() ?? '')
+            .toSet()
+            .length
+        : activeGuestMatches
+            .map((m) => m['location']?.toString() ?? '')
+            .toSet()
+            .length;
+    final summaryText = (totalCandidatesScanned == 0 &&
+            mockCandidatesOverride == null &&
+            offlineFallbackTargetMatches != null)
+        ? 'Updated criteria to ${targetsToRun.first.label}; filtered cached matches to ${activeGuestMatches.length} qualifying vehicle(s) across $locCount Preston location(s).'
+        : (targetsToRun.length > 1
+            ? 'Scanned ${targetsToRun.length} vehicle criteria (${targetSummaries.join(' • ')}) — ${bestByVin.length} match(es) across $locCount Preston location(s).'
+            : 'Scanned $totalCandidatesScanned live prestonmotor.com vehicles for ${targetsToRun.first.label}; verified ${bestByVin.length} match(es) across $locCount Preston location(s).');
 
     _guests[idx] = {
       ..._guests[idx],
@@ -3106,14 +3541,25 @@ class LocalScoutEngine {
         .toString()
         .compareTo((a['createdAt'] ?? '').toString()));
 
-    // 3. Merge remote matches for active non-deleted guests
-    final activeGuestIds = _guests
-        .map((g) => g['id']?.toString() ?? '')
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    // 3. Merge remote matches for active non-deleted guests (rejecting pre-edit or non-matching vehicles)
+    final activeGuestsById = <String, GuestProfile>{};
+    for (final g in _guests) {
+      final gid = (g['id']?.toString() ?? '').trim();
+      if (gid.isNotEmpty) {
+        activeGuestsById[gid] = GuestProfile.fromJson(_normalizeGuestMap(g));
+      }
+    }
 
-    _matches.removeWhere(
-        (m) => !activeGuestIds.contains(m['guestId']?.toString() ?? ''));
+    final beforePruneLen = _matches.length;
+    _matches.removeWhere((m) {
+      final gid = (m['guestId']?.toString() ?? '').trim();
+      final mergedGuest = activeGuestsById[gid];
+      if (mergedGuest == null) return true;
+      return resolveMatchingTargetForStoredMatch(m, mergedGuest) == null;
+    });
+    if (_matches.length != beforePruneLen) {
+      localChanged = true;
+    }
 
     final localMatchesByKey = <String, int>{};
     for (var i = 0; i < _matches.length; i++) {
@@ -3131,7 +3577,17 @@ class LocalScoutEngine {
         final rm = Map<String, dynamic>.from(item);
         final gid = rm['guestId']?.toString() ?? '';
         final vin = rm['vin']?.toString() ?? '';
-        if (gid.isEmpty || vin.isEmpty || !activeGuestIds.contains(gid)) {
+        final mergedGuest = activeGuestsById[gid];
+        if (gid.isEmpty || vin.isEmpty || mergedGuest == null) {
+          continue;
+        }
+
+        final matchedTarget = resolveMatchingTargetForStoredMatch(
+          rm,
+          mergedGuest,
+        );
+        if (matchedTarget == null) {
+          localChanged = true;
           continue;
         }
 
@@ -3140,7 +3596,29 @@ class LocalScoutEngine {
         final existingIdx = localMatchesByKey[key];
 
         if (existingIdx == null) {
-          _matches.add(rm);
+          final rmTid = (rm['targetId']?.toString() ?? '').trim();
+          final guestTargets = mergedGuest.effectiveTargets;
+          if (rmTid.isNotEmpty &&
+              guestTargets.length > 1 &&
+              !guestTargets.any((t) => t.id == rmTid)) {
+            localChanged = true;
+            continue;
+          }
+          final targetCutoff =
+              (matchedTarget.criteriaUpdatedAt ?? mergedGuest.criteriaUpdatedAt ?? '')
+                  .trim();
+          if (targetCutoff.isNotEmpty &&
+              rmSeen.isNotEmpty &&
+              rmSeen.compareTo(targetCutoff) < 0) {
+            localChanged = true;
+            continue;
+          }
+
+          _matches.add(<String, dynamic>{
+            ...rm,
+            if ((rm['targetId']?.toString() ?? '').trim().isEmpty)
+              'targetId': matchedTarget.id,
+          });
           localMatchesByKey[key] = _matches.length - 1;
           localChanged = true;
         } else {

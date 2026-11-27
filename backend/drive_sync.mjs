@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { db, getSetting, setSetting, mapGuestRow, mapMatchRow } from './db.mjs';
+import { resolveMatchingTargetForStoredMatch } from './gemini_agent.mjs';
 import {
   exportServerBackupsForDrive,
   mergeRemoteBackupsIntoLocal,
@@ -152,13 +153,13 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         max_price, max_mileage, drivetrain, exterior_color, features_json, notes,
         vehicle_targets_json, client_notes_json, deleted_note_ids_json,
         initial_search_completed, seen_match_vins_json, scheduled_call_vins_json,
-        active, last_searched_at, last_search_summary, created_at, updated_at
+        active, last_searched_at, last_search_summary, created_at, updated_at, criteria_updated_at
       ) VALUES (
         @id, @name, @phone, @email, @condition, @min_year, @max_year, @make, @model, @trim,
         @max_price, @max_mileage, @drivetrain, @exterior_color, @features_json, @notes,
         @vehicle_targets_json, @client_notes_json, @deleted_note_ids_json,
         @initial_search_completed, @seen_match_vins_json, @scheduled_call_vins_json,
-        @active, @last_searched_at, @last_search_summary, @created_at, @updated_at
+        @active, @last_searched_at, @last_search_summary, @created_at, @updated_at, @criteria_updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -191,7 +192,12 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           WHEN excluded.last_search_summary != '' THEN excluded.last_search_summary
           ELSE guests.last_search_summary
         END,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        criteria_updated_at = CASE
+          WHEN excluded.criteria_updated_at IS NOT NULL AND (guests.criteria_updated_at IS NULL OR excluded.criteria_updated_at > guests.criteria_updated_at)
+            THEN excluded.criteria_updated_at
+          ELSE guests.criteria_updated_at
+        END
     `);
 
     const updateOnlyNotesStmt = db.prepare(
@@ -230,7 +236,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
 
       const existing = db
         .prepare(
-          'SELECT updated_at, last_searched_at, created_at, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json, scheduled_call_vins_json FROM guests WHERE id = ?'
+          'SELECT updated_at, last_searched_at, created_at, criteria_updated_at, client_notes_json, deleted_note_ids_json, initial_search_completed, seen_match_vins_json, scheduled_call_vins_json FROM guests WHERE id = ?'
         )
         .get(rg.id);
       const localStamp = existing
@@ -313,6 +319,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           last_search_summary: String(rg.lastSearchSummary || ''),
           created_at: String(rg.createdAt || rgStamp),
           updated_at: String(rgStamp),
+          criteria_updated_at: rg.criteriaUpdatedAt ? String(rg.criteriaUpdatedAt) : null,
         });
         localChanged = true;
       } else if (
@@ -335,27 +342,39 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       }
     }
 
-    // 3. Merge remote matches for active guests
-    const activeGuestIds = new Set(
-      db
-        .prepare('SELECT id FROM guests')
-        .all()
-        .map((r) => r.id)
+    // 3. Merge remote matches for active guests (rejecting pre-edit or non-matching vehicles)
+    const activeGuestRows = db.prepare('SELECT * FROM guests').all();
+    const activeGuestsById = new Map(
+      activeGuestRows.map((row) => [row.id, mapGuestRow(row)])
     );
 
-    const existingMatches = db
-      .prepare(
-        'SELECT guest_id, vin, found_at, last_seen_at, is_selected_candidate, selected_at, selected_updated_at FROM matches'
-      )
-      .all();
-    const localMatchMap = new Map(
-      existingMatches.map((m) => [`${m.guest_id}::${m.vin}`, m])
-    );
+    const existingMatches = db.prepare('SELECT * FROM matches').all();
+    const delMatchByIdStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+    const localMatchMap = new Map();
+
+    // Prune any existing local matches that no longer satisfy the merged guest's current criteria
+    for (const mRow of existingMatches) {
+      const mergedGuest = activeGuestsById.get(mRow.guest_id);
+      if (!mergedGuest) {
+        delMatchByIdStmt.run(mRow.id);
+        localChanged = true;
+        continue;
+      }
+      const mappedLocal = mapMatchRow(mRow);
+      const matchedTarget = resolveMatchingTargetForStoredMatch(mappedLocal, mergedGuest);
+      if (!matchedTarget) {
+        delMatchByIdStmt.run(mRow.id);
+        localChanged = true;
+        continue;
+      }
+      localMatchMap.set(`${mRow.guest_id}::${mRow.vin}`, mRow);
+    }
 
     const upsertMatchStmt = db.prepare(`
       INSERT INTO matches (
         id, guest_id, vin, stock_number, title, year, make, model, trim, condition,
         price, msrp, dealer_fee, location, mileage, drivetrain, engine,
+        doors, bed_length, body_style, comments_summary,
         exterior_color, interior_color, photo_url, listing_url,
         matched_features_json, all_highlights_json, agent_summary, match_score,
         found_at, search_slot, last_seen_at, target_id, target_label,
@@ -363,6 +382,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
       ) VALUES (
         @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
         @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
+        @doors, @bed_length, @body_style, @comments_summary,
         @exterior_color, @interior_color, @photo_url, @listing_url,
         @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
         @found_at, @search_slot, @last_seen_at, @target_id, @target_label,
@@ -374,6 +394,10 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
         dealer_fee = excluded.dealer_fee,
         location = excluded.location,
         mileage = excluded.mileage,
+        doors = CASE WHEN excluded.doors != '' THEN excluded.doors ELSE matches.doors END,
+        bed_length = CASE WHEN excluded.bed_length != '' THEN excluded.bed_length ELSE matches.bed_length END,
+        body_style = CASE WHEN excluded.body_style != '' THEN excluded.body_style ELSE matches.body_style END,
+        comments_summary = CASE WHEN excluded.comments_summary != '' THEN excluded.comments_summary ELSE matches.comments_summary END,
         photo_url = excluded.photo_url,
         listing_url = excluded.listing_url,
         matched_features_json = excluded.matched_features_json,
@@ -406,10 +430,38 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
 
     const remoteMatches = Array.isArray(remote.matches) ? remote.matches : [];
     for (const rm of remoteMatches) {
-      if (!rm || !rm.guestId || !rm.vin || !activeGuestIds.has(rm.guestId)) continue;
+      if (!rm || !rm.guestId || !rm.vin) continue;
+      const mergedGuest = activeGuestsById.get(rm.guestId);
+      if (!mergedGuest) continue;
+
       const key = `${rm.guestId}::${rm.vin}`;
       const existing = localMatchMap.get(key);
       const rmSeen = rm.lastSeenAt || rm.foundAt || '';
+
+      // Reject remote matches that do not satisfy the guest's current search criteria
+      const matchedTarget = resolveMatchingTargetForStoredMatch(rm, mergedGuest);
+      if (!matchedTarget) {
+        localChanged = true;
+        continue;
+      }
+
+      // Also reject deleted pre-edit matches whose lastSeenAt predates a search edit
+      if (!existing) {
+        const rmTid = String(rm.targetId || '').trim();
+        const guestTargets = mergedGuest.vehicleTargets || [];
+        if (rmTid && guestTargets.length > 1 && !guestTargets.some((t) => t.id === rmTid)) {
+          localChanged = true;
+          continue;
+        }
+        const targetCutoff = String(
+          matchedTarget.criteriaUpdatedAt || mergedGuest.criteriaUpdatedAt || ''
+        );
+        if (targetCutoff && rmSeen && rmSeen < targetCutoff) {
+          localChanged = true;
+          continue;
+        }
+      }
+
       const rmSelUpdated = String(rm.selectedUpdatedAt || rm.selectedAt || '');
       const locSelUpdated = String(existing?.selected_updated_at || existing?.selected_at || '');
       const remoteSelectionWins =
@@ -451,6 +503,10 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           mileage: rm.mileage != null ? Number(rm.mileage) : 0,
           drivetrain: String(rm.drivetrain || ''),
           engine: String(rm.engine || ''),
+          doors: String(rm.doors || ''),
+          bed_length: String(rm.bedLength || ''),
+          body_style: String(rm.bodyStyle || ''),
+          comments_summary: String(rm.commentsSummary || ''),
           exterior_color: String(rm.exteriorColor || ''),
           interior_color: String(rm.interiorColor || ''),
           photo_url: String(rm.photoUrl || ''),
@@ -466,7 +522,7 @@ export function mergeRemoteSnapshotIntoLocal(remote) {
           found_at: String(rm.foundAt || rmSeen || new Date().toISOString()),
           search_slot: String(rm.searchSlot || 'Cloud Sync'),
           last_seen_at: String(rmSeen || new Date().toISOString()),
-          target_id: String(rm.targetId || ''),
+          target_id: String(rm.targetId || matchedTarget.id || ''),
           target_label: String(rm.targetLabel || ''),
           is_selected_candidate: mergedIsSelected,
           selected_at: mergedSelectedAt,

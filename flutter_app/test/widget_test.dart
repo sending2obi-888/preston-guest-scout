@@ -4055,6 +4055,284 @@ void main() {
     DocumentEquivalentService.mockSearchHandler = null;
     LocalScoutEngine.resetForTest();
   });
+
+  testWidgets(
+      'Editing a search in GuestMatchesScreen immediately updates Found Matches below to remove vehicles that no longer match',
+      (WidgetTester tester) async {
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+    String persistedStore = jsonEncode({
+      'guests': [],
+      'matches': [],
+      'settings': {'calendarPromptDismissed': true},
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedStore;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['storeJson'] is String) {
+            persistedStore = args['storeJson'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    final mockInventory = <Map<String, dynamic>>[
+      {
+        'vin': '1FTEX1CP0TKD11111',
+        'stockNumber': 'F1111',
+        'title': '2026 Ford F-150 XL',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XL',
+        'doors': '2',
+        'bedLength': '6.5',
+        'condition': 'New',
+        'price': 44500.0,
+        'location': 'Preston Ford of Hurlock',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Oxford White',
+      },
+      {
+        'vin': '1FTFW3L80TKD22222',
+        'stockNumber': 'F2222',
+        'title': '2026 Ford F-150 XLT',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'XLT',
+        'doors': '4',
+        'bedLength': '5.5',
+        'condition': 'New',
+        'price': 51900.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Carbonized Gray',
+      },
+      {
+        'vin': '1FTFW5L80TKD33333',
+        'stockNumber': 'F3333',
+        'title': '2026 Ford F-150 Lariat',
+        'year': 2026,
+        'make': 'Ford',
+        'model': 'F-150',
+        'trim': 'Lariat',
+        'doors': '4',
+        'bedLength': '6.5',
+        'condition': 'New',
+        'price': 61500.0,
+        'location': 'Boulevard Ford of Millsboro',
+        'drivetrain': '4WD',
+        'exteriorColor': 'Agate Black',
+      },
+    ];
+
+    // 1. Create broad Ford F-150 search under $65,000 -> all 3 vehicles match initially
+    final created = await LocalScoutEngine.createGuest(
+      name: 'Caleb Mercer',
+      make: 'Ford',
+      model: 'F-150',
+      maxPrice: 65000,
+      mockCandidatesOverride: mockInventory,
+    );
+    expect(created.matchesFound, 3);
+
+    // Mark both XL and XLT as Selected Candidates before editing search
+    await LocalScoutEngine.setMatchSelectedCandidate(
+      guestId: created.guest.id,
+      vin: '1FTEX1CP0TKD11111',
+      selected: true,
+    );
+    await LocalScoutEngine.setMatchSelectedCandidate(
+      guestId: created.guest.id,
+      vin: '1FTFW3L80TKD22222',
+      selected: true,
+    );
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1200, 2400);
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: created.guest.id,
+          onDataChanged: () {},
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Verify all 3 vehicles are shown in Found Matches below & 2 Marked
+    expect(find.text('Found Matches (3)'), findsOneWidget);
+    expect(find.text('2 Marked'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 XL'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 XLT'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 Lariat'), findsOneWidget);
+
+    // 2. Tap "Edit Search" in the UI, narrow Trim to XLT and Max Price to $54,000, and tap Save Changes & Re-Search
+    await tester.tap(find.byKey(const ValueKey('appbar_edit_search_button')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_trim_input')),
+      'XLT',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_max_price_input')),
+      '54000',
+    );
+    await tester.tap(find.text('Save Changes & Re-Search'));
+    await tester.pumpAndSettle();
+
+    // 3. Verify Found Matches below immediately updates to (1), removing XL and Lariat while preserving XLT + its Selected Candidate star
+    expect(find.text('Found Matches (1)'), findsOneWidget);
+    expect(find.text('1 Marked'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 XLT'), findsOneWidget);
+    expect(find.text('2026 Ford F-150 XL'), findsNothing);
+    expect(find.text('2026 Ford F-150 Lariat'), findsNothing);
+
+    await tester.pump(const Duration(seconds: 1));
+    LocalScoutEngine.cancelSchedulerForTest();
+    LocalScoutEngine.resetForTest();
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+  });
+
+  test(
+      'Cloud sync never resurrects pre-edit vehicles that no longer match an edited search',
+      () {
+    // Device A holds the OLD snapshot from before the search was edited (2 matches: XL and Lariat)
+    final staleCloudSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-edit-sync',
+          'name': 'Tessa Lin',
+          'make': 'Ford',
+          'model': 'F-150',
+          'maxPrice': 65000.0,
+          'createdAt': '2026-11-27T10:00:00Z',
+          'updatedAt': '2026-11-27T10:00:00Z',
+          'vehicleTargets': [
+            {
+              'id': 'guest-edit-sync-primary',
+              'make': 'Ford',
+              'model': 'F-150',
+              'maxPrice': 65000.0,
+              'createdAt': '2026-11-27T10:00:00Z',
+            }
+          ],
+        },
+      ],
+      'deletedGuestIds': <String, String>{},
+      'matches': [
+        {
+          'id': 'm-old-xl',
+          'guestId': 'guest-edit-sync',
+          'vin': '1FTEX1CP0TKD11111',
+          'title': '2026 Ford F-150 XL',
+          'make': 'Ford',
+          'model': 'F-150',
+          'trim': 'XL',
+          'price': 44500.0,
+          'location': 'Preston Ford of Hurlock',
+          'foundAt': '2026-11-27T10:01:00Z',
+          'lastSeenAt': '2026-11-27T10:01:00Z',
+          'targetId': 'guest-edit-sync-primary',
+        },
+        {
+          'id': 'm-keep-lariat',
+          'guestId': 'guest-edit-sync',
+          'vin': '1FTFW5L80TKD33333',
+          'title': '2026 Ford F-150 Lariat',
+          'make': 'Ford',
+          'model': 'F-150',
+          'trim': 'Lariat',
+          'price': 61500.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'foundAt': '2026-11-27T10:01:00Z',
+          'lastSeenAt': '2026-11-27T10:01:00Z',
+          'targetId': 'guest-edit-sync-primary',
+        },
+      ],
+    };
+
+    // Device B edited the search at 11:00:00Z to require Lariat trim -> only Lariat remains
+    final editedDeviceSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-edit-sync',
+          'name': 'Tessa Lin',
+          'make': 'Ford',
+          'model': 'F-150',
+          'trim': 'Lariat',
+          'maxPrice': 65000.0,
+          'createdAt': '2026-11-27T10:00:00Z',
+          'updatedAt': '2026-11-27T11:00:05Z',
+          'criteriaUpdatedAt': '2026-11-27T11:00:00Z',
+          'vehicleTargets': [
+            {
+              'id': 'guest-edit-sync-primary',
+              'make': 'Ford',
+              'model': 'F-150',
+              'trim': 'Lariat',
+              'maxPrice': 65000.0,
+              'createdAt': '2026-11-27T10:00:00Z',
+              'criteriaUpdatedAt': '2026-11-27T11:00:00Z',
+            }
+          ],
+        },
+      ],
+      'deletedGuestIds': <String, String>{},
+      'matches': [
+        {
+          'id': 'm-keep-lariat',
+          'guestId': 'guest-edit-sync',
+          'vin': '1FTFW5L80TKD33333',
+          'title': '2026 Ford F-150 Lariat',
+          'make': 'Ford',
+          'model': 'F-150',
+          'trim': 'Lariat',
+          'price': 61500.0,
+          'location': 'Boulevard Ford of Millsboro',
+          'foundAt': '2026-11-27T10:01:00Z',
+          'lastSeenAt': '2026-11-27T11:00:05Z',
+          'targetId': 'guest-edit-sync-primary',
+        },
+      ],
+    };
+
+    // Merge in BOTH directions (stale->edited AND edited->stale) — XL must be pruned in both!
+    final mergedAtoB = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: staleCloudSnapshot,
+      deviceBSnapshot: editedDeviceSnapshot,
+    );
+    final matchesAtoB = mergedAtoB['matches'] as List<dynamic>;
+    expect(matchesAtoB.length, 1);
+    expect((matchesAtoB.first as Map)['vin'], '1FTFW5L80TKD33333');
+
+    final mergedBtoA = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: editedDeviceSnapshot,
+      deviceBSnapshot: staleCloudSnapshot,
+    );
+    final matchesBtoA = mergedBtoA['matches'] as List<dynamic>;
+    expect(matchesBtoA.length, 1);
+    expect((matchesBtoA.first as Map)['vin'], '1FTFW5L80TKD33333');
+
+    LocalScoutEngine.resetForTest();
+  });
 }
 
 

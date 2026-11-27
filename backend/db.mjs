@@ -192,11 +192,16 @@ for (const ddl of [
   `ALTER TABLE guests ADD COLUMN seen_match_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN scheduled_call_vins_json TEXT DEFAULT '[]'`,
   `ALTER TABLE guests ADD COLUMN doors TEXT DEFAULT ''`,
+  `ALTER TABLE guests ADD COLUMN criteria_updated_at TEXT`,
   `ALTER TABLE matches ADD COLUMN target_id TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN target_label TEXT DEFAULT ''`,
   `ALTER TABLE matches ADD COLUMN is_selected_candidate INTEGER DEFAULT 0`,
   `ALTER TABLE matches ADD COLUMN selected_at TEXT`,
   `ALTER TABLE matches ADD COLUMN selected_updated_at TEXT`,
+  `ALTER TABLE matches ADD COLUMN doors TEXT DEFAULT ''`,
+  `ALTER TABLE matches ADD COLUMN bed_length TEXT DEFAULT ''`,
+  `ALTER TABLE matches ADD COLUMN body_style TEXT DEFAULT ''`,
+  `ALTER TABLE matches ADD COLUMN comments_summary TEXT DEFAULT ''`,
   `ALTER TABLE vin_recall_checks ADD COLUMN incomplete_count INTEGER DEFAULT 0`,
   `ALTER TABLE vin_recall_checks ADD COLUMN complete_count INTEGER DEFAULT 0`,
 ]) {
@@ -339,6 +344,7 @@ export function mapGuestRow(row) {
         features: Array.isArray(norm.features) ? norm.features.map(String) : [],
         notes: String(norm.notes || ''),
         createdAt: String(t.createdAt || row.created_at),
+        criteriaUpdatedAt: t.criteriaUpdatedAt ? String(t.criteriaUpdatedAt) : null,
       };
     });
 
@@ -377,6 +383,7 @@ export function mapGuestRow(row) {
       features: normPrimary.features,
       notes: normPrimary.notes || '',
       createdAt: row.created_at,
+      criteriaUpdatedAt: row.criteria_updated_at ? String(row.criteria_updated_at) : null,
     });
   }
 
@@ -463,6 +470,7 @@ export function mapGuestRow(row) {
     lastSearchSummary: row.last_search_summary || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at || row.last_searched_at || row.created_at,
+    criteriaUpdatedAt: row.criteria_updated_at || null,
     matchCount: Number(matchStats?.count || 0),
     selectedCandidateCount: Number(matchStats?.selected_count || 0),
     lowestMatchPrice: matchStats?.lowest_price ?? null,
@@ -568,6 +576,10 @@ export function mapMatchRow(row) {
     mileage: row.mileage,
     drivetrain: row.drivetrain || '',
     engine: row.engine || '',
+    doors: row.doors || '',
+    bedLength: row.bed_length || '',
+    bodyStyle: row.body_style || '',
+    commentsSummary: row.comments_summary || '',
     exteriorColor: row.exterior_color || '',
     interiorColor: row.interior_color || '',
     photoUrl: row.photo_url || '',

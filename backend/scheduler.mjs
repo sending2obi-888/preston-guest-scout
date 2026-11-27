@@ -3,13 +3,17 @@ import {
   db,
   getSetting,
   mapGuestRow,
+  mapMatchRow,
   formatVehicleTargetLabel,
   extractVehicleModelLabel,
   formatMatchNotificationMessage,
   mapNotificationRow,
 } from './db.mjs';
 import { searchPrestonInventory } from './preston_scraper.mjs';
-import { evaluateInventoryWithGeminiAgent } from './gemini_agent.mjs';
+import {
+  evaluateInventoryWithGeminiAgent,
+  resolveMatchingTargetForStoredMatch,
+} from './gemini_agent.mjs';
 import { scheduleAutoSaveToGoogleDrive } from './drive_sync.mjs';
 import { scheduleSameDayGuestCallEvent } from './calendar_sync.mjs';
 
@@ -85,15 +89,19 @@ const upsertMatchStmt = db.prepare(`
   INSERT INTO matches (
     id, guest_id, vin, stock_number, title, year, make, model, trim, condition,
     price, msrp, dealer_fee, location, mileage, drivetrain, engine,
+    doors, bed_length, body_style, comments_summary,
     exterior_color, interior_color, photo_url, listing_url,
     matched_features_json, all_highlights_json, agent_summary, match_score,
-    found_at, search_slot, last_seen_at, target_id, target_label
+    found_at, search_slot, last_seen_at, target_id, target_label,
+    is_selected_candidate, selected_at, selected_updated_at
   ) VALUES (
     @id, @guest_id, @vin, @stock_number, @title, @year, @make, @model, @trim, @condition,
     @price, @msrp, @dealer_fee, @location, @mileage, @drivetrain, @engine,
+    @doors, @bed_length, @body_style, @comments_summary,
     @exterior_color, @interior_color, @photo_url, @listing_url,
     @matched_features_json, @all_highlights_json, @agent_summary, @match_score,
-    @found_at, @search_slot, @last_seen_at, @target_id, @target_label
+    @found_at, @search_slot, @last_seen_at, @target_id, @target_label,
+    @is_selected_candidate, @selected_at, @selected_updated_at
   )
   ON CONFLICT(guest_id, vin) DO UPDATE SET
     price = excluded.price,
@@ -101,6 +109,10 @@ const upsertMatchStmt = db.prepare(`
     dealer_fee = excluded.dealer_fee,
     location = excluded.location,
     mileage = excluded.mileage,
+    doors = CASE WHEN excluded.doors != '' THEN excluded.doors ELSE matches.doors END,
+    bed_length = CASE WHEN excluded.bed_length != '' THEN excluded.bed_length ELSE matches.bed_length END,
+    body_style = CASE WHEN excluded.body_style != '' THEN excluded.body_style ELSE matches.body_style END,
+    comments_summary = CASE WHEN excluded.comments_summary != '' THEN excluded.comments_summary ELSE matches.comments_summary END,
     photo_url = excluded.photo_url,
     listing_url = excluded.listing_url,
     matched_features_json = excluded.matched_features_json,
@@ -120,8 +132,43 @@ const insertNotificationStmt = db.prepare(`
   )
 `);
 
+export function pruneNonMatchingMatchesForGuest(guestId) {
+  const rawGuest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+  if (!rawGuest) return 0;
+  const guest = mapGuestRow(rawGuest);
+  const rows = db.prepare('SELECT * FROM matches WHERE guest_id = ?').all(guestId);
+  if (rows.length === 0) return 0;
+
+  const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
+  const relinkStmt = db.prepare(
+    'UPDATE matches SET target_id = ?, target_label = ? WHERE id = ?'
+  );
+  let removed = 0;
+
+  for (const row of rows) {
+    const mapped = mapMatchRow(row);
+    const matchedTarget = resolveMatchingTargetForStoredMatch(mapped, guest);
+    if (!matchedTarget) {
+      delStmt.run(row.id);
+      removed++;
+    } else if (
+      matchedTarget.id &&
+      row.target_id &&
+      row.target_id !== matchedTarget.id
+    ) {
+      relinkStmt.run(
+        matchedTarget.id,
+        formatVehicleTargetLabel(matchedTarget),
+        row.id
+      );
+    }
+  }
+  return removed;
+}
+
 async function evaluateTargetsForGuest(guest, targetsToRun) {
   let totalCandidatesScanned = 0;
+  let anyFetchSucceeded = false;
   let modeUsed = getSetting('gemini_api_key') ? 'gemini' : 'smart-matcher';
   const bestByVin = new Map();
   const targetSummaries = [];
@@ -150,6 +197,7 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
     };
 
     const candidates = await searchPrestonInventory(virtualGuestSpec);
+    anyFetchSucceeded = true;
     const evaluation = await evaluateInventoryWithGeminiAgent(virtualGuestSpec, candidates);
     totalCandidatesScanned += candidates.length;
     modeUsed = evaluation.mode;
@@ -178,6 +226,7 @@ async function evaluateTargetsForGuest(guest, targetsToRun) {
 
   return {
     candidatesScanned: totalCandidatesScanned,
+    anyFetchSucceeded,
     matches: combinedMatches,
     mode: modeUsed,
     summary,
@@ -193,14 +242,26 @@ function persistEvaluatedMatchesAndNotifications({
   onlyTargetId = null,
   isInitialSearch = false,
   isSeedSearch = false,
+  preservedMatchesByVin = null,
 }) {
   const allTargets = guest.vehicleTargets || [];
   const validTargetIds = new Set(allTargets.map((t) => t.id));
+  const isPrimaryTarget =
+    Boolean(onlyTargetId) && allTargets.length > 0 && allTargets[0].id === onlyTargetId;
   const existingRows = db
-    .prepare('SELECT id, vin, target_id FROM matches WHERE guest_id = ?')
+    .prepare(
+      'SELECT id, vin, target_id, found_at, is_selected_candidate, selected_at, selected_updated_at FROM matches WHERE guest_id = ?'
+    )
     .all(guest.id);
-  const existingVins = new Set(existingRows.map((r) => String(r.vin || '')).filter(Boolean));
-  const seenVins = new Set([...(guest.seenMatchVins || []), ...existingVins]);
+  const existingByVin = new Map(
+    existingRows.map((r) => [String(r.vin || ''), r]).filter(([k]) => Boolean(k))
+  );
+  const existingVins = new Set(existingByVin.keys());
+  const seenVins = new Set([
+    ...(guest.seenMatchVins || []),
+    ...existingVins,
+    ...(preservedMatchesByVin instanceof Map ? preservedMatchesByVin.keys() : []),
+  ]);
   const scheduledCallVins = new Set(guest.scheduledCallVins || []);
   const calendarPermissionGranted = getSetting('calendar_permission_granted') === '1';
 
@@ -210,10 +271,11 @@ function persistEvaluatedMatchesAndNotifications({
 
   const createdNotifications = [];
   const vehiclesNeedingCallEvent = [];
+  const canPruneLive = Boolean(evalRes.anyFetchSucceeded || evalRes.candidatesScanned > 0);
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    if (!onlyTargetId && evalRes.candidatesScanned > 0) {
+    if (!onlyTargetId && canPruneLive) {
       const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
       const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
       for (const r of existingRows) {
@@ -224,11 +286,16 @@ function persistEvaluatedMatchesAndNotifications({
           delStmt.run(r.id);
         }
       }
-    } else if (onlyTargetId && evalRes.candidatesScanned > 0) {
+    } else if (onlyTargetId && canPruneLive) {
       const foundVins = new Set(evalRes.matches.map((m) => m.vehicle.vin));
       const delStmt = db.prepare('DELETE FROM matches WHERE id = ?');
       for (const r of existingRows) {
-        if (r.target_id === onlyTargetId && !foundVins.has(r.vin)) {
+        const belongsToEdited =
+          allTargets.length <= 1 ||
+          r.target_id === onlyTargetId ||
+          (isPrimaryTarget && !r.target_id) ||
+          (r.target_id && !validTargetIds.has(r.target_id));
+        if (belongsToEdited && !foundVins.has(r.vin)) {
           delStmt.run(r.id);
         }
       }
@@ -248,8 +315,12 @@ function persistEvaluatedMatchesAndNotifications({
         vehiclesNeedingCallEvent.push(v);
       }
 
+      const prev =
+        existingByVin.get(vin) ||
+        (preservedMatchesByVin instanceof Map ? preservedMatchesByVin.get(vin) : null);
+
       upsertMatchStmt.run({
-        id: crypto.randomUUID(),
+        id: prev?.id || crypto.randomUUID(),
         guest_id: guest.id,
         vin,
         stock_number: v.stockNumber || '',
@@ -266,6 +337,10 @@ function persistEvaluatedMatchesAndNotifications({
         mileage: v.mileage ?? 0,
         drivetrain: v.drivetrain || '',
         engine: v.engine || '',
+        doors: String(v.doors || ''),
+        bed_length: String(v.bedLength || ''),
+        body_style: String(v.bodyStyle || ''),
+        comments_summary: String(v.commentsSummary || ''),
         exterior_color: v.exteriorColor || '',
         interior_color: v.interiorColor || '',
         photo_url: v.photoUrl || '',
@@ -274,11 +349,14 @@ function persistEvaluatedMatchesAndNotifications({
         all_highlights_json: JSON.stringify(v.highlights || []),
         agent_summary: m.agentSummary || '',
         match_score: m.matchScore || 85,
-        found_at: nowIso,
+        found_at: prev?.found_at || nowIso,
         search_slot: slotLabel,
         last_seen_at: nowIso,
         target_id: m.targetId || '',
         target_label: m.targetLabel || '',
+        is_selected_candidate: prev?.is_selected_candidate ? 1 : 0,
+        selected_at: prev?.selected_at || null,
+        selected_updated_at: prev?.selected_updated_at || null,
       });
 
       if (hadCompletedInitialSearch && isBrandNewMatch) {
@@ -336,6 +414,7 @@ function persistEvaluatedMatchesAndNotifications({
     throw txErr;
   }
 
+  pruneNonMatchingMatchesForGuest(guest.id);
   return { createdNotifications, vehiclesNeedingCallEvent };
 }
 
@@ -347,6 +426,7 @@ export async function runSearchForGuest(
     isInitialSearch = false,
     isSeedSearch = false,
     calendarAccessToken = '',
+    preservedMatchesByVin = null,
   } = {}
 ) {
   const rawGuest = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
@@ -393,6 +473,7 @@ export async function runSearchForGuest(
         onlyTargetId,
         isInitialSearch,
         isSeedSearch,
+        preservedMatchesByVin,
       });
 
     let calendarEvent = null;

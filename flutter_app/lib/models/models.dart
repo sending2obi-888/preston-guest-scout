@@ -19,6 +19,7 @@ class VehicleSearchTarget {
   final List<String> features;
   final String notes;
   final String createdAt;
+  final String? criteriaUpdatedAt;
 
   const VehicleSearchTarget({
     required this.id,
@@ -39,10 +40,12 @@ class VehicleSearchTarget {
     this.features = const [],
     this.notes = '',
     this.createdAt = '',
+    this.criteriaUpdatedAt,
   });
 
   factory VehicleSearchTarget.fromJson(Map<String, dynamic> json) {
     final norm = NaturalLanguageVehicleParser.parseCriteriaMap(json);
+    final rawCriteriaUpd = json['criteriaUpdatedAt']?.toString().trim() ?? '';
     return VehicleSearchTarget(
       id: json['id']?.toString() ?? '',
       condition: norm['condition']?.toString() ?? 'Any',
@@ -65,6 +68,7 @@ class VehicleSearchTarget {
           const [],
       notes: norm['notes']?.toString() ?? '',
       createdAt: json['createdAt']?.toString() ?? '',
+      criteriaUpdatedAt: rawCriteriaUpd.isEmpty ? null : rawCriteriaUpd,
     );
   }
 
@@ -87,6 +91,7 @@ class VehicleSearchTarget {
         'features': features,
         'notes': notes,
         'createdAt': createdAt,
+        if (criteriaUpdatedAt != null) 'criteriaUpdatedAt': criteriaUpdatedAt,
       };
 
   String get label {
@@ -186,6 +191,7 @@ class GuestProfile {
   final String? lastSearchedAt;
   final String lastSearchSummary;
   final String createdAt;
+  final String? criteriaUpdatedAt;
   final int matchCount;
   final int selectedCandidateCount;
   final double? lowestMatchPrice;
@@ -220,6 +226,7 @@ class GuestProfile {
     this.lastSearchedAt,
     this.lastSearchSummary = '',
     required this.createdAt,
+    this.criteriaUpdatedAt,
     this.matchCount = 0,
     this.selectedCandidateCount = 0,
     this.lowestMatchPrice,
@@ -228,6 +235,7 @@ class GuestProfile {
   factory GuestProfile.fromJson(Map<String, dynamic> json) {
     final guestId = json['id']?.toString() ?? '';
     final createdAtStr = json['createdAt']?.toString() ?? '';
+    final rawCriteriaUpd = json['criteriaUpdatedAt']?.toString().trim() ?? '';
     final primaryFeatures = (json['features'] as List<dynamic>?)
             ?.map((e) => e.toString())
             .toList() ??
@@ -272,6 +280,7 @@ class GuestProfile {
           'features': primaryFeatures,
           'notes': json['notes']?.toString() ?? '',
           'createdAt': createdAtStr,
+          if (rawCriteriaUpd.isNotEmpty) 'criteriaUpdatedAt': rawCriteriaUpd,
         }),
       );
     }
@@ -358,6 +367,7 @@ class GuestProfile {
       lastSearchedAt: lastSearchedStr,
       lastSearchSummary: json['lastSearchSummary']?.toString() ?? '',
       createdAt: createdAtStr,
+      criteriaUpdatedAt: rawCriteriaUpd.isEmpty ? null : rawCriteriaUpd,
       matchCount: (json['matchCount'] as num?)?.toInt() ?? 0,
       selectedCandidateCount:
           (json['selectedCandidateCount'] as num?)?.toInt() ?? 0,
@@ -390,6 +400,7 @@ class GuestProfile {
         'features': features,
         'notes': notes,
         'createdAt': createdAt,
+        if (criteriaUpdatedAt != null) 'criteriaUpdatedAt': criteriaUpdatedAt,
       }),
     ];
   }
@@ -467,6 +478,10 @@ class VehicleMatch {
   final int mileage;
   final String drivetrain;
   final String engine;
+  final String doors;
+  final String bedLength;
+  final String bodyStyle;
+  final String commentsSummary;
   final String exteriorColor;
   final String interiorColor;
   final String photoUrl;
@@ -502,6 +517,10 @@ class VehicleMatch {
     this.mileage = 0,
     this.drivetrain = '',
     this.engine = '',
+    this.doors = '',
+    this.bedLength = '',
+    this.bodyStyle = '',
+    this.commentsSummary = '',
     this.exteriorColor = '',
     this.interiorColor = '',
     this.photoUrl = '',
@@ -544,6 +563,10 @@ class VehicleMatch {
       mileage: mileage,
       drivetrain: drivetrain,
       engine: engine,
+      doors: doors,
+      bedLength: bedLength,
+      bodyStyle: bodyStyle,
+      commentsSummary: commentsSummary,
       exteriorColor: exteriorColor,
       interiorColor: interiorColor,
       photoUrl: photoUrl,
@@ -584,6 +607,10 @@ class VehicleMatch {
       mileage: (json['mileage'] as num?)?.toInt() ?? 0,
       drivetrain: json['drivetrain']?.toString() ?? '',
       engine: json['engine']?.toString() ?? '',
+      doors: json['doors']?.toString() ?? '',
+      bedLength: json['bedLength']?.toString() ?? '',
+      bodyStyle: json['bodyStyle']?.toString() ?? '',
+      commentsSummary: json['commentsSummary']?.toString() ?? '',
       exteriorColor: json['exteriorColor']?.toString() ?? '',
       interiorColor: json['interiorColor']?.toString() ?? '',
       photoUrl: json['photoUrl']?.toString() ?? '',
@@ -609,6 +636,46 @@ class VehicleMatch {
       selectedUpdatedAt: rawSelUpd.isEmpty ? null : rawSelUpd,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'guestId': guestId,
+        'vin': vin,
+        'stockNumber': stockNumber,
+        'title': title,
+        'year': year,
+        'make': make,
+        'model': model,
+        'trim': trim,
+        'condition': condition,
+        'price': price,
+        'msrp': msrp,
+        'dealerFee': dealerFee,
+        'location': location,
+        'mileage': mileage,
+        'drivetrain': drivetrain,
+        'engine': engine,
+        if (doors.isNotEmpty) 'doors': doors,
+        if (bedLength.isNotEmpty) 'bedLength': bedLength,
+        if (bodyStyle.isNotEmpty) 'bodyStyle': bodyStyle,
+        if (commentsSummary.isNotEmpty) 'commentsSummary': commentsSummary,
+        'exteriorColor': exteriorColor,
+        'interiorColor': interiorColor,
+        'photoUrl': photoUrl,
+        'listingUrl': listingUrl,
+        'matchedFeatures': matchedFeatures,
+        'allHighlights': allHighlights,
+        'agentSummary': agentSummary,
+        'matchScore': matchScore,
+        'foundAt': foundAt,
+        'searchSlot': searchSlot,
+        'lastSeenAt': lastSeenAt,
+        'targetId': targetId,
+        'targetLabel': targetLabel,
+        'isSelectedCandidate': isSelectedCandidate,
+        'selectedAt': selectedAt,
+        'selectedUpdatedAt': selectedUpdatedAt,
+      };
 }
 
 class WidgetGuestEntry {
