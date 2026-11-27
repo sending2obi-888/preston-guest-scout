@@ -2,6 +2,7 @@ import 'package:material_ui/material_ui.dart';
 import 'package:intl/intl.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
+import '../widgets/edit_client_contact_dialog.dart';
 
 class GuestListScreen extends StatefulWidget {
   final List<GuestProfile> guests;
@@ -87,6 +88,20 @@ class _GuestListScreenState extends State<GuestListScreen> {
     } finally {
       if (mounted) setState(() => _searchingGuestIds.remove(guest.id));
     }
+  }
+
+  Future<void> _openEditContactDialog(GuestProfile guest) async {
+    final updated = await showDialog<GuestProfile>(
+      context: context,
+      builder: (_) => EditClientContactDialog(guest: guest),
+    );
+    if (updated == null || !mounted) return;
+    widget.onRefresh();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Updated contact info for ${updated.name}.'),
+      ),
+    );
   }
 
   Future<void> _confirmDelete(GuestProfile guest) async {
@@ -191,7 +206,7 @@ class _GuestListScreenState extends State<GuestListScreen> {
                 onChanged: (v) => setState(() => _query = v.trim()),
                 decoration: InputDecoration(
                   hintText:
-                      'Filter guests by name, any monitored make/model, trim, or notes...',
+                      'Filter guests by name, phone, email, make/model, trim, or notes...',
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: _query.isNotEmpty
                       ? IconButton(
@@ -412,6 +427,77 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                                         .withValues(alpha: 0.88),
                                                   ),
                                                 ),
+                                                if (guest.phone.isNotEmpty ||
+                                                    guest.email.isNotEmpty) ...[
+                                                  const SizedBox(height: 4),
+                                                  Wrap(
+                                                    spacing: 12,
+                                                    runSpacing: 2,
+                                                    crossAxisAlignment:
+                                                        WrapCrossAlignment
+                                                            .center,
+                                                    children: [
+                                                      if (guest
+                                                          .phone.isNotEmpty)
+                                                        Row(
+                                                          mainAxisSize:
+                                                              MainAxisSize.min,
+                                                          children: [
+                                                            Icon(
+                                                              Icons
+                                                                  .phone_outlined,
+                                                              size: 13,
+                                                              color: scheme
+                                                                  .onSurfaceVariant,
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 4),
+                                                            Text(
+                                                              guest.phone,
+                                                              style: textTheme
+                                                                  .bodySmall
+                                                                  ?.copyWith(
+                                                                color: scheme
+                                                                    .onSurfaceVariant,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w500,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      if (guest
+                                                          .email.isNotEmpty)
+                                                        Row(
+                                                          mainAxisSize:
+                                                              MainAxisSize.min,
+                                                          children: [
+                                                            Icon(
+                                                              Icons
+                                                                  .email_outlined,
+                                                              size: 13,
+                                                              color: scheme
+                                                                  .onSurfaceVariant,
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 4),
+                                                            Text(
+                                                              guest.email,
+                                                              style: textTheme
+                                                                  .bodySmall
+                                                                  ?.copyWith(
+                                                                color: scheme
+                                                                    .onSurfaceVariant,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w500,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                    ],
+                                                  ),
+                                                ],
                                                 const SizedBox(height: 6),
                                                 Wrap(
                                                   spacing: 12,
@@ -457,6 +543,18 @@ class _GuestListScreenState extends State<GuestListScreen> {
                                             ),
                                           ),
                                           const SizedBox(width: 8),
+                                          IconButton(
+                                            key: ValueKey(
+                                              'guest_list_edit_contact_${guest.id}',
+                                            ),
+                                            tooltip: 'Edit Client Contact Info',
+                                            onPressed: () =>
+                                                _openEditContactDialog(guest),
+                                            icon: Icon(
+                                              Icons.contact_phone_outlined,
+                                              color: scheme.onSurfaceVariant,
+                                            ),
+                                          ),
                                           IconButton(
                                             tooltip:
                                                 'Run Gemini Search Now on prestonmotor.com',

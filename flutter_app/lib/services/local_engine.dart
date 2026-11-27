@@ -1704,6 +1704,117 @@ class LocalScoutEngine {
     return getGuestWithMatches(guestId);
   }
 
+  static Future<GuestProfile> updateGuestContactInfo({
+    required String guestId,
+    required String name,
+    String phone = '',
+    String email = '',
+  }) async {
+    await ensureInitialized();
+    final trimmedName = name.trim();
+    if (trimmedName.isEmpty) {
+      throw Exception('Client name cannot be empty.');
+    }
+    final trimmedPhone = phone.trim();
+    final trimmedEmail = email.trim();
+
+    final idx = _guests.indexWhere((g) => g['id']?.toString() == guestId);
+    if (idx == -1) throw Exception('Guest not found');
+
+    _guests[idx] = _normalizeGuestMap(_guests[idx]);
+    final prevName = (_guests[idx]['name']?.toString() ?? '').trim();
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    _guests[idx] = _normalizeGuestMap(<String, dynamic>{
+      ..._guests[idx],
+      'name': trimmedName,
+      'phone': trimmedPhone,
+      'email': trimmedEmail,
+      'updatedAt': nowIso,
+    });
+
+    // Keep saved notifications & same-day call calendar events aligned with updated contact info
+    bool notifsChanged = false;
+    for (var i = 0; i < _notifications.length; i++) {
+      if (_notifications[i]['guestId']?.toString() != guestId) continue;
+      final modelLbl =
+          (_notifications[i]['vehicleModel']?.toString() ?? 'Vehicle').trim();
+      _notifications[i] = <String, dynamic>{
+        ..._notifications[i],
+        'guestName': trimmedName,
+        'guestPhone': trimmedPhone,
+        if (prevName != trimmedName)
+          'message': '$trimmedName - Match Found - $modelLbl',
+      };
+      notifsChanged = true;
+    }
+    if (notifsChanged) {
+      MatchNotificationService.instance.hydratePersistedNotifications(
+        _notifications.map(MatchAlertNotification.fromJson).toList(),
+      );
+    }
+
+    bool calChanged = false;
+    for (var i = 0; i < _calendarEvents.length; i++) {
+      if (_calendarEvents[i]['guestId']?.toString() != guestId) continue;
+      final curTitle = (_calendarEvents[i]['title']?.toString() ?? '').trim();
+      final oldPrefix = 'Call $prevName';
+      final nextTitle =
+          (prevName.isNotEmpty && curTitle.startsWith(oldPrefix))
+              ? 'Call $trimmedName${curTitle.substring(oldPrefix.length)}'
+              : curTitle;
+      var nextDesc = _calendarEvents[i]['description']?.toString() ?? '';
+      if (prevName.isNotEmpty && prevName != trimmedName) {
+        nextDesc =
+            nextDesc.replaceFirst('Client: $prevName', 'Client: $trimmedName');
+      }
+      if (RegExp(r'^Phone:.*$', multiLine: true).hasMatch(nextDesc)) {
+        nextDesc = nextDesc.replaceFirst(
+          RegExp(r'^Phone:.*$', multiLine: true),
+          trimmedPhone.isNotEmpty
+              ? 'Phone: $trimmedPhone'
+              : 'Phone: Not provided',
+        );
+      } else if (trimmedPhone.isNotEmpty) {
+        nextDesc =
+            nextDesc.isEmpty ? 'Phone: $trimmedPhone' : '$nextDesc\nPhone: $trimmedPhone';
+      }
+      if (RegExp(r'^Email:.*$', multiLine: true).hasMatch(nextDesc)) {
+        nextDesc = nextDesc.replaceFirst(
+          RegExp(r'^Email:.*$', multiLine: true),
+          trimmedEmail.isNotEmpty
+              ? 'Email: $trimmedEmail'
+              : 'Email: Not provided',
+        );
+      } else if (trimmedEmail.isNotEmpty) {
+        nextDesc =
+            nextDesc.isEmpty ? 'Email: $trimmedEmail' : '$nextDesc\nEmail: $trimmedEmail';
+      }
+      _calendarEvents[i] = <String, dynamic>{
+        ..._calendarEvents[i],
+        'guestName': trimmedName,
+        'guestPhone': trimmedPhone,
+        'title': nextTitle,
+        'description': nextDesc,
+      };
+      calChanged = true;
+    }
+    if (calChanged) {
+      CalendarService.instance.hydratePersistedState(
+        events: _calendarEvents.map(CalendarCallEvent.fromJson).toList(),
+        permissionGranted: _settings['calendarPermissionGranted'] == true,
+        promptDismissed: _settings['calendarPromptDismissed'] == true,
+      );
+    }
+
+    _recordBackupSnapshotSync(
+      label: 'Auto-Backup • Updated Contact ($trimmedName)',
+    );
+    await _persist();
+    onDataMutatedForCloudSave?.call();
+    return _hydrateGuest(_guests[idx]);
+  }
+
   static Future<GuestProfile> addGuestNote({
     required String guestId,
     required String text,

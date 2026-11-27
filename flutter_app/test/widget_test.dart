@@ -4657,6 +4657,359 @@ void main() {
 
     LocalScoutEngine.resetForTest();
   });
+
+  testWidgets(
+      'Client contact info (name, phone, email) can be updated after initial search across GuestMatchesScreen and GuestListScreen while preserving matches, selected candidates, notifications, and calendar events',
+      (WidgetTester tester) async {
+    await tester.binding.setSurfaceSize(const Size(1200, 1800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    LocalScoutEngine.resetForTest();
+    const storeChannel = MethodChannel('com.prestonmotor.scout/launcher_widget');
+
+    String persistedJson = jsonEncode({
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-contact-1',
+          'name': 'Alex Rivera',
+          'phone': null,
+          'email': null,
+          'make': 'Ford',
+          'model': 'Explorer',
+          'trim': 'XLT',
+          'createdAt': '2026-11-26T09:00:00Z',
+          'updatedAt': '2026-11-26T09:00:00Z',
+          'lastFullScanAt': '2026-11-26T09:00:00Z',
+          'clientNotes': [
+            {
+              'id': 'note-alex-1',
+              'text': 'Walk-in guest — waiting on cell number.',
+              'createdAt': '2026-11-26T09:02:00Z',
+            },
+          ],
+        },
+      ],
+      'matches': [
+        {
+          'id': 'match-alex-1',
+          'guestId': 'guest-contact-1',
+          'vin': '1FMSK8DH0RGA55555',
+          'stockNumber': 'P55555',
+          'title': '2025 Ford Explorer XLT 4WD',
+          'year': 2025,
+          'make': 'Ford',
+          'model': 'Explorer',
+          'trim': 'XLT',
+          'price': 42990.0,
+          'location': 'Preston Ford of Hurlock',
+          'foundAt': '2026-11-26T09:05:00Z',
+          'lastSeenAt': '2026-11-26T09:05:00Z',
+          'isSelectedCandidate': true,
+          'selectedAt': '2026-11-26T09:10:00Z',
+        },
+      ],
+      'notifications': [
+        {
+          'id': 'notif-alex-1',
+          'guestId': 'guest-contact-1',
+          'guestName': 'Alex Rivera',
+          'vin': '1FMSK8DH0RGA55555',
+          'vehicleModel': 'Ford Explorer',
+          'vehicleTitle': '2025 Ford Explorer XLT 4WD',
+          'message': 'New Ford Explorer found for Alex Rivera',
+          'slotLabel': '2:00 PM Daily Search',
+          'createdAt': '2026-11-26T14:00:00Z',
+        },
+      ],
+      'calendarEvents': [
+        {
+          'id': 'cal-alex-1',
+          'guestId': 'guest-contact-1',
+          'guestName': 'Alex Rivera',
+          'guestPhone': '',
+          'eventDate': '2026-11-26',
+          'startAt': '2026-11-26T14:30:00',
+          'endAt': '2026-11-26T15:00:00',
+          'title': 'Call Alex Rivera — Match Found: Ford Explorer',
+          'description': 'Matched vehicle ready at Preston Ford of Hurlock.',
+          'location': 'Preston Ford of Hurlock',
+          'vehicleSummary': 'Ford Explorer',
+          'provider': 'local_schedule',
+          'createdAt': '2026-11-26T14:00:00Z',
+        },
+      ],
+    });
+
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      storeChannel,
+      (call) async {
+        if (call.method == 'readLocalStore') return persistedJson;
+        if (call.method == 'writeLocalStore') {
+          final args = call.arguments as Map?;
+          if (args != null && args['json'] is String) {
+            persistedJson = args['json'] as String;
+          }
+          return true;
+        }
+        return true;
+      },
+    );
+
+    await LocalScoutEngine.ensureInitialized();
+
+    int dataChangedCalls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GuestMatchesScreen(
+          guestId: 'guest-contact-1',
+          onDataChanged: () => dataChangedCalls++,
+          onSelectMatch: (_, _) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Initially shows Add Contact button when no phone or email is on file
+    expect(
+      find.byKey(const ValueKey('client_contact_info_summary')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('edit_client_contact_button')),
+      findsOneWidget,
+    );
+    expect(find.text('Add Contact'), findsOneWidget);
+
+    // Open EditClientContactDialog and add phone, email, and updated name
+    await tester.tap(find.byKey(const ValueKey('edit_client_contact_button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit Client Contact Info'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_contact_name_input')),
+      'Alexander Rivera',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_contact_phone_input')),
+      '(410) 555-0148',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_contact_email_input')),
+      'alex.rivera@example.com',
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('dialog_save_contact_button')));
+    await tester.pumpAndSettle();
+
+    // Flush 700ms Google Drive auto-save debounce timer if active
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(dataChangedCalls, greaterThanOrEqualTo(1));
+    expect(
+      find.byKey(const ValueKey('client_contact_info_summary')),
+      findsOneWidget,
+    );
+    expect(find.text('(410) 555-0148'), findsWidgets);
+    expect(find.text('alex.rivera@example.com'), findsWidgets);
+    expect(
+      find.textContaining('Target Vehicles for Alexander Rivera'),
+      findsOneWidget,
+    );
+
+    // Verify existing match, Selected Candidate status, and client notes are untouched
+    final detailAfter =
+        await LocalScoutEngine.getGuestWithMatches('guest-contact-1');
+    expect(detailAfter.guest.name, 'Alexander Rivera');
+    expect(detailAfter.guest.phone, '(410) 555-0148');
+    expect(detailAfter.guest.email, 'alex.rivera@example.com');
+    expect(detailAfter.guest.clientNotes.length, 1);
+    expect(detailAfter.matches.length, 1);
+    expect(detailAfter.matches.first.vin, '1FMSK8DH0RGA55555');
+    expect(detailAfter.matches.first.isSelectedCandidate, isTrue);
+
+    // Verify notifications and calendar events were updated to reflect new contact details
+    expect(
+      MatchNotificationService.instance.notifications.first.guestName,
+      'Alexander Rivera',
+    );
+    expect(
+      MatchNotificationService.instance.notifications.first.message,
+      contains('Alexander Rivera'),
+    );
+    expect(
+      CalendarService.instance.events.first.guestName,
+      'Alexander Rivera',
+    );
+    expect(
+      CalendarService.instance.events.first.guestPhone,
+      '(410) 555-0148',
+    );
+    expect(
+      CalendarService.instance.events.first.title,
+      contains('Call Alexander Rivera'),
+    );
+    expect(
+      CalendarService.instance.events.first.description,
+      contains('(410) 555-0148'),
+    );
+
+    // Verify GuestListScreen displays contact info, filters by phone/email, and supports inline editing
+    final guests = await LocalScoutEngine.getAllGuests();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: GuestListScreen(
+            guests: guests,
+            isLoading: false,
+            onSelectGuest: (_) {},
+            onSwitchToIntake: () {},
+            onRefresh: () => dataChangedCalls++,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Alexander Rivera'), findsOneWidget);
+    expect(find.text('(410) 555-0148'), findsOneWidget);
+    expect(find.text('alex.rivera@example.com'), findsOneWidget);
+
+    // Filter by phone number
+    await tester.enterText(find.byType(TextField).first, '555-0148');
+    await tester.pumpAndSettle();
+    expect(find.text('Alexander Rivera'), findsOneWidget);
+
+    // Edit contact directly from GuestListScreen row (e.g. update phone and clear email)
+    await tester.tap(
+      find.byKey(const ValueKey('guest_list_edit_contact_guest-contact-1')),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_contact_phone_input')),
+      '(302) 555-0188',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('dialog_contact_email_input')),
+      '',
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('dialog_save_contact_button')));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 1));
+
+    final detailFinal =
+        await LocalScoutEngine.getGuestWithMatches('guest-contact-1');
+    expect(detailFinal.guest.phone, '(302) 555-0188');
+    expect(detailFinal.guest.email, isEmpty);
+    expect(detailFinal.matches.length, 1);
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(storeChannel, null);
+    LocalScoutEngine.resetForTest();
+  });
+
+  test(
+      'Multi-device cloud sync propagates updated client contact info (including cleared fields) across devices without losing matches or notes',
+      () {
+    LocalScoutEngine.resetForTest();
+
+    final olderDeviceSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-contact-sync',
+          'name': 'Morgan Ellis',
+          'phone': '(410) 555-0100',
+          'email': 'old.morgan@example.com',
+          'make': 'Mazda',
+          'model': 'CX-90',
+          'createdAt': '2026-11-27T08:00:00Z',
+          'updatedAt': '2026-11-27T08:00:00Z',
+          'lastFullScanAt': '2026-11-27T08:00:00Z',
+          'clientNotes': [
+            {
+              'id': 'note-1',
+              'text': 'Wants Captain Chairs.',
+              'createdAt': '2026-11-27T08:01:00Z',
+            },
+          ],
+        },
+      ],
+      'matches': [
+        {
+          'id': 'm-cx90-1',
+          'guestId': 'guest-contact-sync',
+          'vin': 'JM3KKDHD0R1100200',
+          'title': '2025 Mazda CX-90 3.3 Turbo Preferred Plus',
+          'make': 'Mazda',
+          'model': 'CX-90',
+          'price': 45900.0,
+          'foundAt': '2026-11-27T08:00:00Z',
+          'lastSeenAt': '2026-11-27T08:00:00Z',
+          'isSelectedCandidate': true,
+        },
+      ],
+    };
+
+    final updatedContactSnapshot = <String, dynamic>{
+      'schemaVersion': 2,
+      'guests': [
+        {
+          'id': 'guest-contact-sync',
+          'name': 'Morgan Ellis-Wright',
+          'phone': '(410) 555-0199',
+          'email': null, // Cleared obsolete email on Device B
+          'make': 'Mazda',
+          'model': 'CX-90',
+          'createdAt': '2026-11-27T08:00:00Z',
+          'updatedAt': '2026-11-27T15:00:00Z',
+          'lastFullScanAt': '2026-11-27T08:00:00Z',
+          'clientNotes': [
+            {
+              'id': 'note-1',
+              'text': 'Wants Captain Chairs.',
+              'createdAt': '2026-11-27T08:01:00Z',
+            },
+          ],
+        },
+      ],
+      'matches': [
+        {
+          'id': 'm-cx90-1',
+          'guestId': 'guest-contact-sync',
+          'vin': 'JM3KKDHD0R1100200',
+          'title': '2025 Mazda CX-90 3.3 Turbo Preferred Plus',
+          'make': 'Mazda',
+          'model': 'CX-90',
+          'price': 45900.0,
+          'foundAt': '2026-11-27T08:00:00Z',
+          'lastSeenAt': '2026-11-27T08:00:00Z',
+          'isSelectedCandidate': true,
+        },
+      ],
+    };
+
+    final merged = LocalScoutEngine.simulateMultiDeviceCloudMergeForTest(
+      deviceASnapshot: olderDeviceSnapshot,
+      deviceBSnapshot: updatedContactSnapshot,
+    );
+    final mergedGuests = merged['guests'] as List<dynamic>;
+    final guestMap = mergedGuests.first as Map<String, dynamic>;
+    expect(guestMap['name'], 'Morgan Ellis-Wright');
+    expect(guestMap['phone'], '(410) 555-0199');
+    expect(guestMap['email'], isNull);
+
+    final mergedMatches = merged['matches'] as List<dynamic>;
+    expect(mergedMatches.length, 1);
+    expect((mergedMatches.first as Map)['isSelectedCandidate'], isTrue);
+
+    LocalScoutEngine.resetForTest();
+  });
 }
 
 

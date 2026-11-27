@@ -568,6 +568,44 @@ class ApiService {
     );
   }
 
+  static Future<GuestProfile> updateGuestContactInfo({
+    required String guestId,
+    required String name,
+    String phone = '',
+    String email = '',
+  }) async {
+    if (_useLocalOnDeviceEngine) {
+      return LocalScoutEngine.updateGuestContactInfo(
+        guestId: guestId,
+        name: name,
+        phone: phone,
+        email: email,
+      );
+    }
+
+    final res = await http.patch(
+      Uri.parse('$baseUrl/api/guests/${Uri.encodeComponent(guestId)}'),
+      headers: _headers(jsonBody: true),
+      body: jsonEncode({
+        'name': name,
+        'phone': phone,
+        'email': email,
+      }),
+    );
+
+    if (res.statusCode != 200) {
+      final err = jsonDecode(res.body);
+      throw Exception(err['error'] ?? 'Failed to update client contact info');
+    }
+
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final updated = GuestProfile.fromJson(data['guest'] as Map<String, dynamic>);
+    await fetchLauncherWidgetGuests();
+    await fetchNotifications();
+    await fetchCalendarStatus();
+    return updated;
+  }
+
   static Future<GuestProfile> addGuestNote({
     required String guestId,
     required String text,

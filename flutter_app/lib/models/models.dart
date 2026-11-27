@@ -428,7 +428,11 @@ class GuestProfile {
   }
 
   String get allSearchableSpecsText {
-    final buf = StringBuffer(name);
+    final buf = StringBuffer(name)
+      ..write(' ')
+      ..write(phone)
+      ..write(' ')
+      ..write(email);
     for (final t in effectiveTargets) {
       buf
         ..write(' ')

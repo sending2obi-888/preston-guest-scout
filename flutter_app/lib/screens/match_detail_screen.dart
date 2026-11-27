@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../widgets/copyable_identifier_badge.dart';
+import '../widgets/edit_client_contact_dialog.dart';
 import 'vin_recall_screen.dart';
 
 class MatchDetailScreen extends StatefulWidget {
@@ -24,12 +25,31 @@ class MatchDetailScreen extends StatefulWidget {
 
 class _MatchDetailScreenState extends State<MatchDetailScreen> {
   late VehicleMatch _match;
+  late GuestProfile _guest;
   bool _togglingCandidate = false;
 
   @override
   void initState() {
     super.initState();
     _match = widget.match;
+    _guest = widget.guest;
+  }
+
+  Future<void> _openEditContactDialog() async {
+    final updated = await showDialog<GuestProfile>(
+      context: context,
+      builder: (_) => EditClientContactDialog(guest: _guest),
+    );
+    if (updated == null || !mounted) return;
+    widget.onDataChanged?.call();
+    setState(() {
+      _guest = updated;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Updated contact info for ${updated.name}.'),
+      ),
+    );
   }
 
   String _formatFullDate(String iso) {
@@ -56,7 +76,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
 
     try {
       final res = await ApiService.setMatchSelectedCandidate(
-        guestId: widget.guest.id,
+        guestId: _guest.id,
         vin: _match.vin.isNotEmpty ? _match.vin : _match.id,
         selected: nextSelected,
       );
@@ -69,7 +89,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
         SnackBar(
           content: Text(
             nextSelected
-                ? 'Marked ${_match.title} as a Selected Candidate for ${widget.guest.name}.'
+                ? 'Marked ${_match.title} as a Selected Candidate for ${_guest.name}.'
                 : 'Removed ${_match.title} from Selected Candidates.',
           ),
         ),
@@ -129,6 +149,12 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
       appBar: AppBar(
         title: Text(_match.title),
         actions: [
+          if (MediaQuery.sizeOf(context).width >= 900)
+            IconButton(
+              tooltip: 'Edit Client Contact Info',
+              onPressed: _openEditContactDialog,
+              icon: const Icon(Icons.contact_phone_outlined),
+            ),
           if (_match.vin.trim().length == 17)
             Padding(
               padding: const EdgeInsets.only(right: 8),
@@ -230,18 +256,51 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
                                       ],
                                     ),
                                   ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
+                                Tooltip(
+                                  message: 'Edit Client Contact Info',
+                                  child: Material(
                                     color: scheme.primaryContainer,
                                     borderRadius: BorderRadius.circular(20),
-                                  ),
-                                  child: Text(
-                                    'Matched for ${widget.guest.name}',
-                                    style: textTheme.labelSmall?.copyWith(
-                                      color: scheme.onPrimaryContainer,
-                                      fontWeight: FontWeight.w700,
+                                    child: InkWell(
+                                      key: const ValueKey(
+                                        'match_detail_edit_contact_button',
+                                      ),
+                                      borderRadius: BorderRadius.circular(20),
+                                      onTap: _openEditContactDialog,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                [
+                                                  'Matched for ${_guest.name}',
+                                                  if (_guest.phone.isNotEmpty)
+                                                    _guest.phone,
+                                                  if (_guest.email.isNotEmpty)
+                                                    _guest.email,
+                                                ].join(' • '),
+                                                style: textTheme.labelSmall
+                                                    ?.copyWith(
+                                                  color:
+                                                      scheme.onPrimaryContainer,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 5),
+                                            Icon(
+                                              Icons.edit_outlined,
+                                              size: 13,
+                                              color: scheme.onPrimaryContainer,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -464,13 +523,13 @@ class _MatchDetailScreenState extends State<MatchDetailScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    'Specific Features Meeting ${widget.guest.name}\'s Requirements',
+                                    'Specific Features Meeting ${_guest.name}\'s Requirements',
                                     style: textTheme.titleMedium?.copyWith(
                                       fontWeight: FontWeight.w800,
                                     ),
                                   ),
                                   Text(
-                                    'Verified against previously input target specs (${widget.guest.targetVehicleLabel})',
+                                    'Verified against previously input target specs (${_guest.targetVehicleLabel})',
                                     style: textTheme.bodySmall?.copyWith(
                                       color: scheme.onSurfaceVariant,
                                     ),

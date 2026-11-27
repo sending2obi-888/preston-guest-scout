@@ -637,18 +637,107 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true });
       }
 
-      if (!subResource && req.method === 'PATCH') {
+      if (
+        (!subResource && req.method === 'PATCH') ||
+        (subResource === 'contact' &&
+          !subId &&
+          (req.method === 'PATCH' || req.method === 'PUT' || req.method === 'POST'))
+      ) {
+        const existing = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
+        if (!existing) return sendJson(res, 404, { error: 'Guest not found' });
+
         const body = await readJsonBody(req);
-        if (typeof body.active === 'boolean') {
-          db.prepare('UPDATE guests SET active = ?, updated_at = ? WHERE id = ?').run(
-            body.active ? 1 : 0,
-            new Date().toISOString(),
-            guestId
-          );
-          scheduleAutoSaveToGoogleDrive(bearerToken);
+        const nowIso = new Date().toISOString();
+        const hasContactEdit =
+          typeof body.name === 'string' ||
+          typeof body.phone === 'string' ||
+          typeof body.email === 'string';
+
+        const nextName =
+          typeof body.name === 'string' ? body.name.trim() : existing.name;
+        if (!nextName) {
+          return sendJson(res, 400, { error: 'Client name cannot be empty.' });
         }
+        const nextPhone =
+          typeof body.phone === 'string' ? body.phone.trim() : existing.phone || '';
+        const nextEmail =
+          typeof body.email === 'string' ? body.email.trim() : existing.email || '';
+        const nextActive =
+          typeof body.active === 'boolean'
+            ? body.active
+              ? 1
+              : 0
+            : existing.active;
+
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.prepare(
+            `UPDATE guests
+                SET name = ?,
+                    phone = ?,
+                    email = ?,
+                    active = ?,
+                    updated_at = ?
+              WHERE id = ?`
+          ).run(nextName, nextPhone, nextEmail, nextActive, nowIso, guestId);
+
+          if (hasContactEdit) {
+            if (nextName !== existing.name) {
+              const notifRows = db
+                .prepare('SELECT id, vehicle_model FROM match_notifications WHERE guest_id = ?')
+                .all(guestId);
+              const updNotifStmt = db.prepare(
+                'UPDATE match_notifications SET guest_name = ?, message = ? WHERE id = ?'
+              );
+              for (const nr of notifRows) {
+                const modelLbl = String(nr.vehicle_model || 'Vehicle').trim() || 'Vehicle';
+                updNotifStmt.run(
+                  nextName,
+                  `${nextName} - Match Found - ${modelLbl}`,
+                  nr.id
+                );
+              }
+            }
+
+            const calRows = db
+              .prepare('SELECT id, title, description FROM calendar_call_events WHERE guest_id = ?')
+              .all(guestId);
+            const updCalStmt = db.prepare(
+              'UPDATE calendar_call_events SET guest_name = ?, guest_phone = ?, title = ?, description = ? WHERE id = ?'
+            );
+            for (const cr of calRows) {
+              const oldPrefix = `Call ${existing.name}`;
+              const nextTitle = String(cr.title || '').startsWith(oldPrefix)
+                ? `Call ${nextName}${String(cr.title).slice(oldPrefix.length)}`
+                : cr.title;
+              let nextDesc = String(cr.description || '');
+              if (existing.name && nextName !== existing.name) {
+                nextDesc = nextDesc.replace(
+                  `Client: ${existing.name}`,
+                  `Client: ${nextName}`
+                );
+              }
+              updCalStmt.run(nextName, nextPhone, nextTitle, nextDesc, cr.id);
+            }
+          }
+
+          db.exec('COMMIT');
+        } catch (txErr) {
+          try {
+            db.exec('ROLLBACK');
+          } catch {}
+          throw txErr;
+        }
+
+        if (hasContactEdit) {
+          recordServerBackup({
+            label: `Auto-Backup • Updated Contact (${nextName})`,
+          });
+        }
+        scheduleAutoSaveToGoogleDrive(bearerToken);
+
         const updated = db.prepare('SELECT * FROM guests WHERE id = ?').get(guestId);
-        return sendJson(res, 200, { guest: mapGuestRow(updated) });
+        return sendJson(res, 200, { ok: true, guest: mapGuestRow(updated) });
       }
 
       if (subResource === 'matches' && !subId && req.method === 'GET') {

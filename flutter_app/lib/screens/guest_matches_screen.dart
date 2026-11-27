@@ -8,6 +8,7 @@ import '../services/local_engine.dart';
 import '../services/natural_language_parser.dart';
 import '../widgets/add_vehicle_criteria_dialog.dart';
 import '../widgets/copyable_identifier_badge.dart';
+import '../widgets/edit_client_contact_dialog.dart';
 
 class GuestMatchesScreen extends StatefulWidget {
   final String guestId;
@@ -226,6 +227,27 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
     });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(res.summary)),
+    );
+  }
+
+  Future<void> _openEditContactDialog() async {
+    final g = _guest;
+    if (g == null) return;
+
+    final updatedGuest = await showDialog<GuestProfile>(
+      context: context,
+      builder: (_) => EditClientContactDialog(guest: g),
+    );
+
+    if (updatedGuest == null || !mounted) return;
+    widget.onDataChanged();
+    setState(() {
+      _guest = updatedGuest;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Updated contact info for ${updatedGuest.name}.'),
+      ),
     );
   }
 
@@ -611,6 +633,12 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
             : 'Guest Vehicle Matches'),
         actions: [
           if (_guest != null) ...[
+            IconButton(
+              key: const ValueKey('appbar_edit_contact_button'),
+              tooltip: 'Edit Client Contact Info',
+              onPressed: _openEditContactDialog,
+              icon: const Icon(Icons.contact_phone_outlined),
+            ),
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: OutlinedButton.icon(
@@ -1644,15 +1672,54 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                           ),
                           if (g.phone.isNotEmpty || g.email.isNotEmpty)
                             Padding(
-                              padding: const EdgeInsets.only(top: 2),
-                              child: Text(
-                                [
-                                  if (g.phone.isNotEmpty) g.phone,
-                                  if (g.email.isNotEmpty) g.email,
-                                ].join(' • '),
-                                style: textTheme.bodySmall?.copyWith(
-                                  color: scheme.onSurfaceVariant,
+                              padding: const EdgeInsets.only(top: 3),
+                              child: Wrap(
+                                key: const ValueKey(
+                                  'client_contact_info_summary',
                                 ),
+                                spacing: 12,
+                                runSpacing: 2,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  if (g.phone.isNotEmpty)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.phone_outlined,
+                                          size: 13,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          g.phone,
+                                          style: textTheme.bodySmall?.copyWith(
+                                            color: scheme.onSurfaceVariant,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  if (g.email.isNotEmpty)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.email_outlined,
+                                          size: 13,
+                                          color: scheme.onSurfaceVariant,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          g.email,
+                                          style: textTheme.bodySmall?.copyWith(
+                                            color: scheme.onSurfaceVariant,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
                               ),
                             ),
                         ],
@@ -1660,10 +1727,31 @@ class _GuestMatchesScreenState extends State<GuestMatchesScreen> {
                     ),
                   ],
                 ),
-                FilledButton.icon(
-                  onPressed: _searchingNow ? null : _openAddVehicleDialog,
-                  icon: const Icon(Icons.add_circle_outline, size: 18),
-                  label: const Text('Add Another Vehicle'),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      key: const ValueKey('edit_client_contact_button'),
+                      onPressed: _openEditContactDialog,
+                      icon: Icon(
+                        (g.phone.isNotEmpty || g.email.isNotEmpty)
+                            ? Icons.contact_phone_outlined
+                            : Icons.person_add_alt_1_outlined,
+                        size: 18,
+                      ),
+                      label: Text(
+                        (g.phone.isNotEmpty || g.email.isNotEmpty)
+                            ? 'Edit Contact'
+                            : 'Add Contact',
+                      ),
+                    ),
+                    FilledButton.icon(
+                      onPressed: _searchingNow ? null : _openAddVehicleDialog,
+                      icon: const Icon(Icons.add_circle_outline, size: 18),
+                      label: const Text('Add Another Vehicle'),
+                    ),
+                  ],
                 ),
               ],
             ),
